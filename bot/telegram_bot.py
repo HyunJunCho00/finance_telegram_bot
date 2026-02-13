@@ -1,0 +1,176 @@
+"""Telegram Bot interactive command handler.
+
+Commands:
+/start   - Welcome message
+/status  - Current position and latest decision
+/analyze - Run immediate analysis (BTC or ETH)
+/mode    - Show or switch trading mode
+/report  - Resend latest report
+/help    - List commands
+"""
+
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+from config.settings import settings, TradingMode
+from config.database import db
+from loguru import logger
+import json
+import os
+
+
+class TradingBot:
+    def __init__(self):
+        self.bot_token = settings.TELEGRAM_BOT_TOKEN
+        self.chat_id = settings.TELEGRAM_CHAT_ID
+
+    async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        mode = settings.trading_mode.value.upper()
+        await update.message.reply_text(
+            f"Crypto Trading Bot Active\n"
+            f"Mode: {mode}\n"
+            f"Symbols: BTC, ETH\n\n"
+            f"Commands:\n"
+            f"/status - Current position\n"
+            f"/analyze BTC - Immediate analysis\n"
+            f"/mode swing|scalp - Switch mode\n"
+            f"/report - Latest report\n"
+            f"/help - Show commands"
+        )
+
+    async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        await update.message.reply_text(
+            "/status - Current positions & latest decision\n"
+            "/analyze BTC|ETH - Run immediate analysis\n"
+            "/mode - Show current mode\n"
+            "/mode swing - Switch to swing (long-term)\n"
+            "/mode scalp - Switch to scalp (short-term)\n"
+            "/report - Resend latest report\n"
+            "/help - Show this message"
+        )
+
+    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            mode = settings.trading_mode.value.upper()
+            lines = [f"Mode: {mode}\n"]
+
+            for symbol in ['BTCUSDT', 'ETHUSDT']:
+                report = db.get_latest_report(symbol=symbol)
+                if report:
+                    fd = report.get('final_decision')
+                    if isinstance(fd, str):
+                        fd = json.loads(fd)
+
+                    decision = fd.get('decision', 'N/A') if fd else 'N/A'
+                    confidence = fd.get('confidence', 0) if fd else 0
+                    hold = fd.get('hold_duration', 'N/A') if fd else 'N/A'
+                    ts = report.get('timestamp', 'N/A')[:19]
+
+                    lines.append(
+                        f"{symbol}:\n"
+                        f"  Decision: {decision} ({confidence}%)\n"
+                        f"  Hold: {hold}\n"
+                        f"  Time: {ts}\n"
+                    )
+                else:
+                    lines.append(f"{symbol}: No report yet\n")
+
+            await update.message.reply_text('\n'.join(lines))
+        except Exception as e:
+            logger.error(f"Status command error: {e}")
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        args = context.args
+        if not args or args[0].upper() not in ['BTC', 'ETH']:
+            await update.message.reply_text("Usage: /analyze BTC or /analyze ETH")
+            return
+
+        symbol = args[0].upper() + 'USDT'
+        await update.message.reply_text(f"Running {settings.trading_mode.value.upper()} analysis for {symbol}...")
+
+        try:
+            from executors.orchestrator import orchestrator
+            result = orchestrator.run_analysis(symbol, is_emergency=False)
+            if result:
+                decision = result.get('decision', 'N/A')
+                confidence = result.get('confidence', 0)
+                await update.message.reply_text(
+                    f"Analysis complete: {decision} ({confidence}%)\n"
+                    f"Full report sent to chat."
+                )
+            else:
+                await update.message.reply_text("Analysis failed. Check logs.")
+        except Exception as e:
+            logger.error(f"Analyze command error: {e}")
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        args = context.args
+
+        if not args:
+            mode = settings.trading_mode.value
+            await update.message.reply_text(
+                f"Current mode: {mode.upper()}\n"
+                f"Candle limit: {settings.candle_limit}\n"
+                f"Chart for AI: {settings.should_use_chart}\n\n"
+                f"Switch: /mode swing or /mode scalp"
+            )
+            return
+
+        new_mode = args[0].lower().strip()
+        if new_mode not in ('swing', 'scalp'):
+            await update.message.reply_text("Invalid. Use: /mode swing or /mode scalp")
+            return
+
+        os.environ['TRADING_MODE'] = new_mode
+        from config.settings import get_settings
+        get_settings.cache_clear()
+
+        await update.message.reply_text(
+            f"Mode switched to {new_mode.upper()}\n"
+            f"Next analysis will use {new_mode} timeframes."
+        )
+
+    async def cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            for symbol in ['BTCUSDT', 'ETHUSDT']:
+                report = db.get_latest_report(symbol=symbol)
+                if report:
+                    fd = report.get('final_decision')
+                    if isinstance(fd, str):
+                        fd = json.loads(fd)
+
+                    text = (
+                        f"Latest {symbol} Report\n"
+                        f"Time: {report.get('timestamp', 'N/A')[:19]}\n"
+                        f"Decision: {fd.get('decision', 'N/A')}\n"
+                        f"Confidence: {fd.get('confidence', 0)}%\n"
+                        f"Entry: {fd.get('entry_price', 'N/A')}\n"
+                        f"SL: {fd.get('stop_loss', 'N/A')}\n"
+                        f"TP: {fd.get('take_profit', 'N/A')}\n"
+                        f"Hold: {fd.get('hold_duration', 'N/A')}\n\n"
+                        f"Reasoning: {fd.get('reasoning', 'N/A')[:500]}"
+                    )
+                    await update.message.reply_text(text)
+                else:
+                    await update.message.reply_text(f"No report for {symbol}")
+        except Exception as e:
+            logger.error(f"Report command error: {e}")
+            await update.message.reply_text(f"Error: {e}")
+
+    def run(self):
+        """Start the bot (non-blocking, runs in background thread)."""
+        app = Application.builder().token(self.bot_token).build()
+
+        app.add_handler(CommandHandler("start", self.cmd_start))
+        app.add_handler(CommandHandler("help", self.cmd_help))
+        app.add_handler(CommandHandler("status", self.cmd_status))
+        app.add_handler(CommandHandler("analyze", self.cmd_analyze))
+        app.add_handler(CommandHandler("mode", self.cmd_mode))
+        app.add_handler(CommandHandler("report", self.cmd_report))
+
+        logger.info("Telegram bot started (polling)")
+        app.run_polling(drop_pending_updates=True)
+
+
+trading_bot = TradingBot()

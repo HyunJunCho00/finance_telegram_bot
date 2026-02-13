@@ -1,0 +1,141 @@
+from typing import Dict, Optional
+from datetime import datetime, timezone
+from config.database import db
+from config.settings import settings, TradingMode
+from telegram import Bot
+from io import BytesIO
+import asyncio
+from loguru import logger
+import json
+
+
+class ReportGenerator:
+    def __init__(self):
+        self.bot_token = settings.TELEGRAM_BOT_TOKEN
+        self.chat_id = settings.TELEGRAM_CHAT_ID
+
+    def generate_report(
+        self,
+        symbol: str,
+        market_data: Dict,
+        bull_opinion: str,
+        bear_opinion: str,
+        risk_assessment: str,
+        final_decision: Dict,
+        funding_data: Dict = None,
+        mode: TradingMode = TradingMode.SWING,
+    ) -> Dict:
+        report = {
+            "symbol": symbol,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "market_data": json.dumps(market_data, default=str),
+            "bull_opinion": bull_opinion,
+            "bear_opinion": bear_opinion,
+            "risk_assessment": risk_assessment,
+            "final_decision": json.dumps(final_decision),
+            "created_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        try:
+            db.insert_ai_report(report)
+            logger.info(f"Report generated for {symbol} ({mode.value})")
+            return report
+        except Exception as e:
+            logger.error(f"Report generation error: {e}")
+            return {}
+
+    def format_telegram_message(self, report: Dict, mode: TradingMode = TradingMode.SWING) -> str:
+        decision = json.loads(report['final_decision']) if isinstance(report['final_decision'], str) else report['final_decision']
+        market_data = json.loads(report['market_data']) if isinstance(report['market_data'], str) else report['market_data']
+
+        d = decision.get('decision', 'N/A')
+        icon = {'LONG': '\U0001F7E2', 'SHORT': '\U0001F534', 'HOLD': '\U0001F7E1'}.get(d, '\u2B55')
+        mode_icon = '\U0001F4C8' if mode == TradingMode.SWING else '\u26A1'
+        mode_label = 'SWING' if mode == TradingMode.SWING else 'SCALP'
+
+        key_factors = decision.get('key_factors', [])
+        factors_text = '\n'.join([f'  \u2022 {f}' for f in key_factors[:5]]) if key_factors else '  N/A'
+
+        # Get relevant timeframe data based on mode
+        if mode == TradingMode.SWING:
+            tf_primary = market_data.get('timeframes', {}).get('4h', {})
+            tf_secondary = market_data.get('timeframes', {}).get('1d', {})
+            tf_labels = ('4H', '1D')
+        else:
+            tf_primary = market_data.get('timeframes', {}).get('5m', {})
+            tf_secondary = market_data.get('timeframes', {}).get('15m', {})
+            tf_labels = ('5M', '15M')
+
+        # Fibonacci info (swing only)
+        fib_text = ""
+        fib = market_data.get('fibonacci', {}).get('4h')
+        if fib and mode == TradingMode.SWING:
+            fib_text = f"\n<b>Fibonacci ({fib.get('trend', '?')}):</b>\n  38.2%: {fib.get('fib_382', '?')} | 50%: {fib.get('fib_500', '?')} | 61.8%: {fib.get('fib_618', '?')}\n  Nearest: {fib.get('nearest_fib', '?')}"
+
+        hold_duration = decision.get('hold_duration', 'N/A')
+
+        message = f"""{icon} <b>{mode_label} REPORT</b> {mode_icon}
+
+<b>Symbol:</b> {report['symbol']}
+<b>Time:</b> {report['timestamp'][:19]} UTC
+
+<b>DECISION: {d}</b>
+<b>Allocation:</b> {decision.get('allocation_pct', 0)}%
+<b>Leverage:</b> {decision.get('leverage', 1)}x
+<b>Confidence:</b> {decision.get('confidence', 0)}%
+<b>Hold:</b> {hold_duration}
+
+<b>Entry:</b> {decision.get('entry_price', 'N/A')}
+<b>Stop Loss:</b> {decision.get('stop_loss', 'N/A')}
+<b>Take Profit:</b> {decision.get('take_profit', 'N/A')}
+
+<b>Key Factors:</b>
+{factors_text}
+
+<b>{tf_labels[0]}:</b> RSI={tf_primary.get('rsi', '?')} MACD={tf_primary.get('macd_histogram', '?')} ADX={tf_primary.get('adx', '?')}
+<b>{tf_labels[1]}:</b> RSI={tf_secondary.get('rsi', '?')} MACD={tf_secondary.get('macd_histogram', '?')} ADX={tf_secondary.get('adx', '?')}{fib_text}
+
+<b>Reasoning:</b>
+{decision.get('reasoning', 'N/A')[:700]}"""
+
+        return message
+
+    async def send_telegram_notification(self, report: Dict, chart_bytes: Optional[bytes] = None,
+                                          mode: TradingMode = TradingMode.SWING) -> None:
+        try:
+            bot = Bot(token=self.bot_token)
+            message = self.format_telegram_message(report, mode)
+
+            if chart_bytes:
+                photo = BytesIO(chart_bytes)
+                photo.name = f"{report['symbol']}_chart.png"
+                caption = message[:1024]
+                await bot.send_photo(
+                    chat_id=self.chat_id,
+                    photo=photo,
+                    caption=caption,
+                    parse_mode='HTML'
+                )
+                if len(message) > 1024:
+                    await bot.send_message(
+                        chat_id=self.chat_id,
+                        text=message,
+                        parse_mode='HTML'
+                    )
+            else:
+                await bot.send_message(
+                    chat_id=self.chat_id,
+                    text=message,
+                    parse_mode='HTML'
+                )
+
+            logger.info("Telegram notification sent")
+        except Exception as e:
+            logger.error(f"Telegram notification error: {e}")
+
+    def notify(self, report: Dict, chart_bytes: Optional[bytes] = None,
+               mode: TradingMode = TradingMode.SWING) -> None:
+        asyncio.run(self.send_telegram_notification(report, chart_bytes, mode))
+
+
+report_generator = ReportGenerator()

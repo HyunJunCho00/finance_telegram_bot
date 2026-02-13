@@ -1,0 +1,208 @@
+============================================
+DEPLOYMENT GUIDE - Crypto Trading System
+Deploy via WSL + gcloud
+============================================
+
+COST ESTIMATE (monthly):
+- GCP e2-small VM: ~$12
+- Gemini Flash + Pro API: ~$4
+- Perplexity Search API: $5
+- Supabase: $0 (free tier, 500MB)
+- TOTAL: ~$21/month (under $30 budget)
+
+GCP $300 free credit = ~14 months free
+
+============================================
+STEP 1: GET TELEGRAM CHAT ID FOR @Joseho_bot
+============================================
+
+1. Open Telegram, search for @Joseho_bot
+2. Send any message to the bot (e.g., "/start")
+3. In browser, open:
+   https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates
+4. Find "chat":{"id":XXXXXXX} in the response
+5. That number is your TELEGRAM_CHAT_ID
+
+============================================
+STEP 2: SET UP SUPABASE DATABASE
+============================================
+
+1. Go to supabase.com, create a free project
+2. Go to SQL Editor
+3. Paste contents of sql/schema.sql and run it
+4. Note your SUPABASE_URL and SUPABASE_KEY (anon key)
+
+============================================
+STEP 3: GCP SETUP (from WSL)
+============================================
+
+# Authenticate
+gcloud auth login
+gcloud config set project YOUR_PROJECT_ID
+
+# Enable APIs
+gcloud services enable compute.googleapis.com
+gcloud services enable secretmanager.googleapis.com
+gcloud services enable aiplatform.googleapis.com
+
+# Create service account
+gcloud iam service-accounts create crypto-trading-sa \
+    --display-name="Crypto Trading Service Account"
+
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+    --member="serviceAccount:crypto-trading-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+    --role="roles/secretmanager.secretAccessor"
+
+gcloud projects add-iam-policy-binding YOUR_PROJECT_ID \
+    --member="serviceAccount:crypto-trading-sa@YOUR_PROJECT_ID.iam.gserviceaccount.com" \
+    --role="roles/aiplatform.user"
+
+============================================
+STEP 4: STORE SECRETS
+============================================
+
+# Create each secret:
+echo -n "YOUR_VALUE" | gcloud secrets create SUPABASE_URL --data-file=-
+echo -n "YOUR_VALUE" | gcloud secrets create SUPABASE_KEY --data-file=-
+echo -n "YOUR_VALUE" | gcloud secrets create BINANCE_API_KEY --data-file=-
+echo -n "YOUR_VALUE" | gcloud secrets create BINANCE_API_SECRET --data-file=-
+echo -n "YOUR_VALUE" | gcloud secrets create UPBIT_ACCESS_KEY --data-file=-
+echo -n "YOUR_VALUE" | gcloud secrets create UPBIT_SECRET_KEY --data-file=-
+echo -n "YOUR_VALUE" | gcloud secrets create TELEGRAM_API_ID --data-file=-
+echo -n "YOUR_VALUE" | gcloud secrets create TELEGRAM_API_HASH --data-file=-
+echo -n "YOUR_VALUE" | gcloud secrets create TELEGRAM_PHONE --data-file=-
+echo -n "YOUR_VALUE" | gcloud secrets create TELEGRAM_BOT_TOKEN --data-file=-
+echo -n "YOUR_VALUE" | gcloud secrets create TELEGRAM_CHAT_ID --data-file=-
+
+============================================
+STEP 5: CREATE VM
+============================================
+
+# Edit deploy/create_vm.sh - set YOUR_PROJECT_ID
+# Then from WSL:
+chmod +x deploy/create_vm.sh
+bash deploy/create_vm.sh
+
+============================================
+STEP 6: SSH AND CONFIGURE
+============================================
+
+gcloud compute ssh crypto-trading-vm --zone=us-central1-a
+
+# Check services
+sudo systemctl status scheduler.service
+sudo systemctl status mcp_server.service
+
+# View logs
+sudo journalctl -u scheduler.service -f
+
+============================================
+STEP 7: TELEGRAM SESSION (ONE-TIME)
+============================================
+
+# On VM, authenticate Telethon once:
+cd /opt/crypto_trading_system
+source venv/bin/activate
+python3 -c "
+from telethon import TelegramClient
+import asyncio
+client = TelegramClient('trading_session', YOUR_API_ID, 'YOUR_API_HASH')
+async def main():
+    await client.start(phone='YOUR_PHONE')
+    print('Session created!')
+asyncio.run(main())
+"
+# Enter verification code when prompted
+sudo systemctl restart scheduler.service
+
+============================================
+BOT COMMANDS (Telegram @Joseho_bot)
+============================================
+
+/start    - Welcome + status
+/status   - Current positions
+/analyze BTC - Immediate BTC analysis
+/analyze ETH - Immediate ETH analysis
+/mode     - Show current trading mode
+/mode swing - Switch to long-term mode
+/mode scalp - Switch to short-term mode
+/report   - Resend latest reports
+/help     - List commands
+
+============================================
+ARCHITECTURE
+============================================
+
+Every 1 minute:
+  - Collect BTC/ETH OHLCV from Binance + Upbit
+  - Collect funding rate, OI, long/short ratio
+  - Check for volatility spikes
+
+Every 4 hours:
+  - Run multi-agent analysis pipeline:
+    1. MathEngine: multi-timeframe indicators (mode-specific)
+    2. Bullish Agent (Gemini Flash): find bullish evidence
+    3. Bearish Agent (Gemini Flash): find bearish risks
+    4. Risk Agent (Gemini Flash): assess overall risk
+    5. Judge Agent (Gemini Pro + chart image): final decision
+    6. Generate and send Telegram report with chart
+
+Every 24 hours:
+  - Evaluate past decisions, generate feedback
+  - Cleanup old data (30-day retention)
+
+TRADING MODES:
+  SWING (default): 1h/4h/1d timeframes, Fibonacci, volume profile
+  SCALP: 5m/15m/1h timeframes, VWAP, Keltner, volume delta
+
+VLM COST OPTIMIZATION:
+  - Only Judge gets chart image (SWING mode only)
+  - 512x512 = ~1024 tokens per image
+  - Bull/Bear/Risk = TEXT ONLY (no images)
+  - Compact text format (40-60% fewer tokens than JSON)
+
+============================================
+LOCAL DEVELOPMENT
+============================================
+
+cd C:\newfolder_2025\finance_telegram_bot
+venv\Scripts\activate
+
+# Copy .env.example to .env, fill in values
+# Set USE_SECRET_MANAGER=false
+
+pip install -r requirements.txt
+
+# Run everything (scheduler + bot)
+python scheduler.py
+
+# Run MCP server separately
+python -m mcp_server.server
+
+============================================
+MCP SERVER
+============================================
+
+SSE transport on port 8000.
+URL: http://VM_EXTERNAL_IP:8000/sse
+
+Firewall:
+gcloud compute firewall-rules create allow-mcp \
+    --allow tcp:8000 \
+    --target-tags=crypto-trading \
+    --source-ranges=YOUR_IP/32
+
+============================================
+MONITORING
+============================================
+
+# Check data flow:
+sudo journalctl -u scheduler.service --since "5 min ago"
+
+# Check Supabase:
+# supabase.com > Table Editor > market_data
+
+# Check Telegram: @Joseho_bot
+
+# Check DB size (stay under 500MB):
+# supabase.com > Project Settings > Database > Usage

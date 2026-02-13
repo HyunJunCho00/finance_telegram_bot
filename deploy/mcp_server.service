@@ -1,0 +1,17 @@
+[Unit]
+Description=Crypto Trading MCP Server (SSE)
+After=network.target
+
+[Service]
+Type=simple
+User=crypto_trader
+WorkingDirectory=/opt/crypto_trading_system
+Environment="PYTHONUNBUFFERED=1"
+Environment="USE_SECRET_MANAGER=true"
+Environment="PROJECT_ID=your-gcp-project-id"
+ExecStart=/opt/crypto_trading_system/venv/bin/python -m mcp_server.server
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
