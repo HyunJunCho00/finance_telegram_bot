@@ -107,6 +107,26 @@ class DatabaseClient:
             data, on_conflict="timestamp,symbol"
         ).execute()
 
+
+    # ─────────────── Narrative Data ───────────────
+
+    def upsert_narrative_data(self, data: Dict) -> Dict:
+        """Upsert Perplexity/market narrative data for auditability."""
+        return self.client.table("narrative_data").upsert(
+            data, on_conflict="timestamp,symbol,source"
+        ).execute()
+
+    def get_latest_narrative_data(self, symbol: str, source: str = "perplexity") -> Optional[Dict]:
+        response = self.client.table("narrative_data")\
+            .select("*")\
+            .eq("symbol", symbol)\
+            .eq("source", source)\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+
+        return response.data[0] if response.data else None
+
     # ─────────────── AI Reports ───────────────
 
     def insert_ai_report(self, data: Dict) -> Dict:
@@ -212,6 +232,16 @@ class DatabaseClient:
                 .lt("created_at", cutoff_telegram)\
                 .execute()
             results['telegram_deleted'] = len(r.data) if r.data else 0
+
+            # Narrative data
+            cutoff_narrative = (datetime.now(timezone.utc) - timedelta(
+                days=settings.RETENTION_REPORTS_DAYS
+            )).isoformat()
+            r = self.client.table("narrative_data")\
+                .delete()\
+                .lt("timestamp", cutoff_narrative)\
+                .execute()
+            results['narrative_deleted'] = len(r.data) if r.data else 0
 
             # AI reports (90 days)
             cutoff_reports = (datetime.now(timezone.utc) - timedelta(
