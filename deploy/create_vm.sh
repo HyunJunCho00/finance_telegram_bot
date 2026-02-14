@@ -33,8 +33,8 @@ apt-get update
 apt-get install -y python3-pip python3-venv git
 
 cd /opt
-git clone https://github.com/your-repo/crypto_trading_system.git
-cd crypto_trading_system
+git clone https://github.com/<your-org>/finance_telegram_bot.git /opt/crypto_trading_system
+cd /opt/crypto_trading_system
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt

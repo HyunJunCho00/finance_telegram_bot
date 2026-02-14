@@ -3,10 +3,12 @@ __pycache__/
 *$py.class
 
 .env
-.env.example
+!.env.example
 .env.local
 *.session
 *.session-journal
+telegram_session
+telegram_session-journal
 
 *.log
 logs/

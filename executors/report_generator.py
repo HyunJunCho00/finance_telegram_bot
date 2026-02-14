@@ -5,6 +5,7 @@ from config.settings import settings, TradingMode
 from telegram import Bot
 from io import BytesIO
 import asyncio
+import threading
 from loguru import logger
 import json
 
@@ -135,7 +136,18 @@ class ReportGenerator:
 
     def notify(self, report: Dict, chart_bytes: Optional[bytes] = None,
                mode: TradingMode = TradingMode.SWING) -> None:
-        asyncio.run(self.send_telegram_notification(report, chart_bytes, mode))
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.send_telegram_notification(report, chart_bytes, mode))
+            return
+
+        # If called from an async context (e.g. Telegram command handler),
+        # run notification in a separate thread with its own event loop.
+        threading.Thread(
+            target=lambda: asyncio.run(self.send_telegram_notification(report, chart_bytes, mode)),
+            daemon=True,
+        ).start()
 
 
 report_generator = ReportGenerator()
