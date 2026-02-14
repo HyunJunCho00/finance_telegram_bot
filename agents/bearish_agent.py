@@ -71,6 +71,7 @@ Provide your bearish analysis."""
                 temperature=0.5,
                 max_tokens=2000,
                 chart_image_b64=None,  # Never send image - cost optimization
+                role="bearish",
             )
             logger.info("Bearish agent analysis completed")
             return response

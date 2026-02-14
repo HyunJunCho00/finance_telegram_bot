@@ -39,7 +39,9 @@ class PerplexityCollector:
         """
         if not self.api_key:
             logger.warning("PERPLEXITY_API_KEY not set, skipping narrative search")
-            return self._empty_result(symbol)
+            result = self._empty_result(symbol)
+            self.persist_narrative(result, symbol)
+            return result
 
         coin_name = "Bitcoin" if symbol.upper().startswith("BTC") else "Ethereum"
 

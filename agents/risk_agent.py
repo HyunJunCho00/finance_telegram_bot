@@ -90,6 +90,7 @@ Provide your risk assessment."""
                 user_message=user_message,
                 temperature=0.3,
                 max_tokens=2000,
+                role="risk",
             )
             logger.info("Risk agent analysis completed")
             return response

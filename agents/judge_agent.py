@@ -163,6 +163,7 @@ Make your trading decision. Output as JSON."""
                 max_tokens=3000,
                 chart_image_b64=chart_image_b64,
                 use_premium=True,
+                role="judge",
             )
 
             decision = self._parse_decision(response)

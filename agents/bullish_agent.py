@@ -69,6 +69,7 @@ Provide your bullish analysis."""
                 temperature=0.5,
                 max_tokens=2000,
                 chart_image_b64=None,  # Never send image - cost optimization
+                role="bullish",
             )
             logger.info("Bullish agent analysis completed")
             return response

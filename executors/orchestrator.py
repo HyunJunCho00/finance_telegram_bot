@@ -108,11 +108,12 @@ def node_collect_data(state: AnalysisState) -> dict:
 def node_perplexity_search(state: AnalysisState) -> dict:
     """Search Perplexity for market narrative."""
     symbol = state["symbol"]
-    coin = "BTC" if "BTC" in symbol else "ETH"
+    asset = "BTC" if "BTC" in symbol else "ETH"
     try:
-        narrative = perplexity_collector.search_market_narrative(coin)
+        # Save with full trading symbol (e.g., BTCUSDT) for DB/report traceability
+        narrative = perplexity_collector.search_market_narrative(symbol)
         narrative_text = perplexity_collector.format_for_agents(narrative)
-        logger.info(f"Narrative for {coin}: {narrative.get('sentiment', '?')}")
+        logger.info(f"Narrative for {asset}: {narrative.get('sentiment', '?')}")
         return {"narrative_text": narrative_text}
     except Exception as e:
         logger.error(f"Perplexity error: {e}")
