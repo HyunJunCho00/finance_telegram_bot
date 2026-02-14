@@ -67,6 +67,28 @@ CREATE TABLE IF NOT EXISTS telegram_messages (
 CREATE INDEX idx_telegram_messages_created_at ON telegram_messages(created_at DESC);
 CREATE INDEX idx_telegram_messages_channel ON telegram_messages(channel);
 
+CREATE TABLE IF NOT EXISTS narrative_data (
+    id BIGSERIAL PRIMARY KEY,
+    timestamp TIMESTAMPTZ NOT NULL,
+    symbol VARCHAR(20) NOT NULL,
+    source VARCHAR(30) NOT NULL DEFAULT 'perplexity',
+    status VARCHAR(20) DEFAULT 'unknown',
+    sentiment VARCHAR(20) DEFAULT 'neutral',
+    summary TEXT,
+    reasoning TEXT,
+    key_events JSONB,
+    bullish_factors JSONB,
+    bearish_factors JSONB,
+    macro_context TEXT,
+    sources JSONB,
+    raw_payload JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(timestamp, symbol, source)
+);
+
+CREATE INDEX idx_narrative_data_symbol_timestamp ON narrative_data(symbol, timestamp DESC);
+CREATE INDEX idx_narrative_data_created_at ON narrative_data(created_at DESC);
+
 CREATE TABLE IF NOT EXISTS ai_reports (
     id BIGSERIAL PRIMARY KEY,
     symbol VARCHAR(20) NOT NULL,

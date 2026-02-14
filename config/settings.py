@@ -50,6 +50,23 @@ class Settings(BaseSettings):
     # Judge: Claude Opus 4.6 via Vertex AI Model Garden
     MODEL_ENDPOINT: str = "gemini-2.0-flash-001"
 
+
+    # ===== Role-based model routing (2026 ops tuning) =====
+    MODEL_BULLISH: str = "gemini-2.5-flash"
+    MODEL_BEARISH: str = "gemini-2.5-flash"
+    MODEL_RISK: str = "gemini-2.5-pro"
+    MODEL_JUDGE: str = "claude-opus-4-20250918"
+    MODEL_SELF_CORRECTION: str = "gemini-2.5-pro"
+    MODEL_RAG_EXTRACTION: str = "gemini-2.5-flash"
+
+    # Soft input caps (character-based) to improve token efficiency
+    MAX_INPUT_CHARS_BULLISH: int = 12000
+    MAX_INPUT_CHARS_BEARISH: int = 12000
+    MAX_INPUT_CHARS_RISK: int = 14000
+    MAX_INPUT_CHARS_JUDGE: int = 18000
+    MAX_INPUT_CHARS_SELF_CORRECTION: int = 10000
+    MAX_INPUT_CHARS_RAG_EXTRACTION: int = 5000
+
     # ===== Trading Mode =====
     # "swing" = long-term position trading (default, your preference)
     # "scalp" = short-term day trading
