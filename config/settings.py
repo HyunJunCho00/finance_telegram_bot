@@ -42,6 +42,19 @@ class Settings(BaseSettings):
     MILVUS_URI: str = ""  # e.g. https://in03-xxxxxx.api.gcp-us-west1.zillizcloud.com
     MILVUS_TOKEN: str = ""
 
+    # Optional low-cost long-term archive on GCS
+    ENABLE_GCS_ARCHIVE: bool = False
+    GCS_ARCHIVE_BUCKET: str = ""
+
+
+    # ===== Paper trading / sandbox safety =====
+    PAPER_TRADING_MODE: bool = True  # default safe mode (no real orders)
+    PAPER_TRADING_PRICE_SOURCE: str = "ticker"  # ticker | last_report
+    BINANCE_USE_TESTNET: bool = False
+    UPBIT_PAPER_ONLY: bool = True
+    COINBASE_API_KEY: str = ""
+    COINBASE_API_SECRET: str = ""
+
     VOLATILITY_THRESHOLD: float = 3.0
     ANALYSIS_INTERVAL_HOURS: int = 4
 
@@ -138,6 +151,8 @@ class SecretManager:
             "BINANCE_API_SECRET",
             "UPBIT_ACCESS_KEY",
             "UPBIT_SECRET_KEY",
+            "COINBASE_API_KEY",
+            "COINBASE_API_SECRET",
             "TELEGRAM_API_ID",
             "TELEGRAM_API_HASH",
             "TELEGRAM_PHONE",
@@ -148,6 +163,7 @@ class SecretManager:
             "NEO4J_PASSWORD",
             "MILVUS_URI",
             "MILVUS_TOKEN",
+            "GCS_ARCHIVE_BUCKET",
         ]
 
         for name in secret_names:

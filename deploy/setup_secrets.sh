@@ -25,6 +25,9 @@ echo -n "+1234567890" | gcloud secrets create TELEGRAM_PHONE --data-file=- --rep
 echo -n "your-bot-token" | gcloud secrets create TELEGRAM_BOT_TOKEN --data-file=- --replication-policy="automatic"
 echo -n "your-chat-id" | gcloud secrets create TELEGRAM_CHAT_ID --data-file=- --replication-policy="automatic"
 
+# Optional: GCS bucket for long-term JSONL archives
+echo -n "your-gcs-archive-bucket" | gcloud secrets create GCS_ARCHIVE_BUCKET --data-file=- --replication-policy="automatic"
+
 echo "Creating service account..."
 
 gcloud iam service-accounts create crypto-trading-sa \
