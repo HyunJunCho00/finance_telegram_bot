@@ -1,6 +1,17 @@
+"""Funding & Global OI collector.
+
+Collects from 3 major exchanges (Binance, Bybit, OKX) via ccxt:
+- Funding rates (Binance primary)
+- Global Open Interest = sum of Binance + Bybit + OKX OI in USD
+- Long/Short ratio (Binance)
+
+Global OI eliminates single-exchange noise and measures total market energy.
+OI-price divergence is a key professional signal.
+"""
+
 import ccxt
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 from config.settings import settings
 from config.database import db
 from loguru import logger
@@ -15,8 +26,26 @@ class FundingCollector:
             'options': {'defaultType': 'future'}
         })
 
+        # Bybit and OKX - public API only (no keys needed for OI)
+        self.bybit = ccxt.bybit({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'swap'}
+        })
+
+        self.okx = ccxt.okx({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'swap'}
+        })
+
         # BTC and ETH only
         self.symbols = ['BTC/USDT', 'ETH/USDT']
+
+        # Symbol mappings per exchange
+        self._symbol_map = {
+            'binance': {'BTC/USDT': 'BTC/USDT', 'ETH/USDT': 'ETH/USDT'},
+            'bybit': {'BTC/USDT': 'BTC/USDT:USDT', 'ETH/USDT': 'ETH/USDT:USDT'},
+            'okx': {'BTC/USDT': 'BTC/USDT:USDT', 'ETH/USDT': 'ETH/USDT:USDT'},
+        }
 
     def fetch_funding_rate(self, symbol: str) -> Dict:
         try:
@@ -31,23 +60,71 @@ class FundingCollector:
             logger.error(f"Funding rate fetch error for {symbol}: {e}")
             return {}
 
-    def fetch_open_interest(self, symbol: str) -> Dict:
+    def _fetch_oi_single(self, exchange, exchange_name: str, symbol: str) -> Optional[float]:
+        """Fetch OI from a single exchange in USD value."""
         try:
-            binance_symbol = symbol.replace('/', '')
-            response = self.binance.fapiPublicGetOpenInterest({'symbol': binance_symbol})
-            oi_amount = float(response.get('openInterest', 0))
+            mapped = self._symbol_map.get(exchange_name, {}).get(symbol)
+            if not mapped:
+                return None
 
-            ticker = self.binance.fetch_ticker(symbol)
-            last_price = float(ticker.get('last', 0) or 0)
-            oi_value = oi_amount * last_price
+            if exchange_name == 'binance':
+                binance_sym = symbol.replace('/', '')
+                response = self.binance.fapiPublicGetOpenInterest({'symbol': binance_sym})
+                oi_amount = float(response.get('openInterest', 0))
+                ticker = self.binance.fetch_ticker(symbol)
+                last_price = float(ticker.get('last', 0) or 0)
+                return oi_amount * last_price
 
-            return {
-                'open_interest': oi_amount,
-                'open_interest_value': oi_value,
-            }
+            elif exchange_name == 'bybit':
+                # Bybit uses fetch_open_interest
+                response = exchange.fetch_open_interest(mapped)
+                if response and hasattr(response, 'openInterestValue'):
+                    return float(response.openInterestValue or 0)
+                elif isinstance(response, dict):
+                    oi_val = response.get('openInterestValue') or response.get('info', {}).get('openInterestValue', 0)
+                    return float(oi_val)
+                return None
+
+            elif exchange_name == 'okx':
+                response = exchange.fetch_open_interest(mapped)
+                if response and hasattr(response, 'openInterestValue'):
+                    return float(response.openInterestValue or 0)
+                elif isinstance(response, dict):
+                    oi_val = response.get('openInterestValue') or response.get('info', {}).get('openInterestValue', 0)
+                    return float(oi_val)
+                return None
+
         except Exception as e:
-            logger.error(f"Open interest fetch error for {symbol}: {e}")
-            return {}
+            logger.warning(f"OI fetch error ({exchange_name}, {symbol}): {e}")
+            return None
+
+    def fetch_global_open_interest(self, symbol: str) -> Dict:
+        """Fetch OI from Binance + Bybit + OKX and sum in USD.
+
+        Global OI = Binance_OI + Bybit_OI + OKX_OI (all in USD value)
+        Eliminates single-exchange noise.
+        """
+        oi_breakdown = {}
+        total_oi = 0.0
+
+        exchanges = [
+            (self.binance, 'binance'),
+            (self.bybit, 'bybit'),
+            (self.okx, 'okx'),
+        ]
+
+        for exchange, name in exchanges:
+            oi_value = self._fetch_oi_single(exchange, name, symbol)
+            if oi_value is not None and oi_value > 0:
+                oi_breakdown[f'oi_{name}'] = round(oi_value, 2)
+                total_oi += oi_value
+
+        return {
+            'open_interest_global': round(total_oi, 2),
+            'open_interest_binance': oi_breakdown.get('oi_binance', 0),
+            'open_interest_bybit': oi_breakdown.get('oi_bybit', 0),
+            'open_interest_okx': oi_breakdown.get('oi_okx', 0),
+        }
 
     def fetch_long_short_ratio(self, symbol: str) -> Dict:
         try:
@@ -74,17 +151,20 @@ class FundingCollector:
 
         for symbol in self.symbols:
             funding = self.fetch_funding_rate(symbol)
-            oi = self.fetch_open_interest(symbol)
+            global_oi = self.fetch_global_open_interest(symbol)
             ls_ratio = self.fetch_long_short_ratio(symbol)
 
-            if funding or oi:
+            if funding or global_oi:
                 combined = {
                     'symbol': symbol.replace('/', ''),
                     'timestamp': now,
                     'funding_rate': funding.get('funding_rate', 0),
                     'next_funding_time': funding.get('next_funding_time'),
-                    'open_interest': oi.get('open_interest', 0),
-                    'open_interest_value': oi.get('open_interest_value', 0),
+                    'open_interest': global_oi.get('open_interest_binance', 0),
+                    'open_interest_value': global_oi.get('open_interest_global', 0),
+                    'oi_binance': global_oi.get('open_interest_binance', 0),
+                    'oi_bybit': global_oi.get('open_interest_bybit', 0),
+                    'oi_okx': global_oi.get('open_interest_okx', 0),
                     **ls_ratio,
                 }
                 results.append(combined)
@@ -96,7 +176,7 @@ class FundingCollector:
             try:
                 for record in data:
                     db.upsert_funding_data(record)
-                logger.info(f"Saved {len(data)} funding data records")
+                logger.info(f"Saved {len(data)} funding data records (global OI)")
             except Exception as e:
                 logger.error(f"Database save error: {e}")
 

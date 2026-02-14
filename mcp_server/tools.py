@@ -5,6 +5,7 @@ from processors.math_engine import math_engine
 from processors.chart_generator import chart_generator
 from loguru import logger
 import os
+import json
 
 
 class MCPTools:
@@ -60,6 +61,91 @@ class MCPTools:
             return {"error": "No funding data available"}
         except Exception as e:
             logger.error(f"Funding data error: {e}")
+            return {"error": str(e)}
+
+    def get_global_oi(self, symbol: str) -> Dict:
+        """Get Global Open Interest breakdown from 3 exchanges."""
+        try:
+            response = db.client.table("funding_data")\
+                .select("timestamp,symbol,open_interest_value,oi_binance,oi_bybit,oi_okx")\
+                .eq("symbol", symbol)\
+                .order("timestamp", desc=True)\
+                .limit(1)\
+                .execute()
+
+            if response.data:
+                raw = response.data[0]
+                return {
+                    "symbol": symbol,
+                    "global_oi_usd": raw.get("open_interest_value", 0),
+                    "binance": raw.get("oi_binance", 0),
+                    "bybit": raw.get("oi_bybit", 0),
+                    "okx": raw.get("oi_okx", 0),
+                    "timestamp": raw.get("timestamp", ""),
+                }
+            return {"error": "No OI data available"}
+        except Exception as e:
+            logger.error(f"Global OI error: {e}")
+            return {"error": str(e)}
+
+    def get_cvd_data(self, symbol: str, limit: int = 240) -> Dict:
+        """Get CVD (Cumulative Volume Delta) data."""
+        try:
+            cvd_df = db.get_cvd_data(symbol, limit=limit)
+            if cvd_df.empty:
+                return {"error": "No CVD data available"}
+
+            total_delta = float(cvd_df['volume_delta'].sum())
+            recent_delta = float(cvd_df.tail(60)['volume_delta'].sum())
+            cvd_final = float(cvd_df['cvd'].iloc[-1])
+
+            return {
+                "symbol": symbol,
+                "period_minutes": limit,
+                "total_delta": round(total_delta, 4),
+                "total_direction": "BUYING" if total_delta > 0 else "SELLING",
+                "recent_1h_delta": round(recent_delta, 4),
+                "recent_direction": "BUYING" if recent_delta > 0 else "SELLING",
+                "cvd_cumulative": round(cvd_final, 4),
+                "data_points": len(cvd_df),
+            }
+        except Exception as e:
+            logger.error(f"CVD data error: {e}")
+            return {"error": str(e)}
+
+    def search_market_narrative(self, symbol: str) -> Dict:
+        """Search market narrative via Perplexity API."""
+        try:
+            from collectors.perplexity_collector import perplexity_collector
+            coin = "BTC" if "BTC" in symbol.upper() else "ETH"
+            narrative = perplexity_collector.search_market_narrative(coin)
+            formatted = perplexity_collector.format_for_agents(narrative)
+            return {
+                "symbol": symbol,
+                "narrative": formatted,
+                "sentiment": narrative.get("sentiment", "neutral"),
+                "raw": {k: v for k, v in narrative.items() if k != "sources"},
+            }
+        except Exception as e:
+            logger.error(f"Perplexity search error: {e}")
+            return {"error": str(e)}
+
+    def query_rag(self, query: str, mode: str = "hybrid") -> Dict:
+        """Query LightRAG knowledge graph + vector search."""
+        try:
+            from processors.light_rag import light_rag
+            result = light_rag.query(query, mode=mode)
+            formatted = light_rag.format_context_for_agents(result, max_length=2000)
+            stats = light_rag.get_stats()
+            return {
+                "query": query,
+                "mode": mode,
+                "context": formatted,
+                "entities_found": result.get("entities_found", []),
+                "stats": stats,
+            }
+        except Exception as e:
+            logger.error(f"RAG query error: {e}")
             return {"error": str(e)}
 
     def get_latest_report(self) -> Dict:
@@ -122,9 +208,7 @@ class MCPTools:
             if mode_lower not in ('swing', 'scalp'):
                 return {"error": f"Invalid mode '{mode}'. Use 'swing' or 'scalp'."}
 
-            # Update environment variable (affects settings on next access)
             os.environ['TRADING_MODE'] = mode_lower
-            # Clear settings cache to pick up new mode
             from config.settings import get_settings
             get_settings.cache_clear()
 
@@ -137,6 +221,31 @@ class MCPTools:
             }
         except Exception as e:
             logger.error(f"Mode switch error: {e}")
+            return {"error": str(e)}
+
+    def get_feedback_history(self, limit: int = 5) -> Dict:
+        """Get past trading mistakes and lessons learned."""
+        try:
+            feedback = db.get_feedback_history(limit=limit)
+            if not feedback:
+                return {"message": "No feedback history yet", "entries": []}
+            return {
+                "entries": [
+                    {
+                        "symbol": f.get("symbol"),
+                        "predicted": f.get("predicted_direction"),
+                        "actual": f.get("actual_direction"),
+                        "change_pct": f.get("actual_change_pct"),
+                        "mistake": f.get("mistake_summary", "")[:200],
+                        "lesson": f.get("lesson_learned", "")[:200],
+                        "date": f.get("created_at", "")[:19],
+                    }
+                    for f in feedback
+                ],
+                "count": len(feedback),
+            }
+        except Exception as e:
+            logger.error(f"Feedback history error: {e}")
             return {"error": str(e)}
 
 

@@ -18,7 +18,9 @@ Your job (using YOUR OWN expertise):
 - Consider fractional Kelly criterion principles for position sizing
   (if your edge seems weak, recommend smaller size; if strong, up to 10-25% of Kelly)
 - Evaluate funding rate carry cost impact on hold duration
-- Check if OI levels suggest liquidation cascade risk
+- Check Global OI (3 exchanges) for liquidation cascade risk
+- Analyze CVD for hidden distribution/accumulation divergence
+- Consider Perplexity narrative for macro risk factors
 - Review past trading mistakes to avoid repeating them
 - Identify what could go wrong with BOTH the bull and bear scenarios
 - Recommend maximum leverage (1-3x for swing) and position size limits
@@ -37,7 +39,7 @@ Your job (using YOUR OWN expertise):
 - Daily loss limit awareness
 - Factor in transaction costs and slippage on tight timeframes
 - Check funding rate direction for carry cost/benefit
-- Assess liquidation proximity risk from recent OI data
+- Assess liquidation proximity risk from Global OI (3 exchanges) + CVD
 - Review past mistakes
 
 Scalping has DIFFERENT risk rules than swing trading. Tight stops, small size, high frequency.

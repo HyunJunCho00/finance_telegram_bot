@@ -16,6 +16,22 @@ CREATE INDEX idx_market_data_symbol_timestamp ON market_data(symbol, timestamp D
 CREATE INDEX idx_market_data_timestamp ON market_data(timestamp DESC);
 CREATE INDEX idx_market_data_exchange ON market_data(exchange, symbol, timestamp DESC);
 
+-- CVD (Cumulative Volume Delta) data from Binance Futures
+-- Taker Buy/Sell volume breakdown for whale activity detection
+CREATE TABLE IF NOT EXISTS cvd_data (
+    id BIGSERIAL PRIMARY KEY,
+    timestamp TIMESTAMPTZ NOT NULL,
+    symbol VARCHAR(20) NOT NULL,
+    taker_buy_volume DECIMAL(20, 8) NOT NULL DEFAULT 0,
+    taker_sell_volume DECIMAL(20, 8) NOT NULL DEFAULT 0,
+    volume_delta DECIMAL(20, 8) NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(timestamp, symbol)
+);
+
+CREATE INDEX idx_cvd_data_symbol_timestamp ON cvd_data(symbol, timestamp DESC);
+
+-- Funding data with Global OI (Binance + Bybit + OKX)
 CREATE TABLE IF NOT EXISTS funding_data (
     id BIGSERIAL PRIMARY KEY,
     timestamp TIMESTAMPTZ NOT NULL,
@@ -24,6 +40,9 @@ CREATE TABLE IF NOT EXISTS funding_data (
     next_funding_time BIGINT,
     open_interest DECIMAL(20, 8),
     open_interest_value DECIMAL(20, 2),
+    oi_binance DECIMAL(20, 2) DEFAULT 0,
+    oi_bybit DECIMAL(20, 2) DEFAULT 0,
+    oi_okx DECIMAL(20, 2) DEFAULT 0,
     long_short_ratio DECIMAL(10, 4),
     long_account DECIMAL(10, 4),
     short_account DECIMAL(10, 4),
@@ -94,3 +113,9 @@ CREATE TABLE IF NOT EXISTS trade_executions (
 
 CREATE INDEX idx_trade_executions_symbol ON trade_executions(symbol);
 CREATE INDEX idx_trade_executions_created_at ON trade_executions(created_at DESC);
+
+-- Migration for existing funding_data tables (add global OI columns)
+-- Run these only if upgrading from older schema:
+-- ALTER TABLE funding_data ADD COLUMN IF NOT EXISTS oi_binance DECIMAL(20, 2) DEFAULT 0;
+-- ALTER TABLE funding_data ADD COLUMN IF NOT EXISTS oi_bybit DECIMAL(20, 2) DEFAULT 0;
+-- ALTER TABLE funding_data ADD COLUMN IF NOT EXISTS oi_okx DECIMAL(20, 2) DEFAULT 0;

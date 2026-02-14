@@ -17,6 +17,11 @@ You receive raw market data across 1h, 4h, and 1d timeframes. Your job:
 - Look at OBV and CMF for accumulation signals
 - Check if price is near diagonal support or volume profile POC
 - Assess RSI divergences across timeframes
+- Analyze CVD (Cumulative Volume Delta) for hidden accumulation
+  - Rising CVD + flat price = whale accumulation (bullish)
+- Check Global OI breakdown (Binance+Bybit+OKX) for positioning
+- Use Perplexity market narrative for macro context
+- Use RAG relationship context for connected events
 - Consider news sentiment impact over days/weeks
 
 You are a FACT INTERPRETER. We give you numbers, you give us your honest analysis.
@@ -28,9 +33,12 @@ You receive raw market data across 1m, 5m, 15m, and 1h timeframes. Your job:
 - Find quick bullish setups using YOUR OWN expertise
 - Check VWAP and Keltner Channel positions for mean-reversion entries
 - Evaluate volume delta proxy for buying pressure
+- Analyze CVD data for real-time accumulation signals
 - Look at Stochastic and RSI on 5m/15m for oversold bounces
 - Check funding rate for carry cost/benefit direction
+- Check Global OI for overall market positioning
 - Assess immediate support levels on 15m
+- Use market narrative for any imminent catalysts
 
 You are a FACT INTERPRETER. We give you numbers, you give us your honest analysis.
 If there is no short-term bullish setup, say so clearly. Be specific with price levels and timeframes."""
@@ -49,7 +57,7 @@ If there is no short-term bullish setup, say so clearly. Be specific with price 
 Derivatives Context:
 {funding_context}
 
-Recent News:
+Context & News:
 {news_summary}
 
 Provide your bullish analysis."""

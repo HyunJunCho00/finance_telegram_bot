@@ -31,11 +31,23 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
 
+    # Perplexity API for market narrative search
+    PERPLEXITY_API_KEY: str = ""
+
+    # Neo4j Aura Free (Knowledge Graph)
+    NEO4J_URI: str = ""  # e.g. neo4j+s://xxxxxx.databases.neo4j.io
+    NEO4J_PASSWORD: str = ""
+
+    # Zilliz Cloud Free (Milvus vector DB)
+    MILVUS_URI: str = ""  # e.g. https://in03-xxxxxx.api.gcp-us-west1.zillizcloud.com
+    MILVUS_TOKEN: str = ""
+
     VOLATILITY_THRESHOLD: float = 3.0
     ANALYSIS_INTERVAL_HOURS: int = 4
 
-    # Model IDs are configured in agents/claude_client.py
-    # Default: Gemini Flash (agents) + Gemini Pro (judge)
+    # ===== AI Models =====
+    # Agents (bull/bear/risk): Gemini 2.0 Flash via Vertex AI
+    # Judge: Claude Opus 4.6 via Vertex AI Model Garden
     MODEL_ENDPOINT: str = "gemini-2.0-flash-001"
 
     # ===== Trading Mode =====
@@ -58,6 +70,15 @@ class Settings(BaseSettings):
     # SCALP: 720 candles (12h of 1m) for fast 5m/15m/1h analysis
     SWING_CANDLE_LIMIT: int = 4320
     SCALP_CANDLE_LIMIT: int = 720
+
+    # ===== Data Retention (days) =====
+    # PostgreSQL(Supabase): 시계열 데이터만 보존 (30일)
+    # Neo4j/Milvus: 뉴스/그래프 데이터 영구 보존 (cleanup 없음)
+    RETENTION_MARKET_DATA_DAYS: int = 30
+    RETENTION_TELEGRAM_DAYS: int = 90  # 원본 텍스트 (Neo4j/Milvus에도 저장됨)
+    RETENTION_REPORTS_DAYS: int = 365  # AI 리포트 영구에 가깝게
+    RETENTION_CVD_DAYS: int = 30
+    RETENTION_GRAPH_DAYS: int = 0  # 0 = 영구 보존 (Neo4j Aura free: 200K nodes)
 
     class Config:
         env_file = ".env"
@@ -104,7 +125,12 @@ class SecretManager:
             "TELEGRAM_API_HASH",
             "TELEGRAM_PHONE",
             "TELEGRAM_BOT_TOKEN",
-            "TELEGRAM_CHAT_ID"
+            "TELEGRAM_CHAT_ID",
+            "PERPLEXITY_API_KEY",
+            "NEO4J_URI",
+            "NEO4J_PASSWORD",
+            "MILVUS_URI",
+            "MILVUS_TOKEN",
         ]
 
         for name in secret_names:

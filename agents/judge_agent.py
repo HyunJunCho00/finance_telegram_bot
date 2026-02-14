@@ -16,10 +16,12 @@ class JudgeAgent:
 You receive ALL available data:
 1. Multi-timeframe indicators (1h, 4h, 1d) with Fibonacci levels
 2. Structural analysis (support/resistance, divergences, volume profile)
-3. Funding rate context (extreme levels = contrarian signals for pros)
-4. Bull analyst argument, Bear analyst argument, Risk manager assessment
-5. Your previous decision (maintain consistency unless data clearly changed)
-6. Chart image (if provided - use for visual pattern confirmation)
+3. Funding rate + Global OI (Binance+Bybit+OKX) + CVD (volume delta)
+4. Perplexity market narrative (WHY price is moving)
+5. LightRAG relationship context (connected events and entities)
+6. Bull analyst argument, Bear analyst argument, Risk manager assessment
+7. Your previous decision (maintain consistency unless data clearly changed)
+8. Chart image (if provided - use for visual pattern confirmation)
 
 YOUR JOB: Make a FINAL trading decision using YOUR OWN judgment.
 
@@ -29,6 +31,9 @@ Professional swing trading principles you should consider:
 - Extreme funding rates are contrarian signals (high positive = potential top)
 - OI-price divergence warns of fragile moves (rising OI + flat price = danger)
 - Volume profile POC acts as price magnet
+- CVD divergence: rising CVD + flat price = accumulation; falling CVD + rising price = distribution
+- Global OI: sum across 3 exchanges eliminates single-exchange noise
+- Market narrative from Perplexity provides the "WHY" behind moves
 - Position sizing: 10-25% of Kelly criterion (conservative)
 - Leverage: 1-3x maximum for swing trades
 - Hold period: days to weeks
@@ -55,9 +60,10 @@ Be aware of your previous decision for consistency."""
 You receive ALL available data:
 1. Multi-timeframe indicators (1m, 5m, 15m, 1h)
 2. Scalp-specific data (Keltner, VWAP, volume delta, fast stochastic)
-3. Funding rate context (carry cost direction matters for scalps)
-4. Bull/Bear/Risk analyst arguments
-5. Your previous decision
+3. Funding rate + Global OI (3 exchanges) + CVD (real-time flow)
+4. Market narrative (Perplexity) + RAG relationship context
+5. Bull/Bear/Risk analyst arguments
+6. Your previous decision
 
 YOUR JOB: Make a FINAL short-term trading decision using YOUR OWN judgment.
 
@@ -112,6 +118,7 @@ You have FULL AUTONOMY. Move fast but be precise."""
         funding_context: str,
         chart_image_b64: Optional[str] = None,
         mode: TradingMode = TradingMode.SWING,
+        feedback_text: str = "",
     ) -> Dict:
         prompt = self.SWING_PROMPT if mode == TradingMode.SWING else self.SCALP_PROMPT
         previous_decision = self.get_previous_decision()
@@ -142,6 +149,7 @@ RISK MANAGER:
 {risk_assessment}
 
 {previous_context}
+{feedback_text}
 
 Make your trading decision. Output as JSON."""
 

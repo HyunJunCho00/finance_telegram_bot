@@ -39,6 +39,32 @@ class DatabaseClient:
             return df.sort_values('timestamp').reset_index(drop=True)
         return pd.DataFrame()
 
+    # ─────────────── CVD Data ───────────────
+
+    def batch_upsert_cvd_data(self, data_list: List[Dict]) -> Dict:
+        """Upsert CVD (volume delta) data."""
+        return self.client.table("cvd_data").upsert(
+            data_list, on_conflict="timestamp,symbol"
+        ).execute()
+
+    def get_cvd_data(self, symbol: str, limit: int = 240) -> pd.DataFrame:
+        """Get recent CVD data for a symbol. Default 240 = 4 hours of 1m data."""
+        response = self.client.table("cvd_data")\
+            .select("*")\
+            .eq("symbol", symbol)\
+            .order("timestamp", desc=True)\
+            .limit(limit)\
+            .execute()
+
+        if response.data:
+            df = pd.DataFrame(response.data)
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+            df = df.sort_values('timestamp').reset_index(drop=True)
+            # Calculate cumulative volume delta
+            df['cvd'] = df['volume_delta'].cumsum()
+            return df
+        return pd.DataFrame()
+
     # ─────────────── Telegram Messages ───────────────
 
     def upsert_telegram_message(self, data: Dict) -> Dict:
@@ -57,6 +83,18 @@ class DatabaseClient:
             .select("*")\
             .gte("created_at", cutoff)\
             .order("created_at", desc=True)\
+            .execute()
+
+        return response.data if response.data else []
+
+    def get_telegram_messages_for_rag(self, days: int = 7) -> List[Dict]:
+        """Get telegram messages for LightRAG ingestion."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        response = self.client.table("telegram_messages")\
+            .select("*")\
+            .gte("created_at", cutoff)\
+            .order("created_at", desc=True)\
+            .limit(1000)\
             .execute()
 
         return response.data if response.data else []
@@ -132,19 +170,31 @@ class DatabaseClient:
 
     # ─────────────── Data Cleanup (500MB free tier) ───────────────
 
-    def cleanup_old_data(self, days: int = 30) -> Dict:
-        """Delete data older than N days to stay within Supabase 500MB free tier.
-        Called daily by the scheduler."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    def cleanup_old_data(self) -> Dict:
+        """Delete data older than configured retention days.
+        Uses settings for retention periods. Called daily by the scheduler."""
         results = {}
 
         try:
-            # Market data (biggest table - 1min candles)
+            # Market data
+            cutoff = (datetime.now(timezone.utc) - timedelta(
+                days=settings.RETENTION_MARKET_DATA_DAYS
+            )).isoformat()
             r = self.client.table("market_data")\
                 .delete()\
                 .lt("timestamp", cutoff)\
                 .execute()
             results['market_data_deleted'] = len(r.data) if r.data else 0
+
+            # CVD data
+            cutoff_cvd = (datetime.now(timezone.utc) - timedelta(
+                days=settings.RETENTION_CVD_DAYS
+            )).isoformat()
+            r = self.client.table("cvd_data")\
+                .delete()\
+                .lt("timestamp", cutoff_cvd)\
+                .execute()
+            results['cvd_data_deleted'] = len(r.data) if r.data else 0
 
             # Funding data
             r = self.client.table("funding_data")\
@@ -153,19 +203,23 @@ class DatabaseClient:
                 .execute()
             results['funding_data_deleted'] = len(r.data) if r.data else 0
 
-            # Telegram messages (keep 7 days only)
-            cutoff_7d = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            # Telegram messages (30 days for LightRAG)
+            cutoff_telegram = (datetime.now(timezone.utc) - timedelta(
+                days=settings.RETENTION_TELEGRAM_DAYS
+            )).isoformat()
             r = self.client.table("telegram_messages")\
                 .delete()\
-                .lt("created_at", cutoff_7d)\
+                .lt("created_at", cutoff_telegram)\
                 .execute()
             results['telegram_deleted'] = len(r.data) if r.data else 0
 
-            # AI reports (keep 90 days)
-            cutoff_90d = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+            # AI reports (90 days)
+            cutoff_reports = (datetime.now(timezone.utc) - timedelta(
+                days=settings.RETENTION_REPORTS_DAYS
+            )).isoformat()
             r = self.client.table("ai_reports")\
                 .delete()\
-                .lt("created_at", cutoff_90d)\
+                .lt("created_at", cutoff_reports)\
                 .execute()
             results['reports_deleted'] = len(r.data) if r.data else 0
 

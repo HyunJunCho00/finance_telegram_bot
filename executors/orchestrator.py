@@ -1,9 +1,39 @@
-from typing import Dict, Optional
+"""Orchestrator: LangGraph StateGraph multi-agent analysis pipeline.
+
+Architecture:
+  LangGraph StateGraph manages the analysis flow as a directed graph.
+  Each node is a processing step. Edges define the execution order.
+  Conditional edges route based on state (e.g., skip chart in SCALP mode).
+
+Graph:
+  collect_data -> perplexity_search -> rag_ingest -> technical_analysis
+  -> funding_context -> cvd_context -> rag_query -> self_correction
+  -> bull_agent -> bear_agent -> risk_agent -> should_add_chart?
+     -> (yes) generate_chart -> judge_agent
+     -> (no) judge_agent
+  -> generate_report -> notify
+
+Benefits over sequential:
+  - Explicit state management (TypedDict)
+  - Conditional routing (chart only in SWING)
+  - Error isolation per node
+  - Easy to add/remove/reorder steps
+  - Built-in retry support
+
+Cost optimization:
+  - Bull/Bear/Risk: Gemini Flash, TEXT ONLY, compact data format
+  - Judge: Claude Opus 4.6, gets chart image ONLY in SWING mode (512x512)
+  - SCALP mode: zero images (speed + cost)
+"""
+
+from typing import Dict, Optional, TypedDict, Annotated
 from config.database import db
 from config.settings import settings, TradingMode
 from processors.math_engine import math_engine
 from processors.chart_generator import chart_generator
+from processors.light_rag import light_rag
 from collectors.telegram_collector import telegram_collector
+from collectors.perplexity_collector import perplexity_collector
 from agents.bullish_agent import bullish_agent
 from agents.bearish_agent import bearish_agent
 from agents.risk_agent import risk_agent
@@ -12,118 +42,491 @@ from executors.report_generator import report_generator
 from loguru import logger
 import json
 
+try:
+    from langgraph.graph import StateGraph, END
+    LANGGRAPH_AVAILABLE = True
+except ImportError:
+    LANGGRAPH_AVAILABLE = False
+    logger.warning("langgraph not available, using sequential fallback")
+
+
+# ── State definition (LangGraph TypedDict) ──
+
+class AnalysisState(TypedDict):
+    symbol: str
+    mode: str  # "swing" or "scalp"
+    is_emergency: bool
+
+    # Data collection results
+    df_size: int
+    market_data_compact: str
+    narrative_text: str
+    funding_context: str
+    cvd_context: str
+    rag_context: str
+    telegram_news: str
+    feedback_text: str
+
+    # Agent opinions
+    bull_opinion: str
+    bear_opinion: str
+    risk_assessment: str
+
+    # Chart
+    chart_image_b64: Optional[str]
+    chart_bytes: Optional[bytes]
+
+    # Final output
+    final_decision: Dict
+    report: Optional[Dict]
+
+    # Error tracking
+    errors: list
+
+
+# ── Node functions ──
+
+def node_collect_data(state: AnalysisState) -> dict:
+    """Fetch 1m OHLCV data from Supabase."""
+    symbol = state["symbol"]
+    mode = TradingMode(state["mode"])
+    candle_limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.SCALP_CANDLE_LIMIT
+
+    df = db.get_latest_market_data(symbol, limit=candle_limit)
+    if df.empty:
+        return {"df_size": 0, "errors": state.get("errors", []) + [f"No market data for {symbol}"]}
+
+    market_data = math_engine.analyze_market(df, mode)
+    compact = math_engine.format_compact(market_data)
+
+    return {
+        "df_size": len(df),
+        "market_data_compact": compact,
+    }
+
+
+def node_perplexity_search(state: AnalysisState) -> dict:
+    """Search Perplexity for market narrative."""
+    symbol = state["symbol"]
+    coin = "BTC" if "BTC" in symbol else "ETH"
+    try:
+        narrative = perplexity_collector.search_market_narrative(coin)
+        narrative_text = perplexity_collector.format_for_agents(narrative)
+        logger.info(f"Narrative for {coin}: {narrative.get('sentiment', '?')}")
+        return {"narrative_text": narrative_text}
+    except Exception as e:
+        logger.error(f"Perplexity error: {e}")
+        return {"narrative_text": "Market Narrative: Unavailable"}
+
+
+def node_rag_ingest(state: AnalysisState) -> dict:
+    """Ingest recent telegram messages into LightRAG."""
+    try:
+        recent_messages = db.get_telegram_messages_for_rag(days=7)
+        if recent_messages:
+            light_rag.ingest_batch(recent_messages)
+    except Exception as e:
+        logger.error(f"RAG ingestion error: {e}")
+    return {}
+
+
+def node_funding_context(state: AnalysisState) -> dict:
+    """Fetch funding rate and Global OI data."""
+    symbol = state["symbol"]
+    try:
+        response = db.client.table("funding_data")\
+            .select("*")\
+            .eq("symbol", symbol)\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+
+        raw_funding = response.data[0] if response.data else {}
+        funding_data = math_engine.analyze_funding_context(raw_funding) if raw_funding else {}
+
+        if raw_funding:
+            funding_data['oi_binance'] = raw_funding.get('oi_binance', 0)
+            funding_data['oi_bybit'] = raw_funding.get('oi_bybit', 0)
+            funding_data['oi_okx'] = raw_funding.get('oi_okx', 0)
+
+        funding_str = json.dumps(funding_data, default=str) if funding_data else "No funding data."
+        return {"funding_context": funding_str}
+    except Exception as e:
+        logger.error(f"Funding context error: {e}")
+        return {"funding_context": "No funding data."}
+
+
+def node_cvd_context(state: AnalysisState) -> dict:
+    """Fetch CVD (Cumulative Volume Delta) context."""
+    symbol = state["symbol"]
+    try:
+        cvd_df = db.get_cvd_data(symbol, limit=240)
+        if cvd_df.empty:
+            return {"cvd_context": "CVD: No data available"}
+
+        total_delta = float(cvd_df['volume_delta'].sum())
+        recent_delta = float(cvd_df.tail(60)['volume_delta'].sum())
+        cvd_final = float(cvd_df['cvd'].iloc[-1])
+
+        cvd_direction = "BUYING" if total_delta > 0 else "SELLING"
+        recent_direction = "BUYING" if recent_delta > 0 else "SELLING"
+
+        return {
+            "cvd_context": (
+                f"[CVD] 4H Delta={total_delta:.2f} ({cvd_direction}) | "
+                f"1H Delta={recent_delta:.2f} ({recent_direction}) | "
+                f"CVD={cvd_final:.2f}"
+            )
+        }
+    except Exception as e:
+        logger.error(f"CVD context error: {e}")
+        return {"cvd_context": "CVD: Error"}
+
+
+def node_rag_query(state: AnalysisState) -> dict:
+    """Query LightRAG for relationship-aware news context."""
+    symbol = state["symbol"]
+    try:
+        coin_name = "Bitcoin BTC" if "BTC" in symbol else "Ethereum ETH"
+        result = light_rag.query(coin_name, mode="hybrid")
+        rag_text = light_rag.format_context_for_agents(result, max_length=1500)
+        return {"rag_context": rag_text}
+    except Exception as e:
+        logger.error(f"RAG query error: {e}")
+        return {"rag_context": "RAG Context: Unavailable"}
+
+
+def node_telegram_news(state: AnalysisState) -> dict:
+    """Fetch recent telegram news."""
+    hours = 1 if state.get("is_emergency") else 4
+    news_data = db.get_recent_telegram_messages(hours=hours)
+    telegram_news = "\n".join([
+        f"[{msg['channel']}] {msg['text'][:200]}"
+        for msg in news_data[:10]
+    ]) if news_data else "No telegram news."
+    return {"telegram_news": telegram_news}
+
+
+def node_self_correction(state: AnalysisState) -> dict:
+    """Fetch past trading mistakes for all agents."""
+    try:
+        feedback_history = db.get_feedback_history(limit=5)
+        if feedback_history:
+            feedback_text = "\n\n[PAST MISTAKES TO AVOID]\n" + "\n".join([
+                f"- {f.get('mistake_summary', 'N/A')[:150]}"
+                for f in feedback_history[:3]
+            ])
+            return {"feedback_text": feedback_text}
+    except Exception as e:
+        logger.error(f"Self-correction error: {e}")
+    return {"feedback_text": ""}
+
+
+def node_bull_agent(state: AnalysisState) -> dict:
+    """Run bullish analyst (Gemini Flash, text-only)."""
+    mode = TradingMode(state["mode"])
+    full_context = _build_full_context(state)
+
+    opinion = bullish_agent.analyze(
+        state.get("market_data_compact", ""),
+        full_context,
+        state.get("funding_context", ""),
+        mode
+    )
+    return {"bull_opinion": opinion}
+
+
+def node_bear_agent(state: AnalysisState) -> dict:
+    """Run bearish analyst (Gemini Flash, text-only)."""
+    mode = TradingMode(state["mode"])
+    full_context = _build_full_context(state)
+
+    opinion = bearish_agent.analyze(
+        state.get("market_data_compact", ""),
+        full_context,
+        state.get("funding_context", ""),
+        mode
+    )
+    return {"bear_opinion": opinion}
+
+
+def node_risk_agent(state: AnalysisState) -> dict:
+    """Run risk manager (Gemini Flash, text-only)."""
+    mode = TradingMode(state["mode"])
+    assessment = risk_agent.analyze(
+        state.get("market_data_compact", ""),
+        state.get("bull_opinion", ""),
+        state.get("bear_opinion", ""),
+        state.get("funding_context", ""),
+        mode
+    )
+    return {"risk_assessment": assessment}
+
+
+def node_generate_chart(state: AnalysisState) -> dict:
+    """Generate chart (SWING mode only, for Judge)."""
+    symbol = state["symbol"]
+    mode = TradingMode(state["mode"])
+
+    candle_limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.SCALP_CANDLE_LIMIT
+    df = db.get_latest_market_data(symbol, limit=candle_limit)
+    if df.empty:
+        return {"chart_image_b64": None, "chart_bytes": None}
+
+    market_data = math_engine.analyze_market(df, mode)
+    chart_bytes = chart_generator.generate_chart(df, market_data, symbol, mode)
+
+    chart_image_b64 = None
+    if chart_bytes:
+        chart_bytes_for_vlm = chart_generator.resize_for_low_res(chart_bytes)
+        chart_image_b64 = chart_generator.chart_to_base64(chart_bytes_for_vlm)
+        logger.info(f"Chart for Judge: {len(chart_bytes_for_vlm)} bytes (low-res)")
+
+    return {"chart_image_b64": chart_image_b64, "chart_bytes": chart_bytes}
+
+
+def node_judge_agent(state: AnalysisState) -> dict:
+    """Run Judge (Claude Opus 4.6). Gets chart in SWING mode."""
+    mode = TradingMode(state["mode"])
+    decision = judge_agent.make_decision(
+        state.get("market_data_compact", ""),
+        state.get("bull_opinion", ""),
+        state.get("bear_opinion", ""),
+        state.get("risk_assessment", ""),
+        funding_context=state.get("funding_context", ""),
+        chart_image_b64=state.get("chart_image_b64"),
+        mode=mode,
+        feedback_text=state.get("feedback_text", ""),
+    )
+    return {"final_decision": decision}
+
+
+def node_generate_report(state: AnalysisState) -> dict:
+    """Generate and send report to Telegram."""
+    symbol = state["symbol"]
+    mode = TradingMode(state["mode"])
+
+    candle_limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.SCALP_CANDLE_LIMIT
+    df = db.get_latest_market_data(symbol, limit=candle_limit)
+    market_data = math_engine.analyze_market(df, mode) if not df.empty else {}
+
+    # Get raw funding for report
+    try:
+        response = db.client.table("funding_data")\
+            .select("*").eq("symbol", symbol)\
+            .order("timestamp", desc=True).limit(1).execute()
+        raw_funding = response.data[0] if response.data else {}
+    except Exception:
+        raw_funding = {}
+
+    report = report_generator.generate_report(
+        symbol=symbol,
+        market_data=market_data,
+        bull_opinion=state.get("bull_opinion", ""),
+        bear_opinion=state.get("bear_opinion", ""),
+        risk_assessment=state.get("risk_assessment", ""),
+        final_decision=state.get("final_decision", {}),
+        funding_data=raw_funding,
+        mode=mode,
+    )
+
+    if report:
+        chart_bytes = state.get("chart_bytes")
+        report_generator.notify(report, chart_bytes=chart_bytes, mode=mode)
+
+    decision = state.get("final_decision", {}).get("decision", "N/A")
+    logger.info(f"Analysis completed for {symbol}: {decision} ({mode.value})")
+    return {"report": report}
+
+
+# ── Helper ──
+
+def _build_full_context(state: AnalysisState) -> str:
+    """Build full context string for agents (narrative + cvd + rag + news + feedback)."""
+    parts = [
+        state.get("narrative_text", ""),
+        state.get("cvd_context", ""),
+        state.get("rag_context", ""),
+        f"Telegram News:\n{state.get('telegram_news', '')}",
+        state.get("feedback_text", ""),
+    ]
+    return "\n\n".join(p for p in parts if p)
+
+
+# ── Conditional edge ──
+
+def should_generate_chart(state: AnalysisState) -> str:
+    """Conditional: generate chart only in SWING mode."""
+    if state.get("mode") == "swing" and state.get("df_size", 0) > 0:
+        return "generate_chart"
+    return "judge_agent"
+
+
+# ── Build the LangGraph StateGraph ──
+
+def build_analysis_graph():
+    """Build the multi-agent analysis graph."""
+    graph = StateGraph(AnalysisState)
+
+    # Add nodes
+    graph.add_node("collect_data", node_collect_data)
+    graph.add_node("perplexity_search", node_perplexity_search)
+    graph.add_node("rag_ingest", node_rag_ingest)
+    graph.add_node("funding_context", node_funding_context)
+    graph.add_node("cvd_context", node_cvd_context)
+    graph.add_node("rag_query", node_rag_query)
+    graph.add_node("telegram_news", node_telegram_news)
+    graph.add_node("self_correction", node_self_correction)
+    graph.add_node("bull_agent", node_bull_agent)
+    graph.add_node("bear_agent", node_bear_agent)
+    graph.add_node("risk_agent", node_risk_agent)
+    graph.add_node("generate_chart", node_generate_chart)
+    graph.add_node("judge_agent", node_judge_agent)
+    graph.add_node("generate_report", node_generate_report)
+
+    # Set entry point
+    graph.set_entry_point("collect_data")
+
+    # Data collection chain
+    graph.add_edge("collect_data", "perplexity_search")
+    graph.add_edge("perplexity_search", "rag_ingest")
+    graph.add_edge("rag_ingest", "funding_context")
+    graph.add_edge("funding_context", "cvd_context")
+    graph.add_edge("cvd_context", "rag_query")
+    graph.add_edge("rag_query", "telegram_news")
+    graph.add_edge("telegram_news", "self_correction")
+
+    # Agent chain
+    graph.add_edge("self_correction", "bull_agent")
+    graph.add_edge("bull_agent", "bear_agent")
+    graph.add_edge("bear_agent", "risk_agent")
+
+    # Conditional chart generation
+    graph.add_conditional_edges(
+        "risk_agent",
+        should_generate_chart,
+        {
+            "generate_chart": "generate_chart",
+            "judge_agent": "judge_agent",
+        }
+    )
+    graph.add_edge("generate_chart", "judge_agent")
+
+    # Final decision and report
+    graph.add_edge("judge_agent", "generate_report")
+    graph.add_edge("generate_report", END)
+
+    return graph.compile()
+
+
+# ── Orchestrator class (maintains backward compatibility) ──
 
 class Orchestrator:
-    """Orchestrates the multi-agent analysis pipeline.
-
-    Cost optimization strategy:
-    - Bull/Bear/Risk agents: TEXT ONLY (no images, compact data format)
-    - Judge agent: Gets chart image ONLY in SWING mode (512x512 = ~1024 tokens)
-    - SCALP mode: zero images (speed + cost)
-    - Compact text format saves ~40-60% tokens vs JSON
-    """
-
     def __init__(self):
         self.symbols = ['BTCUSDT', 'ETHUSDT']
+        self._graph = None
 
     @property
     def mode(self) -> TradingMode:
         return settings.trading_mode
 
-    def _get_funding_data(self, symbol: str) -> Dict:
-        try:
-            response = db.client.table("funding_data")\
-                .select("*")\
-                .eq("symbol", symbol)\
-                .order("timestamp", desc=True)\
-                .limit(1)\
-                .execute()
-            if response.data:
-                return response.data[0]
-        except Exception as e:
-            logger.error(f"Funding data fetch error for {symbol}: {e}")
-        return {}
+    @property
+    def graph(self):
+        """Lazy-init the LangGraph compiled graph."""
+        if self._graph is None and LANGGRAPH_AVAILABLE:
+            try:
+                self._graph = build_analysis_graph()
+                logger.info("LangGraph analysis pipeline compiled")
+            except Exception as e:
+                logger.error(f"LangGraph build error: {e}")
+        return self._graph
 
     def run_analysis(self, symbol: str, is_emergency: bool = False) -> Dict:
         mode = self.mode
         logger.info(f"Starting {'EMERGENCY' if is_emergency else 'SCHEDULED'} {mode.value.upper()} analysis for {symbol}")
 
-        # Fetch 1m data (amount depends on mode)
-        df = db.get_latest_market_data(symbol, limit=settings.candle_limit)
+        if self.graph:
+            return self._run_with_langgraph(symbol, mode, is_emergency)
+        else:
+            return self._run_sequential(symbol, mode, is_emergency)
 
-        if df.empty:
-            logger.error(f"No market data for {symbol}")
-            return {}
+    def _run_with_langgraph(self, symbol: str, mode: TradingMode, is_emergency: bool) -> Dict:
+        """Run analysis using LangGraph StateGraph."""
+        initial_state: AnalysisState = {
+            "symbol": symbol,
+            "mode": mode.value,
+            "is_emergency": is_emergency,
+            "df_size": 0,
+            "market_data_compact": "",
+            "narrative_text": "",
+            "funding_context": "",
+            "cvd_context": "",
+            "rag_context": "",
+            "telegram_news": "",
+            "feedback_text": "",
+            "bull_opinion": "",
+            "bear_opinion": "",
+            "risk_assessment": "",
+            "chart_image_b64": None,
+            "chart_bytes": None,
+            "final_decision": {},
+            "report": None,
+            "errors": [],
+        }
 
-        # ─── 1. Technical Analysis (mode-specific) ───
-        market_data = math_engine.analyze_market(df, mode)
+        try:
+            result = self.graph.invoke(initial_state)
+            return result.get("final_decision", {})
+        except Exception as e:
+            logger.error(f"LangGraph execution error: {e}")
+            return {"decision": "HOLD", "reasoning": f"LangGraph error: {e}", "confidence": 0}
 
-        # Format as compact text (saves ~40-60% tokens)
-        market_data_compact = math_engine.format_compact(market_data)
+    def _run_sequential(self, symbol: str, mode: TradingMode, is_emergency: bool) -> Dict:
+        """Fallback: sequential execution (no LangGraph)."""
+        state = {
+            "symbol": symbol, "mode": mode.value,
+            "is_emergency": is_emergency, "errors": [],
+        }
 
-        # ─── 2. Funding/OI Context ───
-        raw_funding = self._get_funding_data(symbol)
-        funding_context_data = math_engine.analyze_funding_context(raw_funding)
-        funding_context = json.dumps(funding_context_data, default=str) if funding_context_data else "No funding data."
+        # Run each node sequentially
+        for node_fn in [
+            node_collect_data, node_perplexity_search, node_rag_ingest,
+            node_funding_context, node_cvd_context, node_rag_query,
+            node_telegram_news, node_self_correction,
+            node_bull_agent, node_bear_agent, node_risk_agent,
+        ]:
+            try:
+                update = node_fn(state)
+                state.update(update)
+            except Exception as e:
+                logger.error(f"Node {node_fn.__name__} error: {e}")
 
-        # ─── 3. Chart Image (SWING mode + Judge only) ───
-        chart_image_b64 = None
-        chart_bytes = None
-        if settings.should_use_chart:
-            chart_bytes = chart_generator.generate_chart(df, market_data, symbol, mode)
-            if chart_bytes:
-                # Always low-res for cost (512x512 = ~1024 tokens)
-                chart_bytes_for_vlm = chart_generator.resize_for_low_res(chart_bytes)
-                chart_image_b64 = chart_generator.chart_to_base64(chart_bytes_for_vlm)
-                logger.info(f"Chart for Judge: {len(chart_bytes_for_vlm)} bytes (low-res)")
+        # Conditional chart
+        if mode == TradingMode.SWING and state.get("df_size", 0) > 0:
+            try:
+                state.update(node_generate_chart(state))
+            except Exception as e:
+                logger.error(f"Chart generation error: {e}")
 
-        # ─── 4. News ───
-        news_hours = 1 if is_emergency else 4
-        news_data = db.get_recent_telegram_messages(hours=news_hours)
-        news_summary = "\n".join([
-            f"[{msg['channel']}] {msg['text'][:200]}"
-            for msg in news_data[:10]
-        ]) if news_data else "No significant news."
+        # Judge
+        try:
+            state.update(node_judge_agent(state))
+        except Exception as e:
+            logger.error(f"Judge error: {e}")
+            state["final_decision"] = {"decision": "HOLD", "reasoning": str(e), "confidence": 0}
 
-        # ─── 5. Run Agents (text-only for Bull/Bear/Risk) ───
-        bull_opinion = bullish_agent.analyze(
-            market_data_compact, news_summary, funding_context, mode)
+        # Report
+        try:
+            state.update(node_generate_report(state))
+        except Exception as e:
+            logger.error(f"Report error: {e}")
 
-        bear_opinion = bearish_agent.analyze(
-            market_data_compact, news_summary, funding_context, mode)
-
-        risk_assessment = risk_agent.analyze(
-            market_data_compact, bull_opinion, bear_opinion, funding_context, mode)
-
-        # ─── 6. Judge (Opus, gets chart in SWING mode) ───
-        final_decision = judge_agent.make_decision(
-            market_data_compact, bull_opinion, bear_opinion, risk_assessment,
-            funding_context=funding_context,
-            chart_image_b64=chart_image_b64,
-            mode=mode,
-        )
-
-        # ─── 7. Report ───
-        report = report_generator.generate_report(
-            symbol=symbol,
-            market_data=market_data,
-            bull_opinion=bull_opinion,
-            bear_opinion=bear_opinion,
-            risk_assessment=risk_assessment,
-            final_decision=final_decision,
-            funding_data=raw_funding,
-            mode=mode,
-        )
-
-        if report:
-            # Send full-res chart to Telegram (human viewing), not the low-res VLM version
-            report_generator.notify(report, chart_bytes=chart_bytes, mode=mode)
-
-        logger.info(f"Analysis completed for {symbol}: {final_decision.get('decision', 'N/A')} ({mode.value})")
-        return final_decision
+        return state.get("final_decision", {})
 
     def run_scheduled_analysis(self) -> None:
         logger.info(f"Running scheduled analysis (mode={self.mode.value})")
+
+        # Collect telegram messages first
         telegram_collector.run(hours=4)
 
         for symbol in self.symbols:

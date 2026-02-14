@@ -29,6 +29,40 @@ def get_funding_info(symbol: str) -> dict:
 
 
 @mcp.tool()
+def get_global_oi(symbol: str) -> dict:
+    """Get Global Open Interest breakdown from 3 exchanges (Binance+Bybit+OKX).
+    Returns total OI in USD and per-exchange breakdown."""
+    logger.info(f"MCP tool: get_global_oi {symbol}")
+    return mcp_tools.get_global_oi(symbol)
+
+
+@mcp.tool()
+def get_cvd(symbol: str, minutes: int = 240) -> dict:
+    """Get CVD (Cumulative Volume Delta) showing net buying/selling pressure.
+    Taker Buy vs Taker Sell volume from Binance Futures klines.
+    Default 240 minutes = 4 hours."""
+    logger.info(f"MCP tool: get_cvd {symbol} {minutes}min")
+    return mcp_tools.get_cvd_data(symbol, limit=minutes)
+
+
+@mcp.tool()
+def search_narrative(symbol: str) -> dict:
+    """Search market narrative via Perplexity API.
+    Returns WHY the price is moving: sentiment, bullish/bearish factors, macro context."""
+    logger.info(f"MCP tool: search_narrative {symbol}")
+    return mcp_tools.search_market_narrative(symbol)
+
+
+@mcp.tool()
+def query_knowledge_graph(query: str, mode: str = "hybrid") -> dict:
+    """Query the LightRAG knowledge graph for relationship context.
+    Modes: 'local' (entity facts), 'global' (market themes), 'hybrid' (both).
+    Example: query_knowledge_graph('Bitcoin BTC', 'hybrid')"""
+    logger.info(f"MCP tool: query_knowledge_graph '{query}' mode={mode}")
+    return mcp_tools.query_rag(query, mode=mode)
+
+
+@mcp.tool()
 def get_latest_trading_report() -> dict:
     """Get the most recent AI trading decision report."""
     logger.info("MCP tool: get_latest_trading_report")
@@ -82,6 +116,13 @@ def get_trading_mode() -> dict:
         "chart_enabled": settings.should_use_chart,
         "analysis_interval_hours": settings.ANALYSIS_INTERVAL_HOURS,
     }
+
+
+@mcp.tool()
+def get_feedback_history(limit: int = 5) -> dict:
+    """Get past trading mistakes and lessons learned from self-correction loop."""
+    logger.info(f"MCP tool: get_feedback_history limit={limit}")
+    return mcp_tools.get_feedback_history(limit=limit)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from collectors.funding_collector import funding_collector
 from collectors.volatility_monitor import volatility_monitor
 from executors.orchestrator import orchestrator
 from evalutors.feedback_generator import feedback_generator
+from processors.light_rag import light_rag
 from config.settings import settings
 from config.database import db
 from loguru import logger
@@ -39,11 +40,21 @@ def job_24hour_evaluation():
 
 
 def job_daily_cleanup():
-    """Cleanup old data to stay within Supabase 500MB free tier."""
+    """Cleanup old data.
+    - PostgreSQL(Supabase): timeseries cleanup (30 days)
+    - Neo4j/Milvus: graph data preserved permanently (RETENTION_GRAPH_DAYS=0)
+    - LightRAG in-memory: cleanup based on telegram retention"""
     try:
         logger.info("Running daily data cleanup")
-        result = db.cleanup_old_data(days=30)
-        logger.info(f"Cleanup result: {result}")
+        result = db.cleanup_old_data()
+        logger.info(f"DB cleanup result: {result}")
+
+        # Cleanup LightRAG in-memory data (not Neo4j/Milvus which are permanent)
+        graph_days = settings.RETENTION_GRAPH_DAYS
+        if graph_days > 0:
+            light_rag.cleanup_old(days=graph_days)
+        stats = light_rag.get_stats()
+        logger.info(f"LightRAG stats: {stats}")
     except Exception as e:
         logger.error(f"Daily cleanup error: {e}")
 
@@ -54,7 +65,12 @@ def main():
     logger.info(f"  Candle limit: {settings.candle_limit}")
     logger.info(f"  Chart for VLM: {settings.should_use_chart}")
     logger.info(f"  Symbols: BTCUSDT, ETHUSDT")
-    logger.info(f"  AI: Gemini Flash (agents) + Gemini Pro (judge)")
+    logger.info(f"  AI: Gemini Flash (agents) + Claude Opus 4.6 (judge)")
+    logger.info(f"  Data: Global OI (3 exchanges) + CVD + Perplexity + LightRAG")
+    logger.info(f"  LightRAG: Neo4j {'connected' if settings.NEO4J_URI else 'in-memory'} + "
+                f"Milvus {'connected' if settings.MILVUS_URI else 'in-memory'}")
+    logger.info(f"  Pipeline: LangGraph StateGraph")
+    logger.info(f"  Self-correction: feedback to ALL agents")
 
     # Use BackgroundScheduler so we can also run the Telegram bot
     scheduler = BackgroundScheduler()

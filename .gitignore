@@ -3,6 +3,7 @@ __pycache__/
 *$py.class
 
 .env
+.env.example
 .env.local
 *.session
 *.session-journal

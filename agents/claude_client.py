@@ -1,22 +1,32 @@
-"""Unified AI Client using GCP Vertex AI.
+"""Hybrid AI Client: Gemini Flash (agents) + Claude Opus 4.6 (Judge).
 
 Cost strategy ($30/month budget):
-- Bull/Bear/Risk agents -> Gemini 2.0 Flash ($0.15/$0.60 per M tokens) - fast, cheap
-- Judge agent -> Gemini 2.5 Pro ($1.25/$10 per M tokens) - deep analysis
+- Bull/Bear/Risk agents -> Gemini 2.0 Flash ($0.15/$0.60 per M tokens)
+- Judge agent -> Claude Opus 4.6 via Vertex AI Model Garden
+  - Best reasoning model for final trading decisions
+  - ~$15/$75 per M tokens (estimated, Vertex pricing)
 - Chart image -> Judge only, SWING mode only (512x512 ~1024 tokens)
 
-Monthly estimate: ~180 cycles x ~$0.02/cycle = ~$3.6/month for AI
-+ VM e2-small $12 + Perplexity $5 = ~$21/month total (well under $30)
+Monthly estimate:
+  Flash agents: 180 cycles x 3 agents x ~3K tokens = ~1.6M tokens -> ~$1.2/month
+  Claude Judge: 180 cycles x ~5K tokens = ~900K tokens -> ~$15-20/month (input heavy)
+  VM e2-small: $12/month
+  Perplexity: $5/month
+  Total: ~$25-30/month
 
-Architecture: All through Vertex AI Gemini. Can switch to Claude by changing model IDs.
+Architecture:
+  - Gemini via vertexai SDK (native)
+  - Claude via anthropic SDK with AnthropicVertex (Model Garden)
 """
 
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part, Image
+from anthropic import AnthropicVertex
 from config.settings import settings
 from typing import List, Dict, Optional
 from loguru import logger
 import base64
+import json
 
 
 class AIClient:
@@ -26,13 +36,13 @@ class AIClient:
             location=settings.REGION
         )
 
-        # Cost-efficient for bull/bear/risk agents
+        # ── Gemini Flash: cost-efficient for bull/bear/risk agents ──
         self.default_model_id = "gemini-2.0-flash-001"
-        # Best analysis for judge decisions
-        self.premium_model_id = "gemini-2.5-pro-preview-05-06"
-
         self._default_model = None
-        self._premium_model = None
+
+        # ── Claude Opus 4.6: best reasoning for Judge decisions ──
+        self.premium_model_id = "claude-opus-4-20250918"
+        self._claude_client = None
 
     @property
     def default_model(self) -> GenerativeModel:
@@ -41,10 +51,13 @@ class AIClient:
         return self._default_model
 
     @property
-    def premium_model(self) -> GenerativeModel:
-        if self._premium_model is None:
-            self._premium_model = GenerativeModel(self.premium_model_id)
-        return self._premium_model
+    def claude_client(self) -> AnthropicVertex:
+        if self._claude_client is None:
+            self._claude_client = AnthropicVertex(
+                region=settings.REGION,
+                project_id=settings.PROJECT_ID,
+            )
+        return self._claude_client
 
     def generate_response(
         self,
@@ -55,9 +68,26 @@ class AIClient:
         chart_image_b64: Optional[str] = None,
         use_premium: bool = False,
     ) -> str:
-        try:
-            model = self.premium_model if use_premium else self.default_model
+        if use_premium:
+            return self._generate_claude(
+                system_prompt, user_message, max_tokens,
+                temperature, chart_image_b64
+            )
+        else:
+            return self._generate_gemini(
+                system_prompt, user_message, max_tokens,
+                temperature, chart_image_b64
+            )
 
+    def _generate_gemini(
+        self,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int,
+        temperature: float,
+        chart_image_b64: Optional[str] = None,
+    ) -> str:
+        try:
             parts = []
 
             if chart_image_b64:
@@ -66,7 +96,7 @@ class AIClient:
 
             parts.append(Part.from_text(user_message))
 
-            response = model.generate_content(
+            response = self.default_model.generate_content(
                 contents=parts,
                 generation_config={
                     "max_output_tokens": max_tokens,
@@ -78,9 +108,57 @@ class AIClient:
             return response.text
 
         except Exception as e:
-            model_name = self.premium_model_id if use_premium else self.default_model_id
-            logger.error(f"AI API error ({model_name}): {e}")
+            logger.error(f"Gemini API error ({self.default_model_id}): {e}")
             return ""
+
+    def _generate_claude(
+        self,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int,
+        temperature: float,
+        chart_image_b64: Optional[str] = None,
+    ) -> str:
+        try:
+            content = []
+
+            if chart_image_b64:
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": chart_image_b64,
+                    }
+                })
+
+            content.append({
+                "type": "text",
+                "text": user_message,
+            })
+
+            response = self.claude_client.messages.create(
+                model=self.premium_model_id,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system_prompt,
+                messages=[{"role": "user", "content": content}],
+            )
+
+            return response.content[0].text
+
+        except Exception as e:
+            logger.error(f"Claude API error ({self.premium_model_id}): {e}")
+            # Fallback to Gemini Pro if Claude fails
+            logger.warning("Falling back to Gemini for Judge...")
+            try:
+                return self._generate_gemini(
+                    system_prompt, user_message, max_tokens,
+                    temperature, chart_image_b64
+                )
+            except Exception as e2:
+                logger.error(f"Gemini fallback also failed: {e2}")
+                return ""
 
     def generate_with_context(
         self,
@@ -91,31 +169,49 @@ class AIClient:
         use_premium: bool = False,
     ) -> str:
         try:
-            model = self.premium_model if use_premium else self.default_model
+            if use_premium:
+                # Claude format
+                messages = []
+                for msg in conversation_history:
+                    role = msg["role"]
+                    if role not in ("user", "assistant"):
+                        role = "user"
+                    if isinstance(msg["content"], str):
+                        messages.append({"role": role, "content": msg["content"]})
+                    elif isinstance(msg["content"], list):
+                        messages.append({"role": role, "content": msg["content"]})
 
-            # Convert conversation history to Gemini format
-            contents = []
-            for msg in conversation_history:
-                role = "user" if msg["role"] == "user" else "model"
-                if isinstance(msg["content"], str):
-                    contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-                elif isinstance(msg["content"], list):
-                    parts = []
-                    for item in msg["content"]:
-                        if item.get("type") == "text":
-                            parts.append({"text": item["text"]})
-                    contents.append({"role": role, "parts": parts})
+                response = self.claude_client.messages.create(
+                    model=self.premium_model_id,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system=system_prompt,
+                    messages=messages,
+                )
+                return response.content[0].text
+            else:
+                # Gemini format
+                contents = []
+                for msg in conversation_history:
+                    role = "user" if msg["role"] == "user" else "model"
+                    if isinstance(msg["content"], str):
+                        contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+                    elif isinstance(msg["content"], list):
+                        parts = []
+                        for item in msg["content"]:
+                            if item.get("type") == "text":
+                                parts.append({"text": item["text"]})
+                        contents.append({"role": role, "parts": parts})
 
-            response = model.generate_content(
-                contents=contents,
-                generation_config={
-                    "max_output_tokens": max_tokens,
-                    "temperature": temperature,
-                },
-                system_instruction=system_prompt,
-            )
-
-            return response.text
+                response = self.default_model.generate_content(
+                    contents=contents,
+                    generation_config={
+                        "max_output_tokens": max_tokens,
+                        "temperature": temperature,
+                    },
+                    system_instruction=system_prompt,
+                )
+                return response.text
 
         except Exception as e:
             logger.error(f"AI API error: {e}")
