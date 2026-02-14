@@ -171,7 +171,7 @@ Step 1: Create VM
 
 Step 2: SSH into VM
 -------------------
-  gcloud compute ssh trading-bot --zone=us-central1-a
+  gcloud compute ssh crypto-trading-vm --zone=us-central1-a
 
 Step 3: Install Dependencies on VM
 -----------------------------------
@@ -180,8 +180,8 @@ Step 3: Install Dependencies on VM
 
 Step 4: Clone Repository
 ------------------------
-  git clone <your-repo-url> /home/$USER/trading-bot
-  cd /home/$USER/trading-bot
+  git clone <your-repo-url> /opt/crypto_trading_system
+  cd /opt/crypto_trading_system
 
 Step 5: Python Environment
 --------------------------
@@ -209,27 +209,27 @@ Step 6: Configure Environment
 Step 7: Setup GCP Service Account
 ----------------------------------
   # Create service account
-  gcloud iam service-accounts create trading-bot-sa \
-    --display-name="Trading Bot SA"
+  gcloud iam service-accounts create crypto-trading-sa \
+    --display-name="Crypto Trading System Service Account"
 
   # Grant Vertex AI access (for Gemini + Claude)
   gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:trading-bot-sa@$PROJECT_ID.iam.gserviceaccount.com" \
+    --member="serviceAccount:crypto-trading-sa@$PROJECT_ID.iam.gserviceaccount.com" \
     --role="roles/aiplatform.user"
 
   # Assign to VM
-  gcloud compute instances set-service-account trading-bot \
+  gcloud compute instances set-service-account crypto-trading-vm \
     --zone=us-central1-a \
-    --service-account=trading-bot-sa@$PROJECT_ID.iam.gserviceaccount.com \
+    --service-account=crypto-trading-sa@$PROJECT_ID.iam.gserviceaccount.com \
     --scopes=cloud-platform
 
   # Restart VM to apply
-  gcloud compute instances reset trading-bot --zone=us-central1-a
-  gcloud compute ssh trading-bot --zone=us-central1-a
+  gcloud compute instances reset crypto-trading-vm --zone=us-central1-a
+  gcloud compute ssh crypto-trading-vm --zone=us-central1-a
 
 Step 8: Telegram Session Setup (first time only)
 -------------------------------------------------
-  cd /home/$USER/trading-bot
+  cd /opt/crypto_trading_system
   source venv/bin/activate
 
   # Telethon needs a one-time phone verification
@@ -273,10 +273,12 @@ Step 10: Setup systemd Service (auto-restart)
 
   [Service]
   Type=simple
-  User=$USER
-  WorkingDirectory=/home/$USER/trading-bot
-  Environment=PATH=/home/$USER/trading-bot/venv/bin:/usr/bin
-  ExecStart=/home/$USER/trading-bot/venv/bin/python scheduler.py
+  User=crypto_trader
+  WorkingDirectory=/opt/crypto_trading_system
+  Environment=PATH=/opt/crypto_trading_system/venv/bin:/usr/bin
+  Environment=USE_SECRET_MANAGER=true
+  Environment=PROJECT_ID=<your-gcp-project-id>
+  ExecStart=/opt/crypto_trading_system/venv/bin/python scheduler.py
   Restart=always
   RestartSec=30
 
@@ -309,7 +311,7 @@ POST-DEPLOYMENT CHECKLIST
 MONITORING:
   sudo journalctl -u scheduler -f           # Live logs
   sudo systemctl restart scheduler           # Restart
-  gcloud compute ssh trading-bot --zone=us-central1-a  # SSH in
+  gcloud compute ssh crypto-trading-vm --zone=us-central1-a  # SSH in
 
 
 TELEGRAM BOT COMMANDS
