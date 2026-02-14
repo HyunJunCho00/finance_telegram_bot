@@ -14,6 +14,8 @@ Cost: ~$5/month on Perplexity Pro API plan (200 requests/day included)
 import requests
 from typing import Dict, Optional
 from config.settings import settings
+from config.database import db
+from datetime import datetime, timezone
 from loguru import logger
 import json
 
@@ -105,18 +107,25 @@ Be factual and cite specific events. Do not speculate."""
             if citations:
                 result["sources"] = citations[:5]
 
+            self.persist_narrative(result, symbol)
             logger.info(f"Perplexity narrative for {symbol}: sentiment={result.get('sentiment', '?')}")
             return result
 
         except requests.exceptions.HTTPError as e:
             logger.error(f"Perplexity API HTTP error: {e}")
-            return self._empty_result(symbol)
+            result = self._empty_result(symbol)
+            self.persist_narrative(result, symbol)
+            return result
         except requests.exceptions.Timeout:
             logger.error("Perplexity API timeout")
-            return self._empty_result(symbol)
+            result = self._empty_result(symbol)
+            self.persist_narrative(result, symbol)
+            return result
         except Exception as e:
             logger.error(f"Perplexity collector error: {e}")
-            return self._empty_result(symbol)
+            result = self._empty_result(symbol)
+            self.persist_narrative(result, symbol)
+            return result
 
     def _parse_response(self, content: str, symbol: str) -> Dict:
         """Parse JSON from Perplexity response, handling markdown code blocks."""
@@ -159,6 +168,29 @@ Be factual and cite specific events. Do not speculate."""
             "key_events": [],
             "macro_context": "",
         }
+
+    def persist_narrative(self, narrative: Dict, symbol: str) -> None:
+        """Persist narrative result into PostgreSQL for 4-hour report traceability."""
+        try:
+            now = datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
+            payload = {
+                "timestamp": now,
+                "symbol": symbol,
+                "source": "perplexity",
+                "status": narrative.get("status", "unknown"),
+                "sentiment": narrative.get("sentiment", "neutral"),
+                "summary": narrative.get("summary", ""),
+                "reasoning": narrative.get("reasoning", ""),
+                "key_events": narrative.get("key_events", []),
+                "bullish_factors": narrative.get("bullish_factors", []),
+                "bearish_factors": narrative.get("bearish_factors", []),
+                "macro_context": narrative.get("macro_context", ""),
+                "sources": narrative.get("sources", []),
+                "raw_payload": narrative,
+            }
+            db.upsert_narrative_data(payload)
+        except Exception as e:
+            logger.error(f"Failed to persist narrative for {symbol}: {e}")
 
     def format_for_agents(self, narrative: Dict) -> str:
         """Format narrative data as compact text for agent consumption."""
