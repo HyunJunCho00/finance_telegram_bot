@@ -6,6 +6,7 @@ from collectors.volatility_monitor import volatility_monitor
 from executors.orchestrator import orchestrator
 from evalutors.feedback_generator import feedback_generator
 from processors.light_rag import light_rag
+from processors.gcs_archive import gcs_archive_exporter
 from config.settings import settings
 from config.database import db
 from loguru import logger
@@ -46,6 +47,12 @@ def job_daily_cleanup():
     - LightRAG in-memory: cleanup based on telegram retention"""
     try:
         logger.info("Running daily data cleanup")
+
+        # 1) Archive expiring rows to GCS (optional)
+        archive_result = gcs_archive_exporter.run_daily_archive()
+        logger.info(f"GCS archive result: {archive_result}")
+
+        # 2) Cleanup hot operational DB
         result = db.cleanup_old_data()
         logger.info(f"DB cleanup result: {result}")
 

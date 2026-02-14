@@ -658,7 +658,8 @@ Rules:
                 user_message=prompt,
                 temperature=0.1,
                 max_tokens=800,
-                use_premium=False,  # Gemini Flash (cheap)
+                use_premium=False,  # cost-efficient model for extraction
+                role="rag_extraction",
             )
 
             # Parse JSON

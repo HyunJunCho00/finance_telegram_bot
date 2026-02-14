@@ -42,6 +42,19 @@ class Settings(BaseSettings):
     MILVUS_URI: str = ""  # e.g. https://in03-xxxxxx.api.gcp-us-west1.zillizcloud.com
     MILVUS_TOKEN: str = ""
 
+    # Optional low-cost long-term archive on GCS
+    ENABLE_GCS_ARCHIVE: bool = False
+    GCS_ARCHIVE_BUCKET: str = ""
+
+
+    # ===== Paper trading / sandbox safety =====
+    PAPER_TRADING_MODE: bool = True  # default safe mode (no real orders)
+    PAPER_TRADING_PRICE_SOURCE: str = "ticker"  # ticker | last_report
+    BINANCE_USE_TESTNET: bool = False
+    UPBIT_PAPER_ONLY: bool = True
+    COINBASE_API_KEY: str = ""
+    COINBASE_API_SECRET: str = ""
+
     VOLATILITY_THRESHOLD: float = 3.0
     ANALYSIS_INTERVAL_HOURS: int = 4
 
@@ -49,6 +62,23 @@ class Settings(BaseSettings):
     # Agents (bull/bear/risk): Gemini 2.0 Flash via Vertex AI
     # Judge: Claude Opus 4.6 via Vertex AI Model Garden
     MODEL_ENDPOINT: str = "gemini-2.0-flash-001"
+
+
+    # ===== Role-based model routing (2026 ops tuning) =====
+    MODEL_BULLISH: str = "gemini-2.5-flash"
+    MODEL_BEARISH: str = "gemini-2.5-flash"
+    MODEL_RISK: str = "gemini-2.5-pro"
+    MODEL_JUDGE: str = "claude-opus-4-20250918"
+    MODEL_SELF_CORRECTION: str = "gemini-2.5-pro"
+    MODEL_RAG_EXTRACTION: str = "gemini-2.5-flash"
+
+    # Soft input caps (character-based) to improve token efficiency
+    MAX_INPUT_CHARS_BULLISH: int = 12000
+    MAX_INPUT_CHARS_BEARISH: int = 12000
+    MAX_INPUT_CHARS_RISK: int = 14000
+    MAX_INPUT_CHARS_JUDGE: int = 18000
+    MAX_INPUT_CHARS_SELF_CORRECTION: int = 10000
+    MAX_INPUT_CHARS_RAG_EXTRACTION: int = 5000
 
     # ===== Trading Mode =====
     # "swing" = long-term position trading (default, your preference)
@@ -121,6 +151,8 @@ class SecretManager:
             "BINANCE_API_SECRET",
             "UPBIT_ACCESS_KEY",
             "UPBIT_SECRET_KEY",
+            "COINBASE_API_KEY",
+            "COINBASE_API_SECRET",
             "TELEGRAM_API_ID",
             "TELEGRAM_API_HASH",
             "TELEGRAM_PHONE",
@@ -131,6 +163,7 @@ class SecretManager:
             "NEO4J_PASSWORD",
             "MILVUS_URI",
             "MILVUS_TOKEN",
+            "GCS_ARCHIVE_BUCKET",
         ]
 
         for name in secret_names:

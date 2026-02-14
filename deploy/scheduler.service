@@ -9,6 +9,7 @@ WorkingDirectory=/opt/crypto_trading_system
 Environment="PYTHONUNBUFFERED=1"
 Environment="USE_SECRET_MANAGER=true"
 Environment="PROJECT_ID=your-gcp-project-id"
+Environment="ENABLE_GCS_ARCHIVE=false"
 ExecStart=/opt/crypto_trading_system/venv/bin/python scheduler.py
 Restart=always
 RestartSec=10
