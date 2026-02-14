@@ -46,7 +46,8 @@ Analyze what went wrong and provide:
                 system_prompt=self.system_prompt,
                 user_message=user_message,
                 temperature=0.3,
-                max_tokens=1000
+                max_tokens=1000,
+                role="self_correction"
             )
 
             feedback_data = {
