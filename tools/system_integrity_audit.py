@@ -183,7 +183,7 @@ def run_preflight_checks() -> tuple[list[str], list[str]]:
         "mplfinance",
         "PIL",
         "telegram",
-        "vertexai",
+        "google.genai",
     ]
 
     for mod in required_modules:
