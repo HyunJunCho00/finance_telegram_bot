@@ -108,6 +108,38 @@ class DatabaseClient:
         ).execute()
 
 
+
+    # ─────────────── Microstructure Data ───────────────
+
+    def batch_upsert_microstructure_data(self, data_list: List[Dict]) -> Dict:
+        return self.client.table("microstructure_data").upsert(
+            data_list, on_conflict="timestamp,symbol,exchange"
+        ).execute()
+
+    def get_latest_microstructure(self, symbol: str) -> Optional[Dict]:
+        response = self.client.table("microstructure_data")\
+            .select("*")\
+            .eq("symbol", symbol)\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
+    # ─────────────── Macro Data ───────────────
+
+    def upsert_macro_data(self, data: Dict) -> Dict:
+        return self.client.table("macro_data").upsert(
+            data, on_conflict="timestamp,source"
+        ).execute()
+
+    def get_latest_macro_data(self) -> Optional[Dict]:
+        response = self.client.table("macro_data")\
+            .select("*")\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
     # ─────────────── Narrative Data ───────────────
 
     def upsert_narrative_data(self, data: Dict) -> Dict:
@@ -251,6 +283,26 @@ class DatabaseClient:
                 .lt("created_at", cutoff_telegram)\
                 .execute()
             results['telegram_deleted'] = len(r.data) if r.data else 0
+
+            # Microstructure data
+            cutoff_micro = (datetime.now(timezone.utc) - timedelta(
+                days=settings.RETENTION_MARKET_DATA_DAYS
+            )).isoformat()
+            r = self.client.table("microstructure_data")\
+                .delete()\
+                .lt("timestamp", cutoff_micro)\
+                .execute()
+            results['microstructure_deleted'] = len(r.data) if r.data else 0
+
+            # Macro data
+            cutoff_macro = (datetime.now(timezone.utc) - timedelta(
+                days=settings.RETENTION_REPORTS_DAYS
+            )).isoformat()
+            r = self.client.table("macro_data")\
+                .delete()\
+                .lt("timestamp", cutoff_macro)\
+                .execute()
+            results['macro_deleted'] = len(r.data) if r.data else 0
 
             # Narrative data
             cutoff_narrative = (datetime.now(timezone.utc) - timedelta(

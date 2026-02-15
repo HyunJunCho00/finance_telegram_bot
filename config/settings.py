@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # Perplexity API for market narrative search
     PERPLEXITY_API_KEY: str = ""
 
+    # FRED API for macro regime data
+    FRED_API_KEY: str = ""
+
     # Neo4j Aura Free (Knowledge Graph)
     NEO4J_URI: str = ""  # e.g. neo4j+s://xxxxxx.databases.neo4j.io
     NEO4J_PASSWORD: str = ""
@@ -46,6 +49,13 @@ class Settings(BaseSettings):
     # Dune API (on-chain/DEX macro signals)
     DUNE_API_KEY: str = ""
     DUNE_ENABLED: bool = False
+    # Cost guardrails for free-tier Dune credits (monthly 2500 credits)
+    # Keep scheduler cadence unchanged, but throttle collector execution internally.
+    DUNE_BUDGET_GUARD: bool = True
+    DUNE_GLOBAL_MIN_INTERVAL_MINUTES: int = 360  # at most once per 6h globally
+    DUNE_MAX_QUERY_RUNS_PER_DAY: int = 8
+    DUNE_MAX_QUERIES_PER_RUN: int = 1
+    DUNE_PRIORITY_QUERY_IDS: str = "21689,4319,6638261"
 
     # Optional low-cost long-term archive on GCS
     ENABLE_GCS_ARCHIVE: bool = False
@@ -164,6 +174,7 @@ class SecretManager:
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_CHAT_ID",
             "PERPLEXITY_API_KEY",
+            "FRED_API_KEY",
             "NEO4J_URI",
             "NEO4J_PASSWORD",
             "MILVUS_URI",
