@@ -1,399 +1,63 @@
-=====================================================================
-DEPLOYMENT GUIDE - Autonomous Crypto Trading Bot
-Deploy via WSL + gcloud
-Last Updated: 2026-02-14
-=====================================================================
-
-
-ARCHITECTURE OVERVIEW
-=====================
-
-[Data Collection Layer - Every 1 min]
-  Binance Futures API --> OHLCV (1m candles) + CVD (Taker Buy/Sell)
-  Upbit Spot API -------> KRW price data
-  Binance/Bybit/OKX ---> Global OI (3-exchange aggregate)
-  Binance API ----------> Funding Rate + Long/Short Ratio
-  12 Telegram Channels -> News messages (Telethon)
-  Perplexity API -------> Market narrative (WHY price moves)
-
-[Storage Layer - 3-tier]
-  PostgreSQL (Supabase Free 500MB) --> Timeseries: OHLCV, CVD, Funding, OI
-  Neo4j Aura Free (200K nodes) ------> Knowledge Graph: entities + relationships
-  Zilliz Cloud Free (1M vectors) ----> Vector DB: news embeddings
-
-[AI Processing Layer - Every 4 hours]
-  LightRAG: LLM extraction -> Neo4j graph + Milvus vectors
-  Pipeline: LangGraph StateGraph
-    collect_data -> perplexity_search -> rag_ingest
-    -> funding/cvd/rag_query -> self_correction
-    -> bull_agent (Gemini Flash)
-    -> bear_agent (Gemini Flash)
-    -> risk_agent (Gemini Flash)
-    -> [SWING only] generate_chart (512x512)
-    -> judge_agent (Claude Opus 4.6)
-    -> generate_report -> Telegram @Joseho_bot
-
-[Self-Correction Loop - Every 24 hours]
-  performance_evaluator -> feedback_generator
-  -> feedback fed to ALL agents (bull, bear, risk, judge)
-
-[Interactive Interface]
-  Telegram Bot: /status, /analyze, /mode, /report
-  MCP Server (SSE): 17 tools for external access
-
-
-COST ESTIMATE ($30/month budget)
-================================
-
-VM (e2-small, us-central1):            ~$12/month
-  - 2 vCPU shared, 2GB RAM, 20GB SSD
-  - network-tier=STANDARD
-
-Gemini Flash (agents):                 ~$1-2/month
-  180 cycles x 3 agents x ~3K tokens = 1.6M tokens
-  + LightRAG extraction: ~5K messages x 800 tokens = 4M tokens
-  Input: $0.15/M, Output: $0.60/M
-
-Claude Opus 4.6 (judge):              ~$8-15/month
-  180 cycles x ~5K input + ~2K output
-  Input: ~$15/M, Output: ~$75/M
-  VLM chart: +$0.5/month (SWING only, 512x512)
-
-Perplexity:                            $5/month
-  Pro API plan (~360 queries/month)
-
-Gemini Embedding (text-embedding-005): ~$0.05/month
-  ~5K embeddings/month
-
-Neo4j Aura:                            FREE
-  200K nodes, 400K relationships
-
-Zilliz Cloud:                          FREE
-  1M vectors, 2 collections
-
-Supabase:                              FREE
-  500MB storage, 500K rows
-
-Total estimate:                        ~$26-34/month
-
-
-PREREQUISITES (must complete BEFORE deployment)
-================================================
-
-1. GCP PROJECT
-   - Create at console.cloud.google.com
-   - Enable billing
-   - Note PROJECT_ID
-
-2. ENABLE GCP APIs
-   gcloud services enable \
-     aiplatform.googleapis.com \
-     secretmanager.googleapis.com \
-     compute.googleapis.com \
-     logging.googleapis.com
-
-3. ENABLE CLAUDE ON MODEL GARDEN
-   - console.cloud.google.com > Vertex AI > Model Garden
-   - Search "Claude" > Enable publisher model
-   - Region: us-central1
-
-4. SUPABASE
-   - Create project at supabase.com (free tier)
-   - Note: URL + anon key
-   - Run sql/schema.sql in SQL Editor (see DATABASE SETUP below)
-
-5. NEO4J AURA FREE
-   - Create at console.neo4j.io
-   - Choose "AuraDB Free" (no credit card needed)
-   - Region: GCP us-central1 (closest to your VM)
-   - Note the connection URI and password
-   - URI format: neo4j+s://xxxxxxxx.databases.neo4j.io
-
-6. ZILLIZ CLOUD FREE
-   - Create at cloud.zilliz.com
-   - Choose "Serverless" > "Free" tier
-   - Region: GCP us-west1 (closest available)
-   - Create a cluster, note URI + API key
-   - URI format: https://in03-xxxxxxxx.api.gcp-us-west1.zillizcloud.com
-
-7. BINANCE API
-   - Create API key at binance.com/en/my/settings/api-management
-   - Enable "Futures" permission
-   - Restrict to VM IP (after deployment)
-
-8. UPBIT API
-   - Create at upbit.com/mypage/open_api_management
-   - Enable read + trade permissions
-
-9. TELEGRAM
-   - Bot: @BotFather > /newbot > get token
-   - API ID/Hash: my.telegram.org > API development tools
-   - Chat ID: message your bot, then call:
-     https://api.telegram.org/bot<TOKEN>/getUpdates
-     -> result[0].message.chat.id
-
-10. PERPLEXITY API
-    - Sign up at perplexity.ai/settings/api
-    - Subscribe to Pro API plan ($5/month)
-    - Note API key (pplx-...)
-
-
-DATABASE SETUP (Supabase SQL Editor)
-=====================================
-
-Copy and paste the ENTIRE contents of sql/schema.sql into:
-  Supabase Dashboard > SQL Editor > New query > Run
-
-This creates 7 tables:
-  - market_data: OHLCV candles (1m)
-  - cvd_data: Cumulative Volume Delta
-  - funding_data: Funding + Global OI (Binance/Bybit/OKX)
-  - telegram_messages: News from 12 channels
-  - ai_reports: Trading analysis reports
-  - feedback_logs: Self-correction lessons
-  - trade_executions: Trade history
-
-All tables have proper indexes and unique constraints for upsert.
-
-
-DEPLOY STEPS (WSL + gcloud)
-============================
-
-Step 1: Create VM
------------------
-  bash deploy/create_vm.sh
-
-  If you see `$'\r'` errors in WSL:
-  sed -i 's/\r$//' deploy/create_vm.sh
-  bash deploy/create_vm.sh
-
-  This creates:
-  - e2-small instance in us-central1-a
-  - Ubuntu 22.04 LTS
-  - 20GB SSD
-  - Standard networking (~$12/month)
-
-
-SECRET MANAGER (CLI COMMAND ORDER)
-==================================
-
-1) gcloud config set project <PROJECT_ID>
-
-2) for NAME in SUPABASE_URL SUPABASE_KEY TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_PHONE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID PERPLEXITY_API_KEY NEO4J_URI NEO4J_PASSWORD MILVUS_URI MILVUS_TOKEN; do
-     read -s SECRET_VALUE && echo -n "$SECRET_VALUE" | gcloud secrets create "$NAME" --replication-policy=automatic --data-file=- && unset SECRET_VALUE
-   done
-
-3) gcloud projects add-iam-policy-binding <PROJECT_ID> \
-     --member="serviceAccount:crypto-trading-sa@<PROJECT_ID>.iam.gserviceaccount.com" \
-     --role="roles/secretmanager.secretAccessor"
-
-4) (VM env) USE_SECRET_MANAGER=true, PROJECT_ID=<PROJECT_ID>
-
-Step 2: SSH into VM
--------------------
-  gcloud compute ssh crypto-trading-vm --zone=us-central1-a
-
-Step 3: Install Dependencies on VM
------------------------------------
-  sudo apt update
-  sudo apt install -y python3.11 python3.11-venv python3-pip git
-
-Step 4: Clone Repository
-------------------------
-  git clone <your-repo-url> /opt/crypto_trading_system
-  cd /opt/crypto_trading_system
-
-Step 5: Python Environment
---------------------------
-  python3.11 -m venv venv
-  source venv/bin/activate
-  pip install --upgrade pip
-  pip install -r requirements.txt
-
-Step 6: Configure Environment
------------------------------
-  cp .env.example .env
-  nano .env
-
-  Fill in ALL values:
-  - PROJECT_ID
-  - SUPABASE_URL, SUPABASE_KEY
-  - BINANCE_API_KEY, BINANCE_API_SECRET
-  - UPBIT_ACCESS_KEY, UPBIT_SECRET_KEY
-  - TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_PHONE
-  - TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-  - PERPLEXITY_API_KEY
-  - NEO4J_URI, NEO4J_PASSWORD
-  - MILVUS_URI, MILVUS_TOKEN
-
-Step 7: Service Account (auto-handled by create_vm.sh)
---------------------------------------------------------
-  create_vm.sh now does this automatically:
-  - create crypto-trading-sa if missing
-  - grant roles/aiplatform.user
-  - grant roles/secretmanager.secretAccessor
-  - attach service account at VM creation
-
-  If you need to re-attach manually:
-  gcloud compute instances set-service-account crypto-trading-vm \
-    --zone=us-central1-a \
-    --service-account=crypto-trading-sa@$PROJECT_ID.iam.gserviceaccount.com \
-    --scopes=cloud-platform
-
-Step 8: Telegram Session Setup (first time only)
--------------------------------------------------
-  cd /opt/crypto_trading_system
-  source venv/bin/activate
-
-  # Telethon needs a one-time phone verification
-  python -c "
-  from telethon.sync import TelegramClient
-  import os
-  from dotenv import load_dotenv
-  load_dotenv()
-  client = TelegramClient(
-      'telegram_session',
-      int(os.getenv('TELEGRAM_API_ID')),
-      os.getenv('TELEGRAM_API_HASH')
-  )
-  client.start(phone=os.getenv('TELEGRAM_PHONE'))
-  print('Session created successfully!')
-  client.disconnect()
-  "
-
-  This will prompt for phone code. Enter it once, session file saved.
-
-Step 9: Test Run
-----------------
-  source venv/bin/activate
-  python scheduler.py
-
-  Check logs for:
-  - "Starting Trading System (mode=swing)"
-  - "Scheduler started"
-  - "Telegram bot started (polling)"
-  - After 1 minute: price/funding data collection
-  - Neo4j/Milvus connection status
-
-Step 10: Setup systemd Service (auto-restart)
-----------------------------------------------
-  # Edit service file paths
-  sudo nano /etc/systemd/system/scheduler.service
-
-  [Unit]
-  Description=Crypto Trading Bot
-  After=network.target
-
-  [Service]
-  Type=simple
-  User=crypto_trader
-  WorkingDirectory=/opt/crypto_trading_system
-  Environment=PATH=/opt/crypto_trading_system/venv/bin:/usr/bin
-  Environment=USE_SECRET_MANAGER=true
-  Environment=PROJECT_ID=<your-gcp-project-id>
-  ExecStart=/opt/crypto_trading_system/venv/bin/python scheduler.py
-  Restart=always
-  RestartSec=30
-
-  [Install]
-  WantedBy=multi-user.target
-
-  # Enable and start
-  sudo systemctl daemon-reload
-  sudo systemctl enable scheduler
-  sudo systemctl start scheduler
-
-  # Check status
-  sudo systemctl status scheduler
-  sudo journalctl -u scheduler -f
-
-
-POST-DEPLOYMENT CHECKLIST
-=========================
-
-[ ] VM is running: gcloud compute instances list
-[ ] Service is active: sudo systemctl status scheduler
-[ ] Bot responds: send /start to @Joseho_bot
-[ ] Data collecting: send /status to see latest data
-[ ] Neo4j connected: check logs for "Neo4j connected"
-[ ] Milvus connected: check logs for "Milvus connected"
-[ ] First analysis: wait for 4-hour cycle or send /analyze BTC
-[ ] Chart received: check Telegram for chart image (SWING mode)
-[ ] Restrict Binance IP: add VM external IP to Binance API whitelist
-
-MONITORING:
-  sudo journalctl -u scheduler -f           # Live logs
-  sudo systemctl restart scheduler           # Restart
-  gcloud compute ssh crypto-trading-vm --zone=us-central1-a  # SSH in
-
-
-TELEGRAM BOT COMMANDS
-=====================
-/start          - Welcome message
-/status         - Current positions & latest decisions
-/analyze BTC    - Run immediate BTC analysis
-/analyze ETH    - Run immediate ETH analysis
-/mode           - Show current mode
-/mode swing     - Switch to swing (long-term)
-/mode scalp     - Switch to scalp (short-term)
-/report         - Resend latest report
-/help           - List all commands
-
-
-MCP TOOLS (17 tools, SSE transport)
-====================================
-analyze_market         - Multi-timeframe technical analysis
-get_news_summary       - Telegram news aggregation
-get_funding_info       - Funding rate + context
-get_global_oi          - Global OI (Binance+Bybit+OKX)
-get_cvd                - CVD volume delta
-search_narrative       - Perplexity market narrative
-query_knowledge_graph  - LightRAG graph+vector query
-get_latest_trading_report - Latest AI decision
-get_current_position   - Position status
-execute_trade          - Execute trade (caution)
-get_chart_image        - Chart generation
-get_indicator_summary  - Technical indicators
-switch_trading_mode    - Switch swing/scalp
-get_trading_mode       - Current mode info
-get_feedback_history   - Past mistakes & lessons
-
-Start MCP server: python mcp_server/server.py
-
-
-TROUBLESHOOTING
-===============
-
-1. "Neo4j connection failed"
-   - Check NEO4J_URI format: neo4j+s://xxx.databases.neo4j.io
-   - Check password is correct
-   - Neo4j Aura Free instances auto-pause after 3 days of inactivity
-     -> Login to console.neo4j.io and resume
-
-2. "Milvus connection failed"
-   - Check MILVUS_URI format: https://in03-xxx.api.gcp-us-west1.zillizcloud.com
-   - Check token is correct
-   - Zilliz Free clusters may need manual resume
-
-3. "vertexai embedding not available"
-   - Service account needs roles/aiplatform.user
-   - Check: gcloud ai models list --region=us-central1
-
-4. "Claude API error"
-   - Ensure Claude is enabled on Model Garden
-   - Check region matches (us-central1)
-   - Fallback: system auto-falls back to Gemini Flash
-
-5. "Perplexity API timeout"
-   - Check API key is valid
-   - Pro plan required ($5/month)
-   - System continues without narrative if unavailable
-
-6. Out of Supabase storage
-   - Check RETENTION_*_DAYS in .env
-   - Lower retention periods
-   - Neo4j/Milvus handle long-term news storage
-
-7. LangGraph not available
-   - pip install langgraph>=0.2.0
-   - System has sequential fallback if langgraph fails
+# GCP 프로젝트 설정
+export PROJECT_ID="<PROJECT_ID>"
+gcloud config set project "$PROJECT_ID"
+
+# 필요한 API 활성화
+gcloud services enable aiplatform.googleapis.com secretmanager.googleapis.com compute.googleapis.com logging.googleapis.com
+
+# VM 생성 (WSL 줄바꿈 문제 시 dos2unix 처리)
+sed -i 's/\r$//' deploy/create_vm.sh
+bash deploy/create_vm.sh
+
+# VM 접속
+gcloud compute ssh crypto-trading-vm --zone=us-central1-a
+
+# VM 내부: 기본 패키지 설치
+sudo apt update
+sudo apt install -y python3.11 python3.11-venv python3-pip git
+
+# VM 내부: 코드 배포
+git clone <REPO_URL> /opt/crypto_trading_system
+cd /opt/crypto_trading_system
+python3.11 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# VM 내부: 환경변수 파일 작성
+cp .env.example .env
+nano .env
+
+# 로컬/Cloud Shell: Secret Manager 등록
+for NAME in SUPABASE_URL SUPABASE_KEY TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_PHONE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID PERPLEXITY_API_KEY NEO4J_URI NEO4J_PASSWORD MILVUS_URI MILVUS_TOKEN; do read -s SECRET_VALUE && echo -n "$SECRET_VALUE" | gcloud secrets create "$NAME" --replication-policy=automatic --data-file=- && unset SECRET_VALUE; done
+
+# 로컬/Cloud Shell: VM 서비스 계정에 Secret 접근 권한 부여
+gcloud projects add-iam-policy-binding "$PROJECT_ID" --member="serviceAccount:crypto-trading-sa@${PROJECT_ID}.iam.gserviceaccount.com" --role="roles/secretmanager.secretAccessor"
+
+# VM 내부: Telethon 세션 1회 생성
+cd /opt/crypto_trading_system
+source venv/bin/activate
+python -c "from telethon.sync import TelegramClient; import os; from dotenv import load_dotenv; load_dotenv(); c=TelegramClient('telegram_session', int(os.getenv('TELEGRAM_API_ID')), os.getenv('TELEGRAM_API_HASH')); c.start(phone=os.getenv('TELEGRAM_PHONE')); c.disconnect(); print('telegram session ok')"
+
+# VM 내부: 1회 실행 테스트
+source venv/bin/activate
+python scheduler.py
+
+# VM 내부: systemd 서비스 등록
+sudo cp deploy/scheduler.service /etc/systemd/system/scheduler.service
+sudo systemctl daemon-reload
+sudo systemctl enable scheduler
+sudo systemctl start scheduler
+
+# VM 내부: 상태/로그 확인
+sudo systemctl status scheduler
+sudo journalctl -u scheduler -f
+
+# 운영 자주 쓰는 명령어
+sudo systemctl restart scheduler
+gcloud compute instances list
+gcloud compute ssh crypto-trading-vm --zone=us-central1-a
+
+# MCP 서버 수동 실행
+source venv/bin/activate
+python mcp_server/server.py
