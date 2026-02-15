@@ -27,6 +27,14 @@ You receive raw market data across 1h, 4h, and 1d timeframes. Your job:
 You are a FACT INTERPRETER. We give you numbers, you give us your honest analysis.
 If there is no bullish case, say so clearly. Be specific with price levels."""
 
+    INDEPENDENCE_APPENDIX = """
+Debate discipline (critical):
+- Stay INDEPENDENT from other agents' views; do not soften your stance for consensus.
+- Include at least 2 strongest bullish facts AND at least 2 invalidation risks.
+- If evidence quality is weak, explicitly say conviction is low.
+- Never mirror generic wording; anchor claims to concrete levels/indicators/timeframes.
+"""
+
     SCALP_PROMPT = """You are a professional crypto day trader analyzing for short-term bullish setups.
 
 You receive raw market data across 1m, 5m, 15m, and 1h timeframes. Your job:
@@ -49,7 +57,8 @@ If there is no short-term bullish setup, say so clearly. Be specific with price 
     def analyze(self, market_data_compact: str, news_summary: str,
                 funding_context: str, mode: TradingMode = TradingMode.SWING) -> str:
         """Analyze market for bullish evidence. TEXT ONLY - no images."""
-        prompt = self.SWING_PROMPT if mode == TradingMode.SWING else self.SCALP_PROMPT
+        base_prompt = self.SWING_PROMPT if mode == TradingMode.SWING else self.SCALP_PROMPT
+        prompt = f"{base_prompt}\n\n{self.INDEPENDENCE_APPENDIX}"
 
         user_message = f"""Market Data:
 {market_data_compact}

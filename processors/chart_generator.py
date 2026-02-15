@@ -10,6 +10,7 @@ from typing import Dict, Optional
 from config.settings import settings, TradingMode
 from loguru import logger
 import pandas_ta as ta
+from scipy.signal import argrelextrema
 
 
 class ChartGenerator:
@@ -99,6 +100,8 @@ class ChartGenerator:
             price = analysis.get('current_price', '?')
             axes[0].set_title(f'{symbol} 4H | {price} | SWING', fontsize=10, loc='left')
 
+            self._draw_swing_structure(axes[0], chart_df, analysis)
+
             buf = BytesIO()
             fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight', facecolor='white')
             plt.close(fig)
@@ -174,6 +177,59 @@ class ChartGenerator:
         except Exception as e:
             logger.error(f"Scalp chart error for {symbol}: {e}")
             return None
+
+    def _draw_swing_structure(self, ax, chart_df: pd.DataFrame, analysis: Dict) -> None:
+        """Overlay swing structure: fib levels, diagonal S/R, and turning points."""
+        try:
+            fib = (analysis.get('fibonacci', {}) or {}).get('4h') or (analysis.get('fibonacci', {}) or {}).get('1d')
+            if fib:
+                fib_colors = {
+                    'fib_236': '#90CAF9',
+                    'fib_382': '#64B5F6',
+                    'fib_500': '#42A5F5',
+                    'fib_618': '#1E88E5',
+                    'fib_786': '#1565C0',
+                }
+                for key, color in fib_colors.items():
+                    val = fib.get(key)
+                    if isinstance(val, (int, float)):
+                        ax.axhline(val, color=color, linestyle='--', linewidth=0.8, alpha=0.6)
+                        ax.text(chart_df.index[-1], val, f' {key}:{val:.2f}', color=color, fontsize=7, va='center')
+
+            structure = analysis.get('structure', {}) or {}
+            self._draw_diagonal_line(ax, chart_df, structure.get('support_4h'), 'support_price', '#2E7D32')
+            self._draw_diagonal_line(ax, chart_df, structure.get('resistance_4h'), 'resistance_price', '#C62828')
+
+            # Turning points (inflection pivots) on close prices
+            close = chart_df['close'].astype(float).values
+            if len(close) >= 15:
+                order = max(3, len(close) // 20)
+                mins = argrelextrema(close, np.less, order=order)[0]
+                maxs = argrelextrema(close, np.greater, order=order)[0]
+                if len(mins):
+                    ax.scatter(chart_df.index[mins], close[mins], marker='^', color='#2E7D32', s=18, alpha=0.8)
+                if len(maxs):
+                    ax.scatter(chart_df.index[maxs], close[maxs], marker='v', color='#C62828', s=18, alpha=0.8)
+        except Exception as e:
+            logger.error(f"Structure overlay error: {e}")
+
+    def _draw_diagonal_line(self, ax, chart_df: pd.DataFrame, line_info: Optional[Dict],
+                            value_key: str, color: str) -> None:
+        if not line_info:
+            return
+        try:
+            slope = line_info.get('slope')
+            current_value = line_info.get(value_key)
+            if slope is None or current_value is None:
+                return
+
+            n = len(chart_df)
+            x = np.arange(n)
+            intercept = float(current_value) - float(slope) * (n - 1)
+            y = float(slope) * x + intercept
+            ax.plot(chart_df.index, y, color=color, linewidth=1.0, linestyle='-.', alpha=0.9)
+        except Exception:
+            return
 
     def chart_to_base64(self, chart_bytes: bytes) -> str:
         return base64.b64encode(chart_bytes).decode('utf-8')

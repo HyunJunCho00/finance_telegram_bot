@@ -55,6 +55,14 @@ Output your decision as JSON:
 You have FULL AUTONOMY. If the market is unclear, HOLD is always valid.
 Be aware of your previous decision for consistency."""
 
+    DEBATE_APPENDIX = """
+Debate quality controls:
+- Evaluate Bull vs Bear arguments independently before concluding.
+- Explicitly list strongest pro-trade and strongest anti-trade factors in key_factors.
+- Do not reward agreement itself; reward evidence quality and falsifiability.
+- If conflict remains unresolved, choose HOLD with clear uncertainty rationale.
+"""
+
     SCALP_PROMPT = """You are a senior crypto day trader making SCALP/SHORT-TERM trading decisions.
 
 You receive ALL available data:
@@ -120,7 +128,8 @@ You have FULL AUTONOMY. Move fast but be precise."""
         mode: TradingMode = TradingMode.SWING,
         feedback_text: str = "",
     ) -> Dict:
-        prompt = self.SWING_PROMPT if mode == TradingMode.SWING else self.SCALP_PROMPT
+        base_prompt = self.SWING_PROMPT if mode == TradingMode.SWING else self.SCALP_PROMPT
+        prompt = f"{base_prompt}\n\n{self.DEBATE_APPENDIX}"
         previous_decision = self.get_previous_decision()
 
         previous_context = "No previous decision available."
