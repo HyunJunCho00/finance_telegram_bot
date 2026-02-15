@@ -45,6 +45,14 @@ Your job (using YOUR OWN expertise):
 Scalping has DIFFERENT risk rules than swing trading. Tight stops, small size, high frequency.
 Be honest about uncertainty."""
 
+    DEBATE_APPENDIX = """
+Debate protocol:
+- Do NOT average opinions mechanically; challenge both sides explicitly.
+- Provide a disagreement matrix: [Bull strongest point, Bull fatal flaw, Bear strongest point, Bear fatal flaw].
+- If one side is weakly evidenced, state that clearly and reduce risk budget.
+- Prefer no-trade/HOLD when uncertainty or conflict is unresolved.
+"""
+
     def __init__(self):
         pass
 
@@ -57,7 +65,8 @@ Be honest about uncertainty."""
 
     def analyze(self, market_data_compact: str, bull_opinion: str, bear_opinion: str,
                 funding_context: str, mode: TradingMode = TradingMode.SWING) -> str:
-        prompt = self.SWING_PROMPT if mode == TradingMode.SWING else self.SCALP_PROMPT
+        base_prompt = self.SWING_PROMPT if mode == TradingMode.SWING else self.SCALP_PROMPT
+        prompt = f"{base_prompt}\n\n{self.DEBATE_APPENDIX}"
 
         feedback_history = self.get_recent_feedback()
         feedback_text = "\n\n".join([
