@@ -21,7 +21,7 @@ pydantic-settings>=2.6,<3
 websockets>=13.1,<14
 apscheduler>=3.10,<4
 loguru>=0.7,<1
-pandas_ta_classic>=0.3.59,<0.4
+pandas_ta_classic==0.3.59
 matplotlib>=3.9,<4
 mplfinance>=0.12.10b0,<0.13
 Pillow>=11.0,<12
