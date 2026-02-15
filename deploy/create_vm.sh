@@ -15,7 +15,8 @@ if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" || "$PROJECT_ID" == "your-g
 fi
 
 INSTANCE_NAME="crypto-trading-vm"
-ZONE="us-central1-a"
+REGION="${REGION:-us-central1}"
+ZONE="${ZONE:-${REGION}-a}"
 MACHINE_TYPE="e2-small"
 IMAGE_FAMILY="ubuntu-2204-lts"
 IMAGE_PROJECT="ubuntu-os-cloud"
