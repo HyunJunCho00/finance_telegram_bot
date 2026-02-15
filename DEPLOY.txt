@@ -163,11 +163,31 @@ Step 1: Create VM
 -----------------
   bash deploy/create_vm.sh
 
+  If you see `$'\r'` errors in WSL:
+  sed -i 's/\r$//' deploy/create_vm.sh
+  bash deploy/create_vm.sh
+
   This creates:
   - e2-small instance in us-central1-a
   - Ubuntu 22.04 LTS
   - 20GB SSD
   - Standard networking (~$12/month)
+
+
+SECRET MANAGER (CLI COMMAND ORDER)
+==================================
+
+1) gcloud config set project <PROJECT_ID>
+
+2) for NAME in SUPABASE_URL SUPABASE_KEY TELEGRAM_API_ID TELEGRAM_API_HASH TELEGRAM_PHONE TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID PERPLEXITY_API_KEY NEO4J_URI NEO4J_PASSWORD MILVUS_URI MILVUS_TOKEN; do
+     read -s SECRET_VALUE && echo -n "$SECRET_VALUE" | gcloud secrets create "$NAME" --replication-policy=automatic --data-file=- && unset SECRET_VALUE
+   done
+
+3) gcloud projects add-iam-policy-binding <PROJECT_ID> \
+     --member="serviceAccount:crypto-trading-sa@<PROJECT_ID>.iam.gserviceaccount.com" \
+     --role="roles/secretmanager.secretAccessor"
+
+4) (VM env) USE_SECRET_MANAGER=true, PROJECT_ID=<PROJECT_ID>
 
 Step 2: SSH into VM
 -------------------
@@ -206,26 +226,19 @@ Step 6: Configure Environment
   - NEO4J_URI, NEO4J_PASSWORD
   - MILVUS_URI, MILVUS_TOKEN
 
-Step 7: Setup GCP Service Account
-----------------------------------
-  # Create service account
-  gcloud iam service-accounts create crypto-trading-sa \
-    --display-name="Crypto Trading System Service Account"
+Step 7: Service Account (auto-handled by create_vm.sh)
+--------------------------------------------------------
+  create_vm.sh now does this automatically:
+  - create crypto-trading-sa if missing
+  - grant roles/aiplatform.user
+  - grant roles/secretmanager.secretAccessor
+  - attach service account at VM creation
 
-  # Grant Vertex AI access (for Gemini + Claude)
-  gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:crypto-trading-sa@$PROJECT_ID.iam.gserviceaccount.com" \
-    --role="roles/aiplatform.user"
-
-  # Assign to VM
+  If you need to re-attach manually:
   gcloud compute instances set-service-account crypto-trading-vm \
     --zone=us-central1-a \
     --service-account=crypto-trading-sa@$PROJECT_ID.iam.gserviceaccount.com \
     --scopes=cloud-platform
-
-  # Restart VM to apply
-  gcloud compute instances reset crypto-trading-vm --zone=us-central1-a
-  gcloud compute ssh crypto-trading-vm --zone=us-central1-a
 
 Step 8: Telegram Session Setup (first time only)
 -------------------------------------------------
