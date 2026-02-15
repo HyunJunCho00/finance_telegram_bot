@@ -16,8 +16,14 @@ fi
 
 ENV_FILE="${1:-.env}"
 
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "ERROR: env file not found: $ENV_FILE"
+if [[ "$ENV_FILE" == ".env.example" ]]; then
+  echo "ERROR: Refusing to upload secrets from .env.example."
+  echo "Use: cp .env.example .env and edit .env"
+  exit 1
+fi
+
+if [[ ! -r "$ENV_FILE" ]]; then
+  echo "ERROR: env file not found or not readable: $ENV_FILE"
   echo "Create it from template: cp .env.example .env"
   exit 1
 fi
