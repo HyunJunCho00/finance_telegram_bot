@@ -25,6 +25,9 @@ class FundingCollector:
             'enableRateLimit': True,
             'options': {'defaultType': 'future'}
         })
+        self.binance_spot = ccxt.binance({
+            'enableRateLimit': True
+        })
 
         # Bybit and OKX - public API only (no keys needed for OI)
         self.bybit = ccxt.bybit({
@@ -144,6 +147,18 @@ class FundingCollector:
             logger.error(f"Long/short ratio fetch error for {symbol}: {e}")
         return {}
 
+    def fetch_basis_pct(self, symbol: str) -> float:
+        """Perp-vs-spot basis in percent."""
+        try:
+            perp_last = float(self.binance.fetch_ticker(symbol).get('last', 0) or 0)
+            spot_last = float(self.binance_spot.fetch_ticker(symbol).get('last', 0) or 0)
+            if perp_last <= 0 or spot_last <= 0:
+                return 0.0
+            return round(((perp_last - spot_last) / spot_last) * 100, 6)
+        except Exception as e:
+            logger.warning(f"Basis fetch error for {symbol}: {e}")
+            return 0.0
+
     def collect_all_funding_data(self) -> List[Dict]:
         results = []
         # Truncate to minute for dedup (UNIQUE constraint on timestamp, symbol)
@@ -153,6 +168,7 @@ class FundingCollector:
             funding = self.fetch_funding_rate(symbol)
             global_oi = self.fetch_global_open_interest(symbol)
             ls_ratio = self.fetch_long_short_ratio(symbol)
+            basis_pct = self.fetch_basis_pct(symbol)
 
             if funding or global_oi:
                 combined = {
@@ -165,6 +181,7 @@ class FundingCollector:
                     'oi_binance': global_oi.get('open_interest_binance', 0),
                     'oi_bybit': global_oi.get('open_interest_bybit', 0),
                     'oi_okx': global_oi.get('open_interest_okx', 0),
+                    'basis_pct': basis_pct,
                     **ls_ratio,
                 }
                 results.append(combined)

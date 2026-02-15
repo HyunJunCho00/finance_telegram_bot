@@ -123,6 +123,77 @@ class DuneCollector:
         due_delta = timedelta(minutes=query_cfg.cadence_minutes)
         return datetime.now(timezone.utc) - ts >= due_delta
 
+
+
+    def _parse_priority_query_ids(self) -> list[int]:
+        raw = (settings.DUNE_PRIORITY_QUERY_IDS or "").strip()
+        if not raw:
+            return []
+        out: list[int] = []
+        for token in raw.split(','):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                out.append(int(token))
+            except ValueError:
+                logger.warning(f"Invalid DUNE_PRIORITY_QUERY_IDS token ignored: {token}")
+        return out
+
+    def _get_last_dune_collection_ts(self) -> datetime | None:
+        latest_ts: datetime | None = None
+        for cfg in QUERY_CONFIGS:
+            latest = db.get_latest_dune_query_result(cfg.query_id)
+            if not latest:
+                continue
+            collected_at = latest.get("collected_at")
+            if not collected_at:
+                continue
+            try:
+                ts = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if latest_ts is None or ts > latest_ts:
+                latest_ts = ts
+        return latest_ts
+
+    def _global_guard_allows_run(self) -> bool:
+        min_interval = max(1, int(settings.DUNE_GLOBAL_MIN_INTERVAL_MINUTES))
+        last_ts = self._get_last_dune_collection_ts()
+        if last_ts is None:
+            return True
+        elapsed = datetime.now(timezone.utc) - last_ts
+        return elapsed >= timedelta(minutes=min_interval)
+
+    def _daily_run_count(self) -> int:
+        today = datetime.now(timezone.utc).date()
+        count = 0
+        for cfg in QUERY_CONFIGS:
+            latest = db.get_latest_dune_query_result(cfg.query_id)
+            if not latest:
+                continue
+            collected_at = latest.get("collected_at")
+            if not collected_at:
+                continue
+            try:
+                ts = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if ts.date() == today:
+                count += 1
+        return count
+
+    def _sort_configs_by_priority(self, configs: list[DuneQueryConfig]) -> list[DuneQueryConfig]:
+        priorities = self._parse_priority_query_ids()
+        if not priorities:
+            return configs
+        rank = {qid: idx for idx, qid in enumerate(priorities)}
+
+        def _key(cfg: DuneQueryConfig):
+            return (rank.get(cfg.query_id, 10_000), cfg.cadence_minutes, cfg.query_id)
+
+        return sorted(configs, key=_key)
+
     def _persist(self, query_cfg: DuneQueryConfig, payload: dict[str, Any]) -> None:
         raw_rows = payload.get("result", {}).get("rows", [])
         rows, dropped_keys = sanitize_dune_rows(raw_rows)
@@ -174,12 +245,35 @@ class DuneCollector:
         query_ids: list[int] | None = None,
         force: bool = False,
     ) -> dict[str, int]:
-        stats = {"selected": 0, "ran": 0, "skipped": 0, "failed": 0}
+        stats = {"selected": 0, "ran": 0, "skipped": 0, "failed": 0, "budget_blocked": 0}
 
-        for query_cfg in self.resolve_query_configs(query_ids):
+        if settings.DUNE_BUDGET_GUARD and not force:
+            if not self._global_guard_allows_run():
+                stats["budget_blocked"] += 1
+                logger.info(
+                    "Dune budget guard: skipped (global min interval not reached)"
+                )
+                return stats
+
+            daily_runs = self._daily_run_count()
+            if daily_runs >= max(1, int(settings.DUNE_MAX_QUERY_RUNS_PER_DAY)):
+                stats["budget_blocked"] += 1
+                logger.info(
+                    "Dune budget guard: skipped (daily run budget reached)"
+                )
+                return stats
+
+        configs = self._sort_configs_by_priority(self.resolve_query_configs(query_ids))
+        max_queries_per_run = max(1, int(settings.DUNE_MAX_QUERIES_PER_RUN))
+
+        for query_cfg in configs:
             stats["selected"] += 1
 
             if not force and not self._should_run_now(query_cfg):
+                stats["skipped"] += 1
+                continue
+
+            if settings.DUNE_BUDGET_GUARD and not force and stats["ran"] >= max_queries_per_run:
                 stats["skipped"] += 1
                 continue
 

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS funding_data (
     long_short_ratio DECIMAL(10, 4),
     long_account DECIMAL(10, 4),
     short_account DECIMAL(10, 4),
+    basis_pct DECIMAL(10, 6),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(timestamp, symbol)
 );
@@ -141,6 +142,7 @@ CREATE INDEX idx_trade_executions_created_at ON trade_executions(created_at DESC
 -- ALTER TABLE funding_data ADD COLUMN IF NOT EXISTS oi_binance DECIMAL(20, 2) DEFAULT 0;
 -- ALTER TABLE funding_data ADD COLUMN IF NOT EXISTS oi_bybit DECIMAL(20, 2) DEFAULT 0;
 -- ALTER TABLE funding_data ADD COLUMN IF NOT EXISTS oi_okx DECIMAL(20, 2) DEFAULT 0;
+-- ALTER TABLE funding_data ADD COLUMN IF NOT EXISTS basis_pct DECIMAL(10, 6);
 
 -- Dune query snapshots (raw rows JSON for macro/on-chain signals)
 CREATE TABLE IF NOT EXISTS dune_query_results (
@@ -159,3 +161,44 @@ CREATE TABLE IF NOT EXISTS dune_query_results (
 
 CREATE INDEX idx_dune_query_results_query_time ON dune_query_results(query_id, collected_at DESC);
 CREATE INDEX idx_dune_query_results_collected_at ON dune_query_results(collected_at DESC);
+
+
+-- Microstructure snapshots (lightweight orderbook proxies)
+CREATE TABLE IF NOT EXISTS microstructure_data (
+    id BIGSERIAL PRIMARY KEY,
+    timestamp TIMESTAMPTZ NOT NULL,
+    symbol VARCHAR(20) NOT NULL,
+    exchange VARCHAR(20) NOT NULL DEFAULT 'binance',
+    bid_price DECIMAL(20, 8),
+    ask_price DECIMAL(20, 8),
+    spread_bps DECIMAL(12, 6),
+    bid_qty_top5 DECIMAL(20, 8),
+    ask_qty_top5 DECIMAL(20, 8),
+    orderbook_imbalance DECIMAL(14, 8),
+    slippage_buy_100k_bps DECIMAL(12, 6),
+    depth_levels INTEGER DEFAULT 5,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(timestamp, symbol, exchange)
+);
+
+CREATE INDEX idx_microstructure_symbol_timestamp ON microstructure_data(symbol, timestamp DESC);
+
+-- Macro regime snapshots (FRED + yfinance proxies)
+CREATE TABLE IF NOT EXISTS macro_data (
+    id BIGSERIAL PRIMARY KEY,
+    timestamp TIMESTAMPTZ NOT NULL,
+    source VARCHAR(40) NOT NULL DEFAULT 'macro_collector',
+    dgs2 DECIMAL(10, 4),
+    dgs10 DECIMAL(10, 4),
+    ust_2s10s_spread DECIMAL(10, 4),
+    cpiaucsl DECIMAL(20, 4),
+    fedfunds DECIMAL(10, 4),
+    dxy DECIMAL(12, 4),
+    nasdaq DECIMAL(20, 4),
+    gold DECIMAL(20, 4),
+    oil DECIMAL(20, 4),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(timestamp, source)
+);
+
+CREATE INDEX idx_macro_data_timestamp ON macro_data(timestamp DESC);

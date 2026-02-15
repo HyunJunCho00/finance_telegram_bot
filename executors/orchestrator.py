@@ -34,6 +34,7 @@ from processors.chart_generator import chart_generator
 from processors.light_rag import light_rag
 from collectors.telegram_collector import telegram_collector
 from collectors.perplexity_collector import perplexity_collector
+from collectors.macro_collector import macro_collector
 from agents.bullish_agent import bullish_agent
 from agents.bearish_agent import bearish_agent
 from agents.risk_agent import risk_agent
@@ -66,6 +67,8 @@ class AnalysisState(TypedDict):
     rag_context: str
     telegram_news: str
     feedback_text: str
+    microstructure_context: str
+    macro_context: str
 
     # Agent opinions
     bull_opinion: str
@@ -223,6 +226,45 @@ def node_self_correction(state: AnalysisState) -> dict:
     return {"feedback_text": ""}
 
 
+
+
+def node_microstructure_context(state: AnalysisState) -> dict:
+    """Fetch latest microstructure snapshot (spread/imbalance/slippage)."""
+    symbol = state["symbol"]
+    try:
+        snap = db.get_latest_microstructure(symbol)
+        if not snap:
+            return {"microstructure_context": "Microstructure: No data"}
+
+        text = (
+            f"[MICRO] spread={snap.get('spread_bps', 0):.2f}bps | "
+            f"imbalance={snap.get('orderbook_imbalance', 0):.4f} | "
+            f"slippage_100k={snap.get('slippage_buy_100k_bps', 0):.2f}bps"
+        )
+        return {"microstructure_context": text}
+    except Exception as e:
+        logger.error(f"Microstructure context error: {e}")
+        return {"microstructure_context": "Microstructure: Error"}
+
+
+def node_macro_context(state: AnalysisState) -> dict:
+    """Fetch latest macro snapshot (FRED + cross-asset proxies)."""
+    try:
+        macro = db.get_latest_macro_data()
+        if not macro:
+            return {"macro_context": "Macro: No data"}
+
+        text = (
+            f"[MACRO] DGS2={macro.get('dgs2', 'N/A')} DGS10={macro.get('dgs10', 'N/A')} "
+            f"2s10s={macro.get('ust_2s10s_spread', 'N/A')} | "
+            f"DXY={macro.get('dxy', 'N/A')} NASDAQ={macro.get('nasdaq', 'N/A')} "
+            f"GOLD={macro.get('gold', 'N/A')} OIL={macro.get('oil', 'N/A')}"
+        )
+        return {"macro_context": text}
+    except Exception as e:
+        logger.error(f"Macro context error: {e}")
+        return {"macro_context": "Macro: Error"}
+
 def node_bull_agent(state: AnalysisState) -> dict:
     """Run bullish analyst (Gemini Flash, text-only)."""
     mode = TradingMode(state["mode"])
@@ -347,6 +389,8 @@ def _build_full_context(state: AnalysisState) -> str:
     parts = [
         state.get("narrative_text", ""),
         state.get("cvd_context", ""),
+        state.get("microstructure_context", ""),
+        state.get("macro_context", ""),
         state.get("rag_context", ""),
         f"Telegram News:\n{state.get('telegram_news', '')}",
         state.get("feedback_text", ""),
@@ -378,6 +422,8 @@ def build_analysis_graph():
     graph.add_node("rag_query", node_rag_query)
     graph.add_node("telegram_news", node_telegram_news)
     graph.add_node("self_correction", node_self_correction)
+    graph.add_node("microstructure_context", node_microstructure_context)
+    graph.add_node("macro_context", node_macro_context)
     graph.add_node("bull_agent", node_bull_agent)
     graph.add_node("bear_agent", node_bear_agent)
     graph.add_node("risk_agent", node_risk_agent)
@@ -396,9 +442,11 @@ def build_analysis_graph():
     graph.add_edge("cvd_context", "rag_query")
     graph.add_edge("rag_query", "telegram_news")
     graph.add_edge("telegram_news", "self_correction")
+    graph.add_edge("self_correction", "microstructure_context")
+    graph.add_edge("microstructure_context", "macro_context")
 
     # Agent chain
-    graph.add_edge("self_correction", "bull_agent")
+    graph.add_edge("macro_context", "bull_agent")
     graph.add_edge("bull_agent", "bear_agent")
     graph.add_edge("bear_agent", "risk_agent")
 
@@ -465,6 +513,8 @@ class Orchestrator:
             "rag_context": "",
             "telegram_news": "",
             "feedback_text": "",
+            "microstructure_context": "",
+            "macro_context": "",
             "bull_opinion": "",
             "bear_opinion": "",
             "risk_assessment": "",
@@ -494,6 +544,7 @@ class Orchestrator:
             node_collect_data, node_perplexity_search, node_rag_ingest,
             node_funding_context, node_cvd_context, node_rag_query,
             node_telegram_news, node_self_correction,
+            node_microstructure_context, node_macro_context,
             node_bull_agent, node_bear_agent, node_risk_agent,
         ]:
             try:

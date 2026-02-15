@@ -4,6 +4,8 @@ from collectors.price_collector import collector
 from collectors.funding_collector import funding_collector
 from collectors.volatility_monitor import volatility_monitor
 from collectors.dune_collector import dune_collector
+from collectors.microstructure_collector import microstructure_collector
+from collectors.macro_collector import macro_collector
 from executors.orchestrator import orchestrator
 from evalutors.feedback_generator import feedback_generator
 from processors.light_rag import light_rag
@@ -19,6 +21,7 @@ def job_1min_tick():
     try:
         collector.run()
         funding_collector.run()
+        microstructure_collector.run()
         volatility_monitor.run()
     except Exception as e:
         logger.error(f"1-minute tick job error: {e}")
@@ -40,6 +43,7 @@ def job_4hour_analysis():
     try:
         mode = settings.trading_mode
         logger.info(f"Running 4-hour analysis job (mode={mode.value})")
+        macro_collector.run()
         orchestrator.run_scheduled_analysis()
     except Exception as e:
         logger.error(f"4-hour analysis job error: {e}")
