@@ -27,13 +27,14 @@ from collections import defaultdict
 from loguru import logger
 import json
 
-# Vertex AI embedding
+# Gemini embedding (google-genai SDK)
 try:
-    from vertexai.language_models import TextEmbeddingModel
+    from google import genai
+    from google.genai import types
     EMBEDDING_AVAILABLE = True
 except ImportError:
     EMBEDDING_AVAILABLE = False
-    logger.warning("vertexai embedding not available")
+    logger.warning("google-genai embedding not available")
 
 # Neo4j
 try:
@@ -550,7 +551,7 @@ Rules:
 
     def __init__(self):
         # Embedding model (lazy init)
-        self._embed_model = None
+        self._embed_client = None
 
         # Storage backends (configured from settings)
         self._graph = None
@@ -621,22 +622,32 @@ Rules:
         return self._vector_store
 
     @property
-    def embed_model(self):
-        if self._embed_model is None and EMBEDDING_AVAILABLE:
+    def embed_client(self):
+        if self._embed_client is None and EMBEDDING_AVAILABLE:
             try:
-                self._embed_model = TextEmbeddingModel.from_pretrained("text-embedding-005")
+                from config.settings import settings
+                self._embed_client = genai.Client(
+                    vertexai=True,
+                    project=settings.PROJECT_ID,
+                    location=settings.REGION,
+                )
             except Exception as e:
-                logger.warning(f"Embedding model init failed: {e}")
-        return self._embed_model
+                logger.warning(f"Embedding client init failed: {e}")
+        return self._embed_client
 
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
         """Get embedding from Gemini text-embedding-005."""
-        if self.embed_model is None:
+        if self.embed_client is None:
             return None
         try:
-            result = self.embed_model.get_embeddings([text[:512]])
-            if result and result[0].values:
-                return np.array(result[0].values, dtype=np.float32)
+            response = self.embed_client.models.embed_content(
+                model="text-embedding-005",
+                contents=[text[:512]],
+                config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
+            )
+            embeddings = getattr(response, "embeddings", None) or []
+            if embeddings and getattr(embeddings[0], "values", None):
+                return np.array(embeddings[0].values, dtype=np.float32)
         except Exception as e:
             logger.warning(f"Embedding error: {e}")
         return None

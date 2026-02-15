@@ -7,21 +7,24 @@ Key goals:
 """
 
 import base64
+import mimetypes
 from typing import Dict, List, Optional, Tuple
 
-import vertexai
+from google import genai
+from google.genai import types
 from anthropic import AnthropicVertex
 from loguru import logger
-from vertexai.generative_models import GenerativeModel, Image, Part
 
 from config.settings import settings
 
 
 class AIClient:
     def __init__(self):
-        vertexai.init(project=settings.PROJECT_ID, location=settings.REGION)
-
-        self._gemini_models: Dict[str, GenerativeModel] = {}
+        self._gemini_client = genai.Client(
+            vertexai=True,
+            project=settings.PROJECT_ID,
+            location=settings.REGION,
+        )
         self._claude_client = None
 
         # Backward-compatible defaults
@@ -36,11 +39,6 @@ class AIClient:
                 project_id=settings.PROJECT_ID,
             )
         return self._claude_client
-
-    def _get_gemini_model(self, model_id: str) -> GenerativeModel:
-        if model_id not in self._gemini_models:
-            self._gemini_models[model_id] = GenerativeModel(model_id)
-        return self._gemini_models[model_id]
 
     def _get_role_model_and_cap(self, role: str, use_premium: bool) -> Tuple[str, int]:
         role = (role or "general").lower()
@@ -109,24 +107,27 @@ class AIClient:
         chart_image_b64: Optional[str] = None,
     ) -> str:
         try:
-            model = self._get_gemini_model(model_id)
             parts = []
 
             if chart_image_b64:
                 image_bytes = base64.b64decode(chart_image_b64)
-                parts.append(Part.from_image(Image.from_bytes(image_bytes)))
+                mime = mimetypes.guess_type("chart.png")[0] or "image/png"
+                parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime))
 
-            parts.append(Part.from_text(user_message))
+            parts.append(types.Part.from_text(text=user_message))
 
-            response = model.generate_content(
-                contents=parts,
-                generation_config={
-                    "max_output_tokens": max_tokens,
-                    "temperature": temperature,
-                },
+            config = types.GenerateContentConfig(
                 system_instruction=system_prompt,
+                max_output_tokens=max_tokens,
+                temperature=temperature,
             )
-            return response.text
+
+            response = self._gemini_client.models.generate_content(
+                model=model_id,
+                contents=[types.Content(role="user", parts=parts)],
+                config=config,
+            )
+            return response.text or ""
 
         except Exception as e:
             logger.error(f"Gemini API error ({model_id}): {e}")
