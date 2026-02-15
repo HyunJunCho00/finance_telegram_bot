@@ -127,6 +127,25 @@ class DatabaseClient:
 
         return response.data[0] if response.data else None
 
+
+    # ─────────────── Dune Query Data ───────────────
+
+    def upsert_dune_query_result(self, data: Dict) -> Dict:
+        """Upsert Dune query snapshot by (query_id, collected_at)."""
+        return self.client.table("dune_query_results").upsert(
+            data, on_conflict="query_id,collected_at"
+        ).execute()
+
+    def get_latest_dune_query_result(self, query_id: int) -> Optional[Dict]:
+        response = self.client.table("dune_query_results")\
+            .select("*")\
+            .eq("query_id", query_id)\
+            .order("collected_at", desc=True)\
+            .limit(1)\
+            .execute()
+
+        return response.data[0] if response.data else None
+
     # ─────────────── AI Reports ───────────────
 
     def insert_ai_report(self, data: Dict) -> Dict:
@@ -252,6 +271,13 @@ class DatabaseClient:
                 .lt("created_at", cutoff_reports)\
                 .execute()
             results['reports_deleted'] = len(r.data) if r.data else 0
+
+            # Dune snapshots
+            r = self.client.table("dune_query_results")\
+                .delete()\
+                .lt("collected_at", cutoff_reports)\
+                .execute()
+            results['dune_deleted'] = len(r.data) if r.data else 0
 
             logger.info(f"Data cleanup completed: {results}")
             return results

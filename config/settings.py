@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     MILVUS_URI: str = ""  # e.g. https://in03-xxxxxx.api.gcp-us-west1.zillizcloud.com
     MILVUS_TOKEN: str = ""
 
+
+    # Dune API (on-chain/DEX macro signals)
+    DUNE_API_KEY: str = ""
+    DUNE_ENABLED: bool = False
+
     # Optional low-cost long-term archive on GCS
     ENABLE_GCS_ARCHIVE: bool = False
     GCS_ARCHIVE_BUCKET: str = ""
@@ -164,6 +169,7 @@ class SecretManager:
             "MILVUS_URI",
             "MILVUS_TOKEN",
             "GCS_ARCHIVE_BUCKET",
+            "DUNE_API_KEY",
         ]
 
         for name in secret_names:
