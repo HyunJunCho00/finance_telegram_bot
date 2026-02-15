@@ -1,34 +1,45 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
-PROJECT_ID="your-gcp-project-id"
+PROJECT_ID="${PROJECT_ID:-}"
+if [[ -z "$PROJECT_ID" ]]; then
+  PROJECT_ID="$(gcloud config get-value project 2>/dev/null || true)"
+fi
+
+if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" || "$PROJECT_ID" == "your-gcp-project-id" ]]; then
+  echo "ERROR: PROJECT_ID is not set."
+  echo "Set it with: gcloud config set project <PROJECT_ID>"
+  echo "Or run with: PROJECT_ID=<PROJECT_ID> bash deploy/create_vm.sh"
+  exit 1
+fi
+
 INSTANCE_NAME="crypto-trading-vm"
 ZONE="us-central1-a"
-# e2-small: 0.5 vCPU, 2GB RAM = ~$12/month (sufficient for this workload)
 MACHINE_TYPE="e2-small"
 IMAGE_FAMILY="ubuntu-2204-lts"
 IMAGE_PROJECT="ubuntu-os-cloud"
+SA_NAME="crypto-trading-sa"
+SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
-echo "Creating GCP Compute Engine instance..."
-echo "  Machine: $MACHINE_TYPE (~\$12/month)"
-echo "  Disk: 20GB pd-standard"
+if ! gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" >/dev/null 2>&1; then
+  echo "Creating service account: $SA_EMAIL"
+  gcloud iam service-accounts create "$SA_NAME" \
+    --project="$PROJECT_ID" \
+    --display-name="Crypto Trading System Service Account"
+fi
 
-gcloud compute instances create $INSTANCE_NAME \
-    --project=$PROJECT_ID \
-    --zone=$ZONE \
-    --machine-type=$MACHINE_TYPE \
-    --network-interface=network-tier=STANDARD,subnet=default \
-    --maintenance-policy=MIGRATE \
-    --service-account=crypto-trading-sa@${PROJECT_ID}.iam.gserviceaccount.com \
-    --scopes=https://www.googleapis.com/auth/cloud-platform \
-    --image-family=$IMAGE_FAMILY \
-    --image-project=$IMAGE_PROJECT \
-    --boot-disk-size=20GB \
-    --boot-disk-type=pd-standard \
-    --boot-disk-device-name=$INSTANCE_NAME \
-    --tags=crypto-trading \
-    --metadata=startup-script='#!/bin/bash
+echo "Granting required IAM roles to service account..."
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/aiplatform.user" >/dev/null
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/secretmanager.secretAccessor" >/dev/null
+
+read -r -d '' STARTUP_SCRIPT <<'SCRIPT' || true
+#!/bin/bash
 apt-get update
 apt-get install -y python3-pip python3-venv git
 
@@ -48,7 +59,29 @@ systemctl daemon-reload
 systemctl enable scheduler.service
 systemctl enable mcp_server.service
 systemctl start scheduler.service
-systemctl start mcp_server.service'
+systemctl start mcp_server.service
+SCRIPT
+
+echo "Creating GCP Compute Engine instance..."
+echo "  Project: $PROJECT_ID"
+echo "  Machine: $MACHINE_TYPE (~\$12/month)"
+echo "  Disk: 20GB pd-standard"
+
+gcloud compute instances create "$INSTANCE_NAME" \
+  --project="$PROJECT_ID" \
+  --zone="$ZONE" \
+  --machine-type="$MACHINE_TYPE" \
+  --network-interface="network-tier=STANDARD,subnet=default" \
+  --maintenance-policy="MIGRATE" \
+  --service-account="$SA_EMAIL" \
+  --scopes="https://www.googleapis.com/auth/cloud-platform" \
+  --image-family="$IMAGE_FAMILY" \
+  --image-project="$IMAGE_PROJECT" \
+  --boot-disk-size="20GB" \
+  --boot-disk-type="pd-standard" \
+  --boot-disk-device-name="$INSTANCE_NAME" \
+  --tags="crypto-trading" \
+  --metadata="startup-script=${STARTUP_SCRIPT}"
 
 echo ""
 echo "Instance created successfully!"
