@@ -22,6 +22,19 @@ IMAGE_FAMILY="ubuntu-2204-lts"
 IMAGE_PROJECT="ubuntu-os-cloud"
 SA_NAME="crypto-trading-sa"
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+REPO_URL="${REPO_URL:-https://github.com/<your-org>/finance_telegram_bot.git}"
+
+if [[ -z "$REPO_URL" || "$REPO_URL" == *"<your-org>"* ]]; then
+  echo "ERROR: REPO_URL is not set to a real repository URL."
+  echo "Run with: REPO_URL=https://github.com/<org>/finance_telegram_bot.git bash deploy/create_vm.sh"
+  exit 1
+fi
+
+if gcloud compute instances describe "$INSTANCE_NAME" --project="$PROJECT_ID" --zone="$ZONE" >/dev/null 2>&1; then
+  echo "ERROR: Instance already exists: $INSTANCE_NAME ($ZONE)"
+  echo "Delete it first or set a different INSTANCE_NAME in the script."
+  exit 1
+fi
 
 if ! gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" >/dev/null 2>&1; then
   echo "Creating service account: $SA_EMAIL"
@@ -45,7 +58,7 @@ apt-get update
 apt-get install -y python3-pip python3-venv git
 
 cd /opt
-git clone https://github.com/<your-org>/finance_telegram_bot.git /opt/crypto_trading_system
+git clone "__REPO_URL__" /opt/crypto_trading_system
 cd /opt/crypto_trading_system
 python3 -m venv venv
 source venv/bin/activate
@@ -54,6 +67,7 @@ pip install -r requirements.txt
 useradd -m -s /bin/bash crypto_trader || true
 chown -R crypto_trader:crypto_trader /opt/crypto_trading_system
 
+sed -i 's|Environment="PROJECT_ID=.*"|Environment="PROJECT_ID=__PROJECT_ID__"|' deploy/scheduler.service deploy/mcp_server.service
 cp deploy/scheduler.service /etc/systemd/system/
 cp deploy/mcp_server.service /etc/systemd/system/
 systemctl daemon-reload
@@ -62,6 +76,9 @@ systemctl enable mcp_server.service
 systemctl start scheduler.service
 systemctl start mcp_server.service
 SCRIPT
+
+STARTUP_SCRIPT="${STARTUP_SCRIPT//__REPO_URL__/$REPO_URL}"
+STARTUP_SCRIPT="${STARTUP_SCRIPT//__PROJECT_ID__/$PROJECT_ID}"
 
 echo "Creating GCP Compute Engine instance..."
 echo "  Project: $PROJECT_ID"
