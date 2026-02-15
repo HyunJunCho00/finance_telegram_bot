@@ -141,3 +141,21 @@ CREATE INDEX idx_trade_executions_created_at ON trade_executions(created_at DESC
 -- ALTER TABLE funding_data ADD COLUMN IF NOT EXISTS oi_binance DECIMAL(20, 2) DEFAULT 0;
 -- ALTER TABLE funding_data ADD COLUMN IF NOT EXISTS oi_bybit DECIMAL(20, 2) DEFAULT 0;
 -- ALTER TABLE funding_data ADD COLUMN IF NOT EXISTS oi_okx DECIMAL(20, 2) DEFAULT 0;
+
+-- Dune query snapshots (raw rows JSON for macro/on-chain signals)
+CREATE TABLE IF NOT EXISTS dune_query_results (
+    id BIGSERIAL PRIMARY KEY,
+    query_id BIGINT NOT NULL,
+    query_name VARCHAR(120),
+    category VARCHAR(50),
+    cadence_minutes INTEGER,
+    execution_ended_at TIMESTAMPTZ,
+    row_count INTEGER DEFAULT 0,
+    rows JSONB NOT NULL DEFAULT '[]'::jsonb,
+    collected_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(query_id, collected_at)
+);
+
+CREATE INDEX idx_dune_query_results_query_time ON dune_query_results(query_id, collected_at DESC);
+CREATE INDEX idx_dune_query_results_collected_at ON dune_query_results(collected_at DESC);

@@ -3,6 +3,7 @@ from apscheduler.triggers.cron import CronTrigger
 from collectors.price_collector import collector
 from collectors.funding_collector import funding_collector
 from collectors.volatility_monitor import volatility_monitor
+from collectors.dune_collector import dune_collector
 from executors.orchestrator import orchestrator
 from evalutors.feedback_generator import feedback_generator
 from processors.light_rag import light_rag
@@ -21,6 +22,18 @@ def job_1min_tick():
         volatility_monitor.run()
     except Exception as e:
         logger.error(f"1-minute tick job error: {e}")
+
+
+
+
+def job_15min_dune():
+    """Collect cadence-aware Dune snapshots and persist to DB."""
+    if dune_collector is None:
+        return
+    try:
+        dune_collector.run_due_queries(limit=200, offset=0)
+    except Exception as e:
+        logger.error(f"15-minute Dune job error: {e}")
 
 
 def job_4hour_analysis():
@@ -74,6 +87,7 @@ def main():
     logger.info(f"  Symbols: BTCUSDT, ETHUSDT")
     logger.info(f"  AI: Gemini Flash (agents) + Claude Opus 4.6 (judge)")
     logger.info(f"  Data: Global OI (3 exchanges) + CVD + Perplexity + LightRAG")
+    logger.info(f"  Dune: {'enabled' if dune_collector else 'disabled'} (cadence-aware)")
     logger.info(f"  LightRAG: Neo4j {'connected' if settings.NEO4J_URI else 'in-memory'} + "
                 f"Milvus {'connected' if settings.MILVUS_URI else 'in-memory'}")
     logger.info(f"  Pipeline: LangGraph StateGraph")
@@ -87,6 +101,15 @@ def main():
         'interval',
         minutes=1,
         id='job_1min_tick',
+        max_instances=1
+    )
+
+
+    scheduler.add_job(
+        job_15min_dune,
+        'interval',
+        minutes=15,
+        id='job_15min_dune',
         max_instances=1
     )
 
