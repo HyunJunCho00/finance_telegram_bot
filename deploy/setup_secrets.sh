@@ -1,49 +1,113 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
-PROJECT_ID="your-gcp-project-id"
+PROJECT_ID="${PROJECT_ID:-}"
+if [[ -z "$PROJECT_ID" ]]; then
+  PROJECT_ID="$(gcloud config get-value project 2>/dev/null || true)"
+fi
 
-echo "Setting up GCP Secret Manager..."
+if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" || "$PROJECT_ID" == "your-gcp-project-id" ]]; then
+  echo "ERROR: PROJECT_ID is not set."
+  echo "Set it with: gcloud config set project <PROJECT_ID>"
+  echo "Or run with: PROJECT_ID=<PROJECT_ID> bash deploy/setup_secrets.sh"
+  exit 1
+fi
 
-gcloud config set project $PROJECT_ID
+ENV_FILE="${1:-.env}"
 
-echo "Creating secrets..."
+if [[ ! -f "$ENV_FILE" ]]; then
+  echo "ERROR: env file not found: $ENV_FILE"
+  echo "Create it from template: cp .env.example .env"
+  exit 1
+fi
 
-echo -n "your-supabase-url" | gcloud secrets create SUPABASE_URL --data-file=- --replication-policy="automatic"
-echo -n "your-supabase-key" | gcloud secrets create SUPABASE_KEY --data-file=- --replication-policy="automatic"
+SECRET_KEYS=(
+  SUPABASE_URL
+  SUPABASE_KEY
+  BINANCE_API_KEY
+  BINANCE_API_SECRET
+  UPBIT_ACCESS_KEY
+  UPBIT_SECRET_KEY
+  TELEGRAM_API_ID
+  TELEGRAM_API_HASH
+  TELEGRAM_PHONE
+  TELEGRAM_BOT_TOKEN
+  TELEGRAM_CHAT_ID
+  PERPLEXITY_API_KEY
+  FRED_API_KEY
+  NEO4J_URI
+  NEO4J_PASSWORD
+  MILVUS_URI
+  MILVUS_TOKEN
+  GCS_ARCHIVE_BUCKET
+  DUNE_API_KEY
+)
 
-echo -n "your-binance-api-key" | gcloud secrets create BINANCE_API_KEY --data-file=- --replication-policy="automatic"
-echo -n "your-binance-api-secret" | gcloud secrets create BINANCE_API_SECRET --data-file=- --replication-policy="automatic"
+SA_NAME="crypto-trading-sa"
+SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 
-echo -n "your-upbit-access-key" | gcloud secrets create UPBIT_ACCESS_KEY --data-file=- --replication-policy="automatic"
-echo -n "your-upbit-secret-key" | gcloud secrets create UPBIT_SECRET_KEY --data-file=- --replication-policy="automatic"
+extract_env_value() {
+  local key="$1"
+  local file="$2"
 
-echo -n "your-telegram-api-id" | gcloud secrets create TELEGRAM_API_ID --data-file=- --replication-policy="automatic"
-echo -n "your-telegram-api-hash" | gcloud secrets create TELEGRAM_API_HASH --data-file=- --replication-policy="automatic"
-echo -n "+1234567890" | gcloud secrets create TELEGRAM_PHONE --data-file=- --replication-policy="automatic"
-echo -n "your-bot-token" | gcloud secrets create TELEGRAM_BOT_TOKEN --data-file=- --replication-policy="automatic"
-echo -n "your-chat-id" | gcloud secrets create TELEGRAM_CHAT_ID --data-file=- --replication-policy="automatic"
+  local raw
+  raw="$(grep -E "^${key}=" "$file" | tail -n 1 | cut -d'=' -f2- || true)"
 
-# Optional: GCS bucket for long-term JSONL archives
-echo -n "your-gcs-archive-bucket" | gcloud secrets create GCS_ARCHIVE_BUCKET --data-file=- --replication-policy="automatic"
+  # Trim surrounding single/double quotes if present.
+  raw="${raw%\"}"
+  raw="${raw#\"}"
+  raw="${raw%\'}"
+  raw="${raw#\'}"
 
-echo "Creating service account..."
+  printf "%s" "$raw"
+}
 
-gcloud iam service-accounts create crypto-trading-sa \
-    --display-name="Crypto Trading System Service Account"
+upsert_secret() {
+  local key="$1"
+  local value="$2"
 
-SA_EMAIL="crypto-trading-sa@${PROJECT_ID}.iam.gserviceaccount.com"
+  if gcloud secrets describe "$key" --project "$PROJECT_ID" >/dev/null 2>&1; then
+    printf "%s" "$value" | gcloud secrets versions add "$key" \
+      --project "$PROJECT_ID" \
+      --data-file=- >/dev/null
+    echo "Updated secret version: $key"
+  else
+    printf "%s" "$value" | gcloud secrets create "$key" \
+      --project "$PROJECT_ID" \
+      --replication-policy="automatic" \
+      --data-file=- >/dev/null
+    echo "Created secret: $key"
+  fi
+}
 
-echo "Granting permissions..."
+echo "Using project: $PROJECT_ID"
+gcloud config set project "$PROJECT_ID" >/dev/null
 
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:${SA_EMAIL}" \
-    --role="roles/secretmanager.secretAccessor"
+echo "Creating/updating secrets from $ENV_FILE"
+for key in "${SECRET_KEYS[@]}"; do
+  value="$(extract_env_value "$key" "$ENV_FILE")"
+  if [[ -n "$value" ]]; then
+    upsert_secret "$key" "$value"
+  else
+    echo "Skipped empty value: $key"
+  fi
+done
 
-gcloud projects add-iam-policy-binding $PROJECT_ID \
-    --member="serviceAccount:${SA_EMAIL}" \
-    --role="roles/aiplatform.user"
+if ! gcloud iam service-accounts describe "$SA_EMAIL" --project "$PROJECT_ID" >/dev/null 2>&1; then
+  echo "Creating service account: $SA_EMAIL"
+  gcloud iam service-accounts create "$SA_NAME" \
+    --project "$PROJECT_ID" \
+    --display-name="Crypto Trading System Service Account" >/dev/null
+fi
 
-echo "Secret Manager setup complete"
-echo "Service Account: $SA_EMAIL"
+echo "Granting required IAM roles..."
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/secretmanager.secretAccessor" >/dev/null
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/aiplatform.user" >/dev/null
+
+echo "Done. Service Account: $SA_EMAIL"
