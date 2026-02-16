@@ -5,6 +5,8 @@ set -euo pipefail
 PROJECT_ID="${PROJECT_ID:-}"
 REGION="${REGION:-}"
 VERTEX_REGION="${VERTEX_REGION:-}"
+BOOT_DISK_SIZE_GB="${BOOT_DISK_SIZE_GB:-}"
+BOOT_DISK_TYPE="${BOOT_DISK_TYPE:-}"
 ENV_FILE="${1:-.env}"
 
 extract_env_value() {
@@ -76,9 +78,24 @@ if [[ -z "$VERTEX_REGION" ]]; then
   VERTEX_REGION="us-central1"
 fi
 
+if [[ -z "$BOOT_DISK_SIZE_GB" ]]; then
+  BOOT_DISK_SIZE_GB="$(extract_env_value "BOOT_DISK_SIZE_GB" "$ENV_FILE")"
+fi
+if [[ -z "$BOOT_DISK_SIZE_GB" ]]; then
+  BOOT_DISK_SIZE_GB="50"
+fi
+
+if [[ -z "$BOOT_DISK_TYPE" ]]; then
+  BOOT_DISK_TYPE="$(extract_env_value "BOOT_DISK_TYPE" "$ENV_FILE")"
+fi
+if [[ -z "$BOOT_DISK_TYPE" ]]; then
+  BOOT_DISK_TYPE="pd-balanced"
+fi
+
 echo "Project      : $PROJECT_ID"
 echo "VM Region    : $REGION"
 echo "Vertex Region: $VERTEX_REGION"
+echo "Boot Disk    : ${BOOT_DISK_SIZE_GB}GB ${BOOT_DISK_TYPE}"
 echo "Env file     : $ENV_FILE"
 echo "Account      : $ACTIVE_ACCOUNT"
 
@@ -99,6 +116,6 @@ echo "Step 1/2: secrets + IAM setup"
 PROJECT_ID="$PROJECT_ID" bash deploy/setup_secrets.sh "$ENV_FILE"
 
 echo "Step 2/2: VM creation"
-PROJECT_ID="$PROJECT_ID" REGION="$REGION" VERTEX_REGION="$VERTEX_REGION" REPO_URL="$REPO_URL" bash deploy/create_vm.sh
+PROJECT_ID="$PROJECT_ID" REGION="$REGION" VERTEX_REGION="$VERTEX_REGION" BOOT_DISK_SIZE_GB="$BOOT_DISK_SIZE_GB" BOOT_DISK_TYPE="$BOOT_DISK_TYPE" REPO_URL="$REPO_URL" bash deploy/create_vm.sh
 
 echo "One-click deploy complete."
