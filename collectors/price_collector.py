@@ -17,7 +17,7 @@ CVD Calculation:
 
 import ccxt
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 import pandas as pd
 import pytz
 from config.settings import settings
@@ -46,7 +46,13 @@ class PriceCollector:
             'upbit': ['BTC/KRW', 'ETH/KRW']
         }
 
-    def fetch_binance_ohlcv_with_cvd(self, symbol: str, timeframe: str = '1m', limit: int = 1) -> pd.DataFrame:
+    def fetch_binance_ohlcv_with_cvd(
+        self,
+        symbol: str,
+        timeframe: str = '1m',
+        limit: int = 1,
+        since_ms: Optional[int] = None,
+    ) -> pd.DataFrame:
         """Fetch OHLCV from Binance Futures with Taker Buy Volume for CVD calculation.
 
         Binance klines API returns 12 fields per candle:
@@ -62,6 +68,7 @@ class PriceCollector:
                 'symbol': binance_symbol,
                 'interval': timeframe,
                 'limit': limit,
+                **({'startTime': since_ms} if since_ms is not None else {}),
             })
 
             if not raw_klines:
@@ -99,9 +106,15 @@ class PriceCollector:
         """Standard OHLCV fetch (backward compatible)."""
         return self.fetch_binance_ohlcv_with_cvd(symbol, timeframe, limit)
 
-    def fetch_upbit_ohlcv(self, symbol: str, timeframe: str = '1m', limit: int = 1) -> pd.DataFrame:
+    def fetch_upbit_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = '1m',
+        limit: int = 1,
+        since_ms: Optional[int] = None,
+    ) -> pd.DataFrame:
         try:
-            ohlcv = self.upbit.fetch_ohlcv(symbol, timeframe, limit=limit)
+            ohlcv = self.upbit.fetch_ohlcv(symbol, timeframe, since=since_ms, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             # All timestamps stored as UTC
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
@@ -112,24 +125,97 @@ class PriceCollector:
             logger.error(f"Upbit fetch error for {symbol}: {e}")
             return pd.DataFrame()
 
+    def _latest_db_timestamp_ms(self, db_symbol: str, exchange: str) -> Optional[int]:
+        """Read last stored candle timestamp (UTC ms) for symbol/exchange."""
+        df = db.get_latest_market_data(db_symbol, limit=1, exchange=exchange)
+        if df.empty:
+            return None
+        return int(df.iloc[-1]['timestamp'].timestamp() * 1000)
+
+    def _collect_binance_symbol_gap(self, symbol: str) -> List[Dict]:
+        """Backfill gap from latest DB candle to now, using 1m pagination."""
+        db_symbol = symbol.replace('/', '')
+        last_ms = self._latest_db_timestamp_ms(db_symbol, 'binance')
+
+        if last_ms is None:
+            df = self.fetch_binance_ohlcv_with_cvd(symbol, timeframe='1m', limit=2)
+            return df.to_dict('records') if not df.empty else []
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        current_since = last_ms + 60000  # next minute
+        if current_since > now_ms:
+            return []
+
+        rows: List[Dict] = []
+        while current_since <= now_ms:
+            batch = self.fetch_binance_ohlcv_with_cvd(
+                symbol, timeframe='1m', limit=1000, since_ms=current_since
+            )
+            if batch.empty:
+                break
+
+            recs = batch.to_dict('records')
+            rows.extend(recs)
+            last_batch_ms = int(batch.iloc[-1]['timestamp'].timestamp() * 1000)
+            next_since = last_batch_ms + 60000
+            if next_since <= current_since:
+                break
+            current_since = next_since
+
+            if len(batch) < 1000:
+                break
+
+        return rows
+
+    def _collect_upbit_symbol_gap(self, symbol: str) -> List[Dict]:
+        """Backfill gap from latest DB candle to now, using 1m pagination."""
+        db_symbol = symbol.replace('/', '')
+        last_ms = self._latest_db_timestamp_ms(db_symbol, 'upbit')
+
+        if last_ms is None:
+            df = self.fetch_upbit_ohlcv(symbol, timeframe='1m', limit=2)
+            return df.to_dict('records') if not df.empty else []
+
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        current_since = last_ms + 60000
+        if current_since > now_ms:
+            return []
+
+        rows: List[Dict] = []
+        while current_since <= now_ms:
+            batch = self.fetch_upbit_ohlcv(
+                symbol, timeframe='1m', limit=200, since_ms=current_since
+            )
+            if batch.empty:
+                break
+
+            recs = batch.to_dict('records')
+            rows.extend(recs)
+            last_batch_ms = int(batch.iloc[-1]['timestamp'].timestamp() * 1000)
+            next_since = last_batch_ms + 60000
+            if next_since <= current_since:
+                break
+            current_since = next_since
+
+            if len(batch) < 200:
+                break
+
+        return rows
+
     def collect_all_prices(self) -> List[Dict]:
         all_data = []
 
         for symbol in self.symbols['binance']:
-            df = self.fetch_binance_ohlcv_with_cvd(symbol)
-            if not df.empty:
-                records = df.to_dict('records')
-                for r in records:
-                    r['timestamp'] = r['timestamp'].isoformat()
-                all_data.extend(records)
+            records = self._collect_binance_symbol_gap(symbol)
+            for r in records:
+                r['timestamp'] = r['timestamp'].isoformat()
+            all_data.extend(records)
 
         for symbol in self.symbols['upbit']:
-            df = self.fetch_upbit_ohlcv(symbol)
-            if not df.empty:
-                records = df.to_dict('records')
-                for r in records:
-                    r['timestamp'] = r['timestamp'].isoformat()
-                all_data.extend(records)
+            records = self._collect_upbit_symbol_gap(symbol)
+            for r in records:
+                r['timestamp'] = r['timestamp'].isoformat()
+            all_data.extend(records)
 
         return all_data
 

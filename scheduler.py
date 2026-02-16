@@ -90,13 +90,13 @@ def _build_analysis_trigger(mode: TradingMode):
 
     if mode == TradingMode.POSITION:
         # Once daily at 00:00 UTC = 09:00 KST (Upbit new day)
-        return CronTrigger(hour=0, minute=5)
+        return CronTrigger(hour=0, minute=0)
     elif mode == TradingMode.DAY_TRADING:
         # Every hour
-        return CronTrigger(minute=5)  # At :05 of every hour
+        return CronTrigger(minute=0)  # At :00 of every hour
     else:
         # SWING: every 4 hours
-        return CronTrigger(hour='*/4', minute=5)
+        return CronTrigger(hour='*/4', minute=0)
 
 
 def main():
