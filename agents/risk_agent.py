@@ -65,7 +65,7 @@ Debate protocol:
 
     def analyze(self, market_data_compact: str, bull_opinion: str, bear_opinion: str,
                 funding_context: str, mode: TradingMode = TradingMode.SWING) -> str:
-        base_prompt = self.SWING_PROMPT if mode == TradingMode.SWING else self.SCALP_PROMPT
+        base_prompt = self.SCALP_PROMPT if mode == TradingMode.DAY_TRADING else self.SWING_PROMPT
         prompt = f"{base_prompt}\n\n{self.DEBATE_APPENDIX}"
 
         feedback_history = self.get_recent_feedback()

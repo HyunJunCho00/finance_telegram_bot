@@ -105,7 +105,7 @@ class Settings(BaseSettings):
     # "day_trading" = intraday (minutes~hours), 15m~1h analysis cycle
     # "swing"       = multi-day (days~2weeks), 4h analysis cycle
     # "position"    = long-term (weeks~months), 1d analysis cycle
-    TRADING_MODE: str = "swing"
+    TRADING_MODE: str = "position"
 
     # ===== Chart Image / VLM Cost Control =====
     # Smart image strategy:
