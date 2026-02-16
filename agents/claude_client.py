@@ -23,7 +23,7 @@ class AIClient:
         self._gemini_client = genai.Client(
             vertexai=True,
             project=settings.PROJECT_ID,
-            location=settings.REGION,
+            location=settings.vertex_region,
         )
         self._claude_client = None
 
@@ -35,7 +35,7 @@ class AIClient:
     def claude_client(self) -> AnthropicVertex:
         if self._claude_client is None:
             self._claude_client = AnthropicVertex(
-                region=settings.REGION,
+                region=settings.vertex_region,
                 project_id=settings.PROJECT_ID,
             )
         return self._claude_client
