@@ -1,3 +1,28 @@
+"""Chart generator — structure-only overlays for VLM analysis.
+
+Design principle:
+  Charts show STRUCTURE (patterns, trendlines, levels) only.
+  All indicator VALUES (RSI, MACD, OBV, etc.) go via text — VLM can't read numbers accurately.
+
+What's drawn on the chart:
+  - Candlesticks (price)
+  - Pivot point markers (triangle up/down)
+  - Diagonal trendlines (support/resistance)
+  - Fibonacci retracement horizontal lines
+  - Swing High/Low horizontal lines (liquidity levels)
+  - Liquidation markers (optional, if data provided)
+
+What's NOT drawn (sent as text instead):
+  - RSI, MACD, ADX, BB values → text
+  - OI, Funding, CVD values → text
+  - All numeric indicators → text
+
+Three modes:
+  - DAY_TRADING: 15m candles, last ~8 hours
+  - SWING: 4h candles, last ~10 days
+  - POSITION: 1d candles, last ~90 days
+"""
+
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -6,18 +31,14 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 from io import BytesIO
 import base64
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from config.settings import settings, TradingMode
 from loguru import logger
-import pandas_ta as ta
 from scipy.signal import argrelextrema
 
 
 class ChartGenerator:
-    """Generate candlestick chart images.
-    - SWING mode: 4h candles with Fibonacci, BB, EMA50/200 (for Judge VLM + Telegram)
-    - SCALP mode: 5m candles with VWAP, Keltner, EMA9/21 (Telegram only, no VLM)
-    """
+    """Generate structure-focused candlestick charts for VLM analysis."""
 
     def __init__(self):
         self.width = settings.CHART_IMAGE_WIDTH
@@ -25,196 +46,159 @@ class ChartGenerator:
         self.dpi = settings.CHART_IMAGE_DPI
 
     def generate_chart(self, df: pd.DataFrame, analysis: Dict, symbol: str,
-                       mode: TradingMode = TradingMode.SWING) -> Optional[bytes]:
-        if mode == TradingMode.SCALP:
-            return self._generate_scalp_chart(df, analysis, symbol)
-        return self._generate_swing_chart(df, analysis, symbol)
+                       mode: TradingMode = TradingMode.SWING,
+                       liquidation_df: Optional[pd.DataFrame] = None) -> Optional[bytes]:
+        """Generate structure chart for any mode."""
+        config = self._get_mode_config(mode)
+        return self._generate_structure_chart(df, analysis, symbol, config, liquidation_df)
 
-    def _generate_swing_chart(self, df: pd.DataFrame, analysis: Dict, symbol: str) -> Optional[bytes]:
-        """4H chart with BB, EMA50/200, RSI, MACD - clean for VLM reading."""
+    def _get_mode_config(self, mode: TradingMode) -> Dict:
+        """Per-mode chart configuration."""
+        if mode == TradingMode.DAY_TRADING:
+            return {
+                'resample_rule': '15min',
+                'tail_candles': 32,   # ~8 hours of 15m
+                'min_candles': 10,
+                'title_suffix': '15M DAY_TRADING',
+                'fib_tf': '15m',
+                'structure_tfs': ['15m', '1h'],
+                'swing_tf': '1h',
+            }
+        elif mode == TradingMode.POSITION:
+            return {
+                'resample_rule': '1D',
+                'tail_candles': 90,   # ~3 months
+                'min_candles': 15,
+                'title_suffix': '1D POSITION',
+                'fib_tf': '1d',
+                'structure_tfs': ['1d'],
+                'swing_tf': '1d',
+            }
+        else:  # SWING (default)
+            return {
+                'resample_rule': '4h',
+                'tail_candles': 60,   # ~10 days
+                'min_candles': 10,
+                'title_suffix': '4H SWING',
+                'fib_tf': '4h',
+                'structure_tfs': ['1h', '4h'],
+                'swing_tf': '4h',
+            }
+
+    def _generate_structure_chart(self, df: pd.DataFrame, analysis: Dict,
+                                   symbol: str, config: Dict,
+                                   liquidation_df: Optional[pd.DataFrame] = None) -> Optional[bytes]:
+        """Core chart generation — candlesticks + structure overlays only."""
         try:
-            # Resample to 4h for swing
+            # Prepare OHLCV
             tmp = df.copy()
             tmp['timestamp'] = pd.to_datetime(tmp['timestamp'], utc=True)
             tmp = tmp.set_index('timestamp')
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 tmp[col] = tmp[col].astype(float)
 
-            chart_df = tmp.resample('4h').agg({
+            chart_df = tmp.resample(config['resample_rule']).agg({
                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-            }).dropna().tail(60)  # Last 60 4h candles = ~10 days
+            }).dropna().tail(config['tail_candles'])
 
-            if len(chart_df) < 10:
+            if len(chart_df) < config['min_candles']:
                 return None
 
             chart_df.index.name = 'Date'
-            close = chart_df['close']
-            high = chart_df['high']
-            low = chart_df['low']
 
-            addplots = []
-
-            # Bollinger Bands
-            bb = ta.bbands(close, length=20, std=2.0)
-            if bb is not None and not bb.empty:
-                cols = bb.columns.tolist()
-                addplots.append(mpf.make_addplot(bb[cols[0]], color='#2196F3', width=0.6, linestyle='--'))
-                addplots.append(mpf.make_addplot(bb[cols[2]], color='#2196F3', width=0.6, linestyle='--'))
-
-            # EMA 50 & 200 (swing important)
-            e50 = ta.ema(close, length=50) if len(close) >= 50 else None
-            e200 = ta.ema(close, length=200) if len(close) >= 200 else None
-            if e50 is not None and not e50.empty:
-                addplots.append(mpf.make_addplot(e50, color='#FF9800', width=1.0))
-            if e200 is not None and not e200.empty:
-                addplots.append(mpf.make_addplot(e200, color='#9C27B0', width=1.0))
-
-            # RSI subplot
-            rsi_series = ta.rsi(close, length=14)
-            if rsi_series is not None and not rsi_series.empty:
-                addplots.append(mpf.make_addplot(rsi_series, panel=2, color='#9C27B0', width=0.8, ylabel='RSI'))
-
-            # MACD subplot
-            macd_result = ta.macd(close, fast=12, slow=26, signal=9)
-            if macd_result is not None and not macd_result.empty:
-                cols = macd_result.columns.tolist()
-                addplots.append(mpf.make_addplot(macd_result[cols[0]], panel=3, color='#2196F3', width=0.8, ylabel='MACD'))
-                addplots.append(mpf.make_addplot(macd_result[cols[1]], panel=3, color='#FF5722', width=0.8))
-                hist_colors = ['#4CAF50' if v >= 0 else '#F44336' for v in macd_result[cols[2]].fillna(0)]
-                addplots.append(mpf.make_addplot(macd_result[cols[2]], panel=3, type='bar', color=hist_colors, width=0.5))
-
-            mc = mpf.make_marketcolors(up='#4CAF50', down='#F44336', edge='inherit', wick='inherit',
-                                       volume={'up': '#81C784', 'down': '#E57373'})
-            style = mpf.make_mpf_style(marketcolors=mc, gridstyle='-', gridcolor='#E0E0E0',
-                                       facecolor='white', figcolor='white')
-
-            fig, axes = mpf.plot(
-                chart_df, type='candle', style=style, volume=True,
-                addplot=addplots if addplots else None,
-                title=f'\n{symbol} 4H SWING',
-                figsize=(self.width / self.dpi, self.height / self.dpi),
-                returnfig=True,
-                panel_ratios=(4, 1, 1, 1) if addplots else (4, 1),
+            # Style — clean, minimal
+            mc = mpf.make_marketcolors(
+                up='#4CAF50', down='#F44336',
+                edge='inherit', wick='inherit',
+                volume={'up': '#81C784', 'down': '#E57373'}
+            )
+            style = mpf.make_mpf_style(
+                marketcolors=mc, gridstyle='-', gridcolor='#E0E0E0',
+                facecolor='white', figcolor='white'
             )
 
-            price = analysis.get('current_price', '?')
-            axes[0].set_title(f'{symbol} 4H | {price} | SWING', fontsize=10, loc='left')
-
-            self._draw_swing_structure(axes[0], chart_df, analysis)
-
-            buf = BytesIO()
-            fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight', facecolor='white')
-            plt.close(fig)
-            buf.seek(0)
-            return buf.getvalue()
-
-        except Exception as e:
-            logger.error(f"Swing chart error for {symbol}: {e}")
-            return None
-
-    def _generate_scalp_chart(self, df: pd.DataFrame, analysis: Dict, symbol: str) -> Optional[bytes]:
-        """5m chart with VWAP, EMA9/21, RSI - for Telegram only (no VLM)."""
-        try:
-            tmp = df.copy()
-            tmp['timestamp'] = pd.to_datetime(tmp['timestamp'], utc=True)
-            tmp = tmp.set_index('timestamp')
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                tmp[col] = tmp[col].astype(float)
-
-            chart_df = tmp.resample('5min').agg({
-                'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-            }).dropna().tail(100)  # Last 100 5m candles = ~8 hours
-
-            if len(chart_df) < 10:
-                return None
-
-            chart_df.index.name = 'Date'
-            close = chart_df['close']
-
-            addplots = []
-
-            # EMA 9 & 21 (scalp fast MAs)
-            e9 = ta.ema(close, length=9)
-            e21 = ta.ema(close, length=21)
-            if e9 is not None and not e9.empty:
-                addplots.append(mpf.make_addplot(e9, color='#4CAF50', width=0.8))
-            if e21 is not None and not e21.empty:
-                addplots.append(mpf.make_addplot(e21, color='#E91E63', width=0.8))
-
-            # VWAP
-            vwap = ta.vwap(chart_df['high'], chart_df['low'], close, chart_df['volume'])
-            if vwap is not None and not vwap.empty:
-                addplots.append(mpf.make_addplot(vwap, color='#FF9800', width=1.2, linestyle='--'))
-
-            # RSI
-            rsi_series = ta.rsi(close, length=14)
-            if rsi_series is not None and not rsi_series.empty:
-                addplots.append(mpf.make_addplot(rsi_series, panel=2, color='#9C27B0', width=0.8, ylabel='RSI'))
-
-            mc = mpf.make_marketcolors(up='#4CAF50', down='#F44336', edge='inherit', wick='inherit',
-                                       volume={'up': '#81C784', 'down': '#E57373'})
-            style = mpf.make_mpf_style(marketcolors=mc, gridstyle='-', gridcolor='#E0E0E0',
-                                       facecolor='white', figcolor='white')
-
+            # Plot — candlesticks + volume only (NO indicator subplots)
             fig, axes = mpf.plot(
                 chart_df, type='candle', style=style, volume=True,
-                addplot=addplots if addplots else None,
-                title=f'\n{symbol} 5M SCALP',
+                title=f'\n{symbol} {config["title_suffix"]}',
                 figsize=(self.width / self.dpi, self.height / self.dpi),
                 returnfig=True,
-                panel_ratios=(4, 1, 1) if addplots else (4, 1),
+                panel_ratios=(5, 1),  # Large price panel, small volume
             )
 
-            price = analysis.get('current_price', '?')
-            axes[0].set_title(f'{symbol} 5M | {price} | SCALP', fontsize=10, loc='left')
+            price_ax = axes[0]
+            current_price = analysis.get('current_price', '?')
+            price_ax.set_title(f'{symbol} | {current_price} | {config["title_suffix"]}',
+                              fontsize=10, loc='left')
 
-            buf = BytesIO()
-            fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight', facecolor='white')
-            plt.close(fig)
-            buf.seek(0)
-            return buf.getvalue()
+            # ── Overlay 1: Pivot Points (turning points) ──
+            self._draw_pivot_points(price_ax, chart_df)
 
-        except Exception as e:
-            logger.error(f"Scalp chart error for {symbol}: {e}")
-            return None
-
-    def _draw_swing_structure(self, ax, chart_df: pd.DataFrame, analysis: Dict) -> None:
-        """Overlay swing structure: fib levels, diagonal S/R, and turning points."""
-        try:
-            fib = (analysis.get('fibonacci', {}) or {}).get('4h') or (analysis.get('fibonacci', {}) or {}).get('1d')
-            if fib:
-                fib_colors = {
-                    'fib_236': '#90CAF9',
-                    'fib_382': '#64B5F6',
-                    'fib_500': '#42A5F5',
-                    'fib_618': '#1E88E5',
-                    'fib_786': '#1565C0',
-                }
-                for key, color in fib_colors.items():
-                    val = fib.get(key)
-                    if isinstance(val, (int, float)):
-                        ax.axhline(val, color=color, linestyle='--', linewidth=0.8, alpha=0.6)
-                        ax.text(chart_df.index[-1], val, f' {key}:{val:.2f}', color=color, fontsize=7, va='center')
-
+            # ── Overlay 2: Diagonal Trendlines (support/resistance) ──
             structure = analysis.get('structure', {}) or {}
-            self._draw_diagonal_line(ax, chart_df, structure.get('support_4h'), 'support_price', '#2E7D32')
-            self._draw_diagonal_line(ax, chart_df, structure.get('resistance_4h'), 'resistance_price', '#C62828')
+            for tf in config['structure_tfs']:
+                self._draw_diagonal_line(price_ax, chart_df,
+                                         structure.get(f'support_{tf}'),
+                                         'support_price', '#2E7D32')
+                self._draw_diagonal_line(price_ax, chart_df,
+                                         structure.get(f'resistance_{tf}'),
+                                         'resistance_price', '#C62828')
 
-            # Turning points (inflection pivots) on close prices
-            close = chart_df['close'].astype(float).values
-            if len(close) >= 15:
-                order = max(3, len(close) // 20)
-                mins = argrelextrema(close, np.less, order=order)[0]
-                maxs = argrelextrema(close, np.greater, order=order)[0]
-                if len(mins):
-                    ax.scatter(chart_df.index[mins], close[mins], marker='^', color='#2E7D32', s=18, alpha=0.8)
-                if len(maxs):
-                    ax.scatter(chart_df.index[maxs], close[maxs], marker='v', color='#C62828', s=18, alpha=0.8)
+            # ── Overlay 3: Fibonacci Levels ──
+            fib = (analysis.get('fibonacci', {}) or {}).get(config['fib_tf'])
+            if not fib:
+                # Fallback to any available fib
+                fib_data = analysis.get('fibonacci', {}) or {}
+                for tf_key in ['4h', '1d', '1w', '15m']:
+                    if tf_key in fib_data and fib_data[tf_key]:
+                        fib = fib_data[tf_key]
+                        break
+            self._draw_fibonacci(price_ax, chart_df, fib)
+
+            # ── Overlay 4: Swing High/Low (Liquidity Levels) ──
+            swing = (analysis.get('swing_levels', {}) or {}).get(config['swing_tf'])
+            self._draw_swing_levels(price_ax, chart_df, swing)
+
+            # ── Overlay 5: Liquidation Markers ──
+            if liquidation_df is not None and not liquidation_df.empty:
+                self._draw_liquidation_markers(price_ax, chart_df, liquidation_df)
+
+            # Save
+            buf = BytesIO()
+            fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight', facecolor='white')
+            plt.close(fig)
+            buf.seek(0)
+            return buf.getvalue()
+
         except Exception as e:
-            logger.error(f"Structure overlay error: {e}")
+            logger.error(f"Chart error for {symbol} ({config['title_suffix']}): {e}")
+            return None
 
-    def _draw_diagonal_line(self, ax, chart_df: pd.DataFrame, line_info: Optional[Dict],
-                            value_key: str, color: str) -> None:
+    # ─────────────── Overlay Drawing Methods ───────────────
+
+    def _draw_pivot_points(self, ax, chart_df: pd.DataFrame):
+        """Draw turning point markers on pivot highs/lows."""
+        try:
+            close = chart_df['close'].astype(float).values
+            if len(close) < 15:
+                return
+
+            order = max(3, len(close) // 20)
+            mins = argrelextrema(close, np.less, order=order)[0]
+            maxs = argrelextrema(close, np.greater, order=order)[0]
+
+            if len(mins):
+                ax.scatter(chart_df.index[mins], close[mins],
+                          marker='^', color='#2E7D32', s=25, alpha=0.85, zorder=5)
+            if len(maxs):
+                ax.scatter(chart_df.index[maxs], close[maxs],
+                          marker='v', color='#C62828', s=25, alpha=0.85, zorder=5)
+        except Exception as e:
+            logger.debug(f"Pivot points draw error: {e}")
+
+    def _draw_diagonal_line(self, ax, chart_df: pd.DataFrame,
+                             line_info: Optional[Dict], value_key: str, color: str):
+        """Draw diagonal support/resistance trendline."""
         if not line_info:
             return
         try:
@@ -227,15 +211,94 @@ class ChartGenerator:
             x = np.arange(n)
             intercept = float(current_value) - float(slope) * (n - 1)
             y = float(slope) * x + intercept
-            ax.plot(chart_df.index, y, color=color, linewidth=1.0, linestyle='-.', alpha=0.9)
+            ax.plot(chart_df.index, y, color=color, linewidth=1.2,
+                    linestyle='-.', alpha=0.9, zorder=3)
         except Exception:
             return
+
+    def _draw_fibonacci(self, ax, chart_df: pd.DataFrame, fib: Optional[Dict]):
+        """Draw Fibonacci retracement horizontal lines."""
+        if not fib:
+            return
+
+        fib_styles = {
+            'fib_236': ('#90CAF9', 0.5, '23.6%'),
+            'fib_382': ('#64B5F6', 0.7, '38.2%'),
+            'fib_500': ('#42A5F5', 0.8, '50%'),
+            'fib_618': ('#1E88E5', 0.9, '61.8%'),
+            'fib_786': ('#1565C0', 0.7, '78.6%'),
+        }
+
+        for key, (color, alpha, label) in fib_styles.items():
+            val = fib.get(key)
+            if isinstance(val, (int, float)):
+                ax.axhline(val, color=color, linestyle='--', linewidth=0.9,
+                           alpha=alpha, zorder=2)
+                ax.text(chart_df.index[-1], val, f' {label}',
+                        color=color, fontsize=7, va='center', ha='left')
+
+    def _draw_swing_levels(self, ax, chart_df: pd.DataFrame, swing: Optional[Dict]):
+        """Draw horizontal lines at swing highs/lows (liquidity pools)."""
+        if not swing:
+            return
+
+        for high in swing.get('swing_highs', []):
+            if isinstance(high, (int, float)):
+                ax.axhline(high, color='#FF5722', linestyle=':', linewidth=0.7,
+                           alpha=0.6, zorder=2)
+
+        for low in swing.get('swing_lows', []):
+            if isinstance(low, (int, float)):
+                ax.axhline(low, color='#00BCD4', linestyle=':', linewidth=0.7,
+                           alpha=0.6, zorder=2)
+
+    def _draw_liquidation_markers(self, ax, chart_df: pd.DataFrame,
+                                   liq_df: pd.DataFrame):
+        """Draw liquidation event markers on the chart."""
+        try:
+            liq_df = liq_df.copy()
+            liq_df['timestamp'] = pd.to_datetime(liq_df['timestamp'], utc=True)
+
+            chart_start = chart_df.index[0]
+            chart_end = chart_df.index[-1]
+            mask = (liq_df['timestamp'] >= chart_start) & (liq_df['timestamp'] <= chart_end)
+            visible = liq_df[mask]
+
+            if visible.empty:
+                return
+
+            for _, row in visible.iterrows():
+                total_liq = row.get('long_liq_usd', 0) + row.get('short_liq_usd', 0)
+                if total_liq < 50000:  # Skip tiny liquidations
+                    continue
+
+                # Size proportional to liquidation amount
+                size = min(100, max(15, total_liq / 100000 * 30))
+
+                # Red = long liquidated (bearish), Blue = short liquidated (bullish)
+                if row.get('long_liq_usd', 0) > row.get('short_liq_usd', 0):
+                    color = '#F44336'  # Red (longs got rekt)
+                else:
+                    color = '#2196F3'  # Blue (shorts got rekt)
+
+                # Find nearest chart timestamp
+                nearest_idx = chart_df.index.get_indexer([row['timestamp']], method='nearest')[0]
+                if 0 <= nearest_idx < len(chart_df):
+                    price = chart_df.iloc[nearest_idx]['close']
+                    ax.scatter(chart_df.index[nearest_idx], price,
+                              marker='o', color=color, s=size, alpha=0.7,
+                              edgecolors='black', linewidth=0.5, zorder=6)
+
+        except Exception as e:
+            logger.debug(f"Liquidation markers draw error: {e}")
+
+    # ─────────────── Utility Methods ───────────────
 
     def chart_to_base64(self, chart_bytes: bytes) -> str:
         return base64.b64encode(chart_bytes).decode('utf-8')
 
     def resize_for_low_res(self, chart_bytes: bytes, max_dim: int = 512) -> bytes:
-        """Resize to 512x512 for VLM (~1024 tokens). Always used for Judge."""
+        """Resize to 512x512 for VLM (~1024 tokens)."""
         try:
             from PIL import Image
             img = Image.open(BytesIO(chart_bytes))

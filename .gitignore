@@ -49,3 +49,5 @@ charts/
 .claude*
 old_backup
 *.json
+test.py
+test1.py

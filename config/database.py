@@ -62,7 +62,62 @@ class DatabaseClient:
             df = df.sort_values('timestamp').reset_index(drop=True)
             # Calculate cumulative volume delta
             df['cvd'] = df['volume_delta'].cumsum()
+            # Calculate whale CVD if columns exist
+            if 'whale_buy_vol' in df.columns and 'whale_sell_vol' in df.columns:
+                df['whale_buy_vol'] = df['whale_buy_vol'].fillna(0)
+                df['whale_sell_vol'] = df['whale_sell_vol'].fillna(0)
+                df['whale_delta'] = df['whale_buy_vol'] - df['whale_sell_vol']
+                df['whale_cvd'] = df['whale_delta'].cumsum()
             return df
+        return pd.DataFrame()
+
+    # ─────────────── Whale Data (from WebSocket aggTrade) ───────────────
+
+    def batch_upsert_whale_data(self, data_list: List[Dict]) -> Dict:
+        """Upsert whale trade data into cvd_data table (whale columns)."""
+        # Merge whale columns into existing cvd_data rows for the same timestamp/symbol
+        for record in data_list:
+            try:
+                self.client.table("cvd_data").upsert(
+                    {
+                        "timestamp": record["timestamp"],
+                        "symbol": record["symbol"],
+                        "whale_buy_vol": record.get("whale_buy_vol", 0),
+                        "whale_sell_vol": record.get("whale_sell_vol", 0),
+                        "whale_buy_count": record.get("whale_buy_count", 0),
+                        "whale_sell_count": record.get("whale_sell_count", 0),
+                        # Preserve existing CVD fields if row exists
+                        "taker_buy_volume": 0,
+                        "taker_sell_volume": 0,
+                        "volume_delta": 0,
+                    },
+                    on_conflict="timestamp,symbol"
+                ).execute()
+            except Exception as e:
+                logger.warning(f"Whale data upsert error: {e}")
+        return {"upserted": len(data_list)}
+
+    # ─────────────── Liquidation Data ───────────────
+
+    def batch_upsert_liquidations(self, data_list: List[Dict]) -> Dict:
+        """Upsert liquidation data."""
+        return self.client.table("liquidations").upsert(
+            data_list, on_conflict="timestamp,symbol"
+        ).execute()
+
+    def get_liquidation_data(self, symbol: str, limit: int = 240) -> pd.DataFrame:
+        """Get recent liquidation data. Default 240 = 4 hours of 1m data."""
+        response = self.client.table("liquidations")\
+            .select("*")\
+            .eq("symbol", symbol)\
+            .order("timestamp", desc=True)\
+            .limit(limit)\
+            .execute()
+
+        if response.data:
+            df = pd.DataFrame(response.data)
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+            return df.sort_values('timestamp').reset_index(drop=True)
         return pd.DataFrame()
 
     # ─────────────── Telegram Messages ───────────────
@@ -330,6 +385,16 @@ class DatabaseClient:
                 .lt("collected_at", cutoff_reports)\
                 .execute()
             results['dune_deleted'] = len(r.data) if r.data else 0
+
+            # Liquidations (same retention as market data)
+            try:
+                r = self.client.table("liquidations")\
+                    .delete()\
+                    .lt("timestamp", cutoff)\
+                    .execute()
+                results['liquidations_deleted'] = len(r.data) if r.data else 0
+            except Exception:
+                results['liquidations_deleted'] = 0  # Table may not exist yet
 
             logger.info(f"Data cleanup completed: {results}")
             return results

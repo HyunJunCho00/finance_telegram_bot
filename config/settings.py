@@ -7,9 +7,14 @@ import json
 
 
 class TradingMode(str, Enum):
-    """SWING = long-term (days~weeks), SCALP = short-term (minutes~hours)"""
+    """Three trading modes with distinct timeframes and analysis intervals.
+    DAY_TRADING: minutes~hours, 15m/1h analysis cycle
+    SWING: days~2weeks, 4h analysis cycle
+    POSITION: weeks~months, 1d analysis cycle
+    """
+    DAY_TRADING = "day_trading"
     SWING = "swing"
-    SCALP = "scalp"
+    POSITION = "position"
 
 
 class Settings(BaseSettings):
@@ -76,7 +81,7 @@ class Settings(BaseSettings):
     # ===== AI Models =====
     # Agents (bull/bear/risk): Gemini 2.0 Flash via Vertex AI
     # Judge: Claude Opus 4.6 via Vertex AI Model Garden
-    MODEL_ENDPOINT: str = "gemini-2.0-flash-001"
+    MODEL_ENDPOINT: str = "gemini-2.5-flash"
 
 
     # ===== Role-based model routing (2026 ops tuning) =====
@@ -96,8 +101,9 @@ class Settings(BaseSettings):
     MAX_INPUT_CHARS_RAG_EXTRACTION: int = 5000
 
     # ===== Trading Mode =====
-    # "swing" = long-term position trading (default, your preference)
-    # "scalp" = short-term day trading
+    # "day_trading" = intraday (minutes~hours), 15m~1h analysis cycle
+    # "swing"       = multi-day (days~2weeks), 4h analysis cycle
+    # "position"    = long-term (weeks~months), 1d analysis cycle
     TRADING_MODE: str = "swing"
 
     # ===== Chart Image / VLM Cost Control =====
@@ -110,11 +116,21 @@ class Settings(BaseSettings):
     CHART_IMAGE_HEIGHT: int = 800
     CHART_IMAGE_DPI: int = 100
 
-    # ===== Candle Limits per Mode =====
-    # SWING: 4320 candles (3 days of 1m) for proper weekly/daily resampling
-    # SCALP: 720 candles (12h of 1m) for fast 5m/15m/1h analysis
+    # ===== Candle Limits per Mode (1m candles needed from DB) =====
+    # DAY_TRADING: 1440 (1 day) → for 5m/15m/1h + needs 4h from GCS
+    # SWING: 4320 (3 days) → for 1h/4h + needs 1d from GCS
+    # POSITION: 10080 (7 days) → for 4h + needs 1d/1w from GCS
+    DAY_TRADING_CANDLE_LIMIT: int = 1440
     SWING_CANDLE_LIMIT: int = 4320
-    SCALP_CANDLE_LIMIT: int = 720
+    POSITION_CANDLE_LIMIT: int = 10080
+
+    # ===== Analysis Intervals per Mode =====
+    # DAY_TRADING: every 1 hour
+    # SWING: every 4 hours
+    # POSITION: every 24 hours (once daily at 09:00 KST)
+    DAY_TRADING_INTERVAL_HOURS: int = 1
+    SWING_INTERVAL_HOURS: int = 4
+    POSITION_INTERVAL_HOURS: int = 24
 
     # ===== Data Retention (days) =====
     # PostgreSQL(Supabase): 시계열 데이터만 보존 (30일)
@@ -135,16 +151,56 @@ class Settings(BaseSettings):
 
     @property
     def candle_limit(self) -> int:
-        if self.trading_mode == TradingMode.SCALP:
-            return self.SCALP_CANDLE_LIMIT
+        mode = self.trading_mode
+        if mode == TradingMode.DAY_TRADING:
+            return self.DAY_TRADING_CANDLE_LIMIT
+        elif mode == TradingMode.POSITION:
+            return self.POSITION_CANDLE_LIMIT
         return self.SWING_CANDLE_LIMIT
 
     @property
+    def analysis_interval_hours(self) -> int:
+        mode = self.trading_mode
+        if mode == TradingMode.DAY_TRADING:
+            return self.DAY_TRADING_INTERVAL_HOURS
+        elif mode == TradingMode.POSITION:
+            return self.POSITION_INTERVAL_HOURS
+        return self.SWING_INTERVAL_HOURS
+
+    @property
     def should_use_chart(self) -> bool:
-        """SWING: yes (Judge only). SCALP: no."""
-        if self.trading_mode == TradingMode.SCALP:
-            return False
+        """All 3 modes generate structure chart for Judge VLM."""
         return self.USE_CHART_IMAGES
+
+    @property
+    def chart_timeframe(self) -> str:
+        """Primary chart timeframe per mode."""
+        mode = self.trading_mode
+        if mode == TradingMode.DAY_TRADING:
+            return "15m"
+        elif mode == TradingMode.POSITION:
+            return "1d"
+        return "4h"
+
+    @property
+    def analysis_timeframes(self) -> list:
+        """Timeframes to analyze per mode."""
+        mode = self.trading_mode
+        if mode == TradingMode.DAY_TRADING:
+            return ["5m", "15m", "1h", "4h"]
+        elif mode == TradingMode.POSITION:
+            return ["4h", "1d", "1w"]
+        return ["1h", "4h", "1d"]
+
+    @property
+    def data_lookback_hours(self) -> int:
+        """How far back to look for supplementary data (funding, CVD, liquidations)."""
+        mode = self.trading_mode
+        if mode == TradingMode.DAY_TRADING:
+            return 4
+        elif mode == TradingMode.POSITION:
+            return 168  # 7 days
+        return 24
 
 
 class SecretManager:
