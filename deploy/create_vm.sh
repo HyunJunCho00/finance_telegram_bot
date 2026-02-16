@@ -15,8 +15,9 @@ if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" || "$PROJECT_ID" == "your-g
 fi
 
 INSTANCE_NAME="crypto-trading-vm"
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-asia-northeast3}"
 ZONE="${ZONE:-${REGION}-a}"
+VERTEX_REGION="${VERTEX_REGION:-us-central1}"
 MACHINE_TYPE="e2-small"
 IMAGE_FAMILY="ubuntu-2204-lts"
 IMAGE_PROJECT="ubuntu-os-cloud"
@@ -68,6 +69,7 @@ useradd -m -s /bin/bash crypto_trader || true
 chown -R crypto_trader:crypto_trader /opt/crypto_trading_system
 
 sed -i 's|Environment="PROJECT_ID=.*"|Environment="PROJECT_ID=__PROJECT_ID__"|' deploy/scheduler.service deploy/mcp_server.service
+sed -i 's|Environment="VERTEX_REGION=.*"|Environment="VERTEX_REGION=__VERTEX_REGION__"|' deploy/scheduler.service deploy/mcp_server.service
 cp deploy/scheduler.service /etc/systemd/system/
 cp deploy/mcp_server.service /etc/systemd/system/
 systemctl daemon-reload
@@ -79,6 +81,7 @@ SCRIPT
 
 STARTUP_SCRIPT="${STARTUP_SCRIPT//__REPO_URL__/$REPO_URL}"
 STARTUP_SCRIPT="${STARTUP_SCRIPT//__PROJECT_ID__/$PROJECT_ID}"
+STARTUP_SCRIPT="${STARTUP_SCRIPT//__VERTEX_REGION__/$VERTEX_REGION}"
 
 echo "Creating GCP Compute Engine instance..."
 echo "  Project: $PROJECT_ID"

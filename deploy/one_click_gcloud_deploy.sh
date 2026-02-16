@@ -3,7 +3,8 @@
 set -euo pipefail
 
 PROJECT_ID="${PROJECT_ID:-}"
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-}"
+VERTEX_REGION="${VERTEX_REGION:-}"
 ENV_FILE="${1:-.env}"
 
 extract_env_value() {
@@ -61,10 +62,25 @@ if [[ -z "${REPO_URL:-}" ]]; then
   REPO_URL="https://github.com/<your-org>/finance_telegram_bot.git"
 fi
 
-echo "Project: $PROJECT_ID"
-echo "Region : $REGION"
-echo "Env    : $ENV_FILE"
-echo "Account: $ACTIVE_ACCOUNT"
+if [[ -z "$REGION" ]]; then
+  REGION="$(extract_env_value "REGION" "$ENV_FILE")"
+fi
+if [[ -z "$REGION" ]]; then
+  REGION="asia-northeast3"
+fi
+
+if [[ -z "$VERTEX_REGION" ]]; then
+  VERTEX_REGION="$(extract_env_value "VERTEX_REGION" "$ENV_FILE")"
+fi
+if [[ -z "$VERTEX_REGION" ]]; then
+  VERTEX_REGION="us-central1"
+fi
+
+echo "Project      : $PROJECT_ID"
+echo "VM Region    : $REGION"
+echo "Vertex Region: $VERTEX_REGION"
+echo "Env file     : $ENV_FILE"
+echo "Account      : $ACTIVE_ACCOUNT"
 
 export CLOUDSDK_CORE_DISABLE_PROMPTS=1
 
@@ -83,6 +99,6 @@ echo "Step 1/2: secrets + IAM setup"
 PROJECT_ID="$PROJECT_ID" bash deploy/setup_secrets.sh "$ENV_FILE"
 
 echo "Step 2/2: VM creation"
-PROJECT_ID="$PROJECT_ID" REGION="$REGION" REPO_URL="$REPO_URL" bash deploy/create_vm.sh
+PROJECT_ID="$PROJECT_ID" REGION="$REGION" VERTEX_REGION="$VERTEX_REGION" REPO_URL="$REPO_URL" bash deploy/create_vm.sh
 
 echo "One-click deploy complete."

@@ -629,7 +629,7 @@ Rules:
                 self._embed_client = genai.Client(
                     vertexai=True,
                     project=settings.PROJECT_ID,
-                    location=settings.REGION,
+                    location=settings.vertex_region,
                 )
             except Exception as e:
                 logger.warning(f"Embedding client init failed: {e}")
