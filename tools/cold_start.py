@@ -401,7 +401,13 @@ class UpbitBulkLoader:
         self.exchange = ccxt.upbit({'enableRateLimit': True})
 
     def fetch_range(self, symbol: str, days: int = 30) -> pd.DataFrame:
-        """Upbit's fetch_ohlcv supports pagination via 'since' parameter."""
+        """Upbit's fetch_ohlcv supports pagination via 'since' parameter.
+
+        Timezone note:
+          - Upbit candles are exchange-local (KST) intervals.
+          - ccxt returns epoch milliseconds; we normalize/store as UTC tz-aware timestamps.
+          - This keeps Binance + Upbit merge/resample on one unified UTC timeline.
+        """
         all_rows = []
         end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(days=days)
@@ -420,8 +426,9 @@ class UpbitBulkLoader:
                     break
 
                 for candle in ohlcv:
+                    ts_utc = pd.Timestamp(candle[0], unit='ms', tz='UTC').floor('min')
                     all_rows.append({
-                        'timestamp': pd.Timestamp(candle[0], unit='ms', tz='UTC'),
+                        'timestamp': ts_utc,
                         'open': candle[1],
                         'high': candle[2],
                         'low': candle[3],
@@ -500,7 +507,11 @@ class UpbitBulkLoader:
 
 def run_cold_start(mode: str = "all", days: int = 210,
                    symbols: Optional[List[str]] = None,
-                   db_days: int = 3):
+                   db_days: int = 3,
+                   ohlcv_days: Optional[int] = None,
+                   funding_days: Optional[int] = None,
+                   telegram_days: Optional[int] = None,
+                   upbit_days: Optional[int] = None):
     """Run cold start data loading.
 
     Args:
@@ -508,6 +519,10 @@ def run_cold_start(mode: str = "all", days: int = 210,
         days: How many days of history to fetch
         symbols: List of symbols (default: ["BTCUSDT", "ETHUSDT"])
         db_days: How many recent days to keep in PostgreSQL
+        ohlcv_days: Days override for OHLCV loader (default: days)
+        funding_days: Days override for funding loader (default: days)
+        telegram_days: Days override for Telegram loader (default: min(days, 90))
+        upbit_days: Days override for Upbit loader (default: days)
     """
     if symbols is None:
         symbols = ["BTCUSDT", "ETHUSDT"]
@@ -515,12 +530,17 @@ def run_cold_start(mode: str = "all", days: int = 210,
     logger.info(f"=== COLD START: mode={mode}, days={days}, symbols={symbols} ===")
     results = {}
 
+    effective_ohlcv_days = ohlcv_days if ohlcv_days is not None else days
+    effective_funding_days = funding_days if funding_days is not None else days
+    effective_telegram_days = telegram_days if telegram_days is not None else min(days, 90)
+    effective_upbit_days = upbit_days if upbit_days is not None else days
+
     # ── OHLCV (Binance Futures) ──
     if mode in ("all", "ohlcv"):
         loader = OHLCVBulkLoader()
         for symbol in symbols:
             end = datetime.now(timezone.utc)
-            start = end - timedelta(days=days)
+            start = end - timedelta(days=effective_ohlcv_days)
             df = loader.fetch_range(symbol, start, end)
 
             db_count = loader.save_to_db(df, db_days=db_days)
@@ -534,9 +554,8 @@ def run_cold_start(mode: str = "all", days: int = 210,
     # ── Upbit Spot ──
     if mode in ("all", "upbit"):
         loader = UpbitBulkLoader()
-        upbit_days = min(days, 30)  # Upbit has stricter limits
         for symbol in ["BTC/KRW", "ETH/KRW"]:
-            df = loader.fetch_range(symbol, upbit_days)
+            df = loader.fetch_range(symbol, effective_upbit_days)
             db_count = loader.save_to_db(df, db_days=db_days)
             gcs_result = loader.save_to_gcs(df, symbol)
             results[f"upbit_{symbol}"] = {
@@ -549,7 +568,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
     if mode in ("all", "funding"):
         loader = FundingBulkLoader()
         for symbol in symbols:
-            df = loader.fetch_range(symbol, days=days)
+            df = loader.fetch_range(symbol, days=effective_funding_days)
             db_count = loader.save_to_db(df, db_days=7)
             gcs_result = loader.save_to_gcs(df, symbol)
             results[f"funding_{symbol}"] = {
@@ -561,7 +580,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
     # ── Telegram Messages ──
     if mode in ("all", "telegram"):
         loader = TelegramBulkLoader()
-        count = loader.load(days=min(days, 90))  # Telegram: max 90 days practical
+        count = loader.load(days=effective_telegram_days)
         results["telegram"] = {"messages": count}
 
     # ── Resample (generate 1h/4h/1d/1w from 1m) ──
@@ -591,6 +610,14 @@ if __name__ == "__main__":
                         help="Single symbol (default: BTCUSDT + ETHUSDT)")
     parser.add_argument("--db-days", type=int, default=3,
                         help="Days to keep in PostgreSQL hot cache")
+    parser.add_argument("--ohlcv-days", type=int, default=None,
+                        help="Override days only for OHLCV loader")
+    parser.add_argument("--funding-days", type=int, default=None,
+                        help="Override days only for funding loader")
+    parser.add_argument("--telegram-days", type=int, default=None,
+                        help="Override days only for Telegram loader")
+    parser.add_argument("--upbit-days", type=int, default=None,
+                        help="Override days only for Upbit loader")
 
     args = parser.parse_args()
 
@@ -600,4 +627,8 @@ if __name__ == "__main__":
         days=args.days,
         symbols=symbols,
         db_days=args.db_days,
+        ohlcv_days=args.ohlcv_days,
+        funding_days=args.funding_days,
+        telegram_days=args.telegram_days,
+        upbit_days=args.upbit_days,
     )
