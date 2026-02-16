@@ -9,6 +9,7 @@ WorkingDirectory=/opt/crypto_trading_system
 Environment="PYTHONUNBUFFERED=1"
 Environment="USE_SECRET_MANAGER=true"
 Environment="PROJECT_ID=your-gcp-project-id"
+Environment="VERTEX_REGION=us-central1"
 ExecStart=/opt/crypto_trading_system/venv/bin/python -m mcp_server.server
 Restart=always
 RestartSec=10

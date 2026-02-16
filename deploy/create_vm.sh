@@ -15,9 +15,12 @@ if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" || "$PROJECT_ID" == "your-g
 fi
 
 INSTANCE_NAME="crypto-trading-vm"
-REGION="${REGION:-us-central1}"
+REGION="${REGION:-asia-northeast3}"
 ZONE="${ZONE:-${REGION}-a}"
+VERTEX_REGION="${VERTEX_REGION:-us-central1}"
 MACHINE_TYPE="e2-small"
+BOOT_DISK_SIZE_GB="${BOOT_DISK_SIZE_GB:-50}"
+BOOT_DISK_TYPE="${BOOT_DISK_TYPE:-pd-balanced}"
 IMAGE_FAMILY="ubuntu-2204-lts"
 IMAGE_PROJECT="ubuntu-os-cloud"
 SA_NAME="crypto-trading-sa"
@@ -68,6 +71,7 @@ useradd -m -s /bin/bash crypto_trader || true
 chown -R crypto_trader:crypto_trader /opt/crypto_trading_system
 
 sed -i 's|Environment="PROJECT_ID=.*"|Environment="PROJECT_ID=__PROJECT_ID__"|' deploy/scheduler.service deploy/mcp_server.service
+sed -i 's|Environment="VERTEX_REGION=.*"|Environment="VERTEX_REGION=__VERTEX_REGION__"|' deploy/scheduler.service deploy/mcp_server.service
 cp deploy/scheduler.service /etc/systemd/system/
 cp deploy/mcp_server.service /etc/systemd/system/
 systemctl daemon-reload
@@ -79,11 +83,12 @@ SCRIPT
 
 STARTUP_SCRIPT="${STARTUP_SCRIPT//__REPO_URL__/$REPO_URL}"
 STARTUP_SCRIPT="${STARTUP_SCRIPT//__PROJECT_ID__/$PROJECT_ID}"
+STARTUP_SCRIPT="${STARTUP_SCRIPT//__VERTEX_REGION__/$VERTEX_REGION}"
 
 echo "Creating GCP Compute Engine instance..."
 echo "  Project: $PROJECT_ID"
 echo "  Machine: $MACHINE_TYPE (~\$12/month)"
-echo "  Disk: 20GB pd-standard"
+echo "  Disk: ${BOOT_DISK_SIZE_GB}GB ${BOOT_DISK_TYPE}"
 
 gcloud compute instances create "$INSTANCE_NAME" \
   --project="$PROJECT_ID" \
@@ -95,8 +100,8 @@ gcloud compute instances create "$INSTANCE_NAME" \
   --scopes="https://www.googleapis.com/auth/cloud-platform" \
   --image-family="$IMAGE_FAMILY" \
   --image-project="$IMAGE_PROJECT" \
-  --boot-disk-size="20GB" \
-  --boot-disk-type="pd-standard" \
+  --boot-disk-size="${BOOT_DISK_SIZE_GB}GB" \
+  --boot-disk-type="${BOOT_DISK_TYPE}" \
   --boot-disk-device-name="$INSTANCE_NAME" \
   --tags="crypto-trading" \
   --metadata="startup-script=${STARTUP_SCRIPT}"

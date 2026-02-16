@@ -20,6 +20,7 @@ class TradingMode(str, Enum):
 class Settings(BaseSettings):
     PROJECT_ID: str = ""
     REGION: str = "us-central1"
+    VERTEX_REGION: str = ""
 
     SUPABASE_URL: str = ""
     SUPABASE_KEY: str = ""
@@ -144,6 +145,11 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+
+    @property
+    def vertex_region(self) -> str:
+        """Vertex AI region. Falls back to REGION for backward compatibility."""
+        return self.VERTEX_REGION or self.REGION
 
     @property
     def trading_mode(self) -> TradingMode:
