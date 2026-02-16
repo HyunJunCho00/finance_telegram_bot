@@ -9,7 +9,7 @@ mcp = FastMCP("Crypto Trading System")
 @mcp.tool()
 def analyze_market(symbol: str) -> dict:
     """Run multi-timeframe technical analysis on a crypto symbol (e.g. BTCUSDT).
-    Uses current trading mode (swing/scalp) for mode-specific indicators."""
+    Uses current trading mode (day_trading/swing/position) for mode-specific indicators."""
     logger.info(f"MCP tool: analyze_market {symbol} (mode={settings.trading_mode.value})")
     return mcp_tools.get_market_analysis(symbol)
 
@@ -87,7 +87,7 @@ def execute_trade(symbol: str, side: str, amount: float, leverage: int = 1) -> d
 @mcp.tool()
 def get_chart_image(symbol: str) -> dict:
     """Generate and return a base64-encoded chart image for a symbol.
-    Chart type depends on trading mode (4H swing / 5M scalp)."""
+    Chart type depends on trading mode (15m day_trading / 4h swing / 1d position)."""
     logger.info(f"MCP tool: get_chart_image {symbol}")
     return mcp_tools.get_chart_image(symbol)
 
@@ -101,7 +101,7 @@ def get_indicator_summary(symbol: str) -> dict:
 
 @mcp.tool()
 def switch_trading_mode(mode: str) -> dict:
-    """Switch between 'swing' (long-term) and 'scalp' (short-term) trading mode.
+    """Switch between 'day_trading', 'swing', and 'position' trading modes.
     This changes which timeframes and indicators are used for analysis."""
     logger.info(f"MCP tool: switch_trading_mode to {mode}")
     return mcp_tools.switch_mode(mode)
@@ -114,7 +114,7 @@ def get_trading_mode() -> dict:
         "mode": settings.trading_mode.value,
         "candle_limit": settings.candle_limit,
         "chart_enabled": settings.should_use_chart,
-        "analysis_interval_hours": settings.ANALYSIS_INTERVAL_HOURS,
+        "analysis_interval_hours": settings.analysis_interval_hours,
     }
 
 

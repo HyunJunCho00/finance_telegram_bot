@@ -205,18 +205,24 @@ class MCPTools:
         """Switch trading mode at runtime by updating env var."""
         try:
             mode_lower = mode.lower().strip()
-            if mode_lower not in ('swing', 'scalp'):
-                return {"error": f"Invalid mode '{mode}'. Use 'swing' or 'scalp'."}
+            if mode_lower not in ('day_trading', 'swing', 'position'):
+                return {"error": f"Invalid mode '{mode}'. Use 'day_trading', 'swing', or 'position'."}
 
             os.environ['TRADING_MODE'] = mode_lower
             from config.settings import get_settings
             get_settings.cache_clear()
 
+            mode_cfg = {
+                "day_trading": {"candle_limit": settings.DAY_TRADING_CANDLE_LIMIT, "chart_for_vlm": settings.USE_CHART_IMAGES},
+                "swing": {"candle_limit": settings.SWING_CANDLE_LIMIT, "chart_for_vlm": settings.USE_CHART_IMAGES},
+                "position": {"candle_limit": settings.POSITION_CANDLE_LIMIT, "chart_for_vlm": settings.USE_CHART_IMAGES},
+            }
+
             return {
                 "success": True,
                 "new_mode": mode_lower,
-                "candle_limit": 4320 if mode_lower == 'swing' else 720,
-                "chart_for_vlm": mode_lower == 'swing',
+                "candle_limit": mode_cfg[mode_lower]["candle_limit"],
+                "chart_for_vlm": mode_cfg[mode_lower]["chart_for_vlm"],
                 "message": f"Switched to {mode_lower.upper()} mode"
             }
         except Exception as e:

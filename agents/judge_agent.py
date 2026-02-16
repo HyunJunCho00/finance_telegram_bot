@@ -128,7 +128,7 @@ You have FULL AUTONOMY. Move fast but be precise."""
         mode: TradingMode = TradingMode.SWING,
         feedback_text: str = "",
     ) -> Dict:
-        base_prompt = self.SWING_PROMPT if mode == TradingMode.SWING else self.SCALP_PROMPT
+        base_prompt = self.SCALP_PROMPT if mode == TradingMode.DAY_TRADING else self.SWING_PROMPT
         prompt = f"{base_prompt}\n\n{self.DEBATE_APPENDIX}"
         previous_decision = self.get_previous_decision()
 

@@ -448,7 +448,7 @@ def node_generate_report(state: AnalysisState) -> dict:
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
 
-    candle_limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.SCALP_CANDLE_LIMIT
+    candle_limit = settings.candle_limit
     df = db.get_latest_market_data(symbol, limit=candle_limit)
     market_data = math_engine.analyze_market(df, mode) if not df.empty else {}
 

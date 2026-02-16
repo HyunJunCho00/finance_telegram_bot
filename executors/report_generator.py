@@ -51,26 +51,40 @@ class ReportGenerator:
 
         d = decision.get('decision', 'N/A')
         icon = {'LONG': '\U0001F7E2', 'SHORT': '\U0001F534', 'HOLD': '\U0001F7E1'}.get(d, '\u2B55')
-        mode_icon = '\U0001F4C8' if mode == TradingMode.SWING else '\u26A1'
-        mode_label = 'SWING' if mode == TradingMode.SWING else 'SCALP'
+        mode_icon_map = {
+            TradingMode.DAY_TRADING: '\u26A1',
+            TradingMode.SWING: '\U0001F4C8',
+            TradingMode.POSITION: '\U0001F3D4\uFE0F',
+        }
+        mode_label_map = {
+            TradingMode.DAY_TRADING: 'DAY_TRADING',
+            TradingMode.SWING: 'SWING',
+            TradingMode.POSITION: 'POSITION',
+        }
+        mode_icon = mode_icon_map.get(mode, '\u2B55')
+        mode_label = mode_label_map.get(mode, mode.value.upper())
 
         key_factors = decision.get('key_factors', [])
         factors_text = '\n'.join([f'  \u2022 {f}' for f in key_factors[:5]]) if key_factors else '  N/A'
 
         # Get relevant timeframe data based on mode
-        if mode == TradingMode.SWING:
-            tf_primary = market_data.get('timeframes', {}).get('4h', {})
-            tf_secondary = market_data.get('timeframes', {}).get('1d', {})
-            tf_labels = ('4H', '1D')
-        else:
+        if mode == TradingMode.DAY_TRADING:
             tf_primary = market_data.get('timeframes', {}).get('5m', {})
             tf_secondary = market_data.get('timeframes', {}).get('15m', {})
             tf_labels = ('5M', '15M')
+        elif mode == TradingMode.POSITION:
+            tf_primary = market_data.get('timeframes', {}).get('1d', {})
+            tf_secondary = market_data.get('timeframes', {}).get('1w', {})
+            tf_labels = ('1D', '1W')
+        else:
+            tf_primary = market_data.get('timeframes', {}).get('4h', {})
+            tf_secondary = market_data.get('timeframes', {}).get('1d', {})
+            tf_labels = ('4H', '1D')
 
-        # Fibonacci info (swing only)
+        # Fibonacci info (swing/position)
         fib_text = ""
         fib = market_data.get('fibonacci', {}).get('4h')
-        if fib and mode == TradingMode.SWING:
+        if fib and mode in (TradingMode.SWING, TradingMode.POSITION):
             fib_text = f"\n<b>Fibonacci ({fib.get('trend', '?')}):</b>\n  38.2%: {fib.get('fib_382', '?')} | 50%: {fib.get('fib_500', '?')} | 61.8%: {fib.get('fib_618', '?')}\n  Nearest: {fib.get('nearest_fib', '?')}"
 
         hold_duration = decision.get('hold_duration', 'N/A')
