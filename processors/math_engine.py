@@ -26,7 +26,11 @@ class MathEngine:
         if timeframe == '1m':
             return df.copy()
 
-        tf_map = {'5m': '5min', '15m': '15min', '1h': '1h', '4h': '4h', '1d': '1D'}
+        tf_map = {
+            '5m': '5min', '15m': '15min', '1h': '1h', '4h': '4h',
+            '1d': '1D',
+            '1w': '1W-MON',  # Week starts Monday (Upbit KST 09:00 = UTC 00:00)
+        }
         rule = tf_map.get(timeframe)
         if not rule:
             return df.copy()
@@ -420,11 +424,156 @@ class MathEngine:
 
         return result
 
+    # ─────────────── FVG (Fair Value Gap) ───────────────
+
+    def calculate_fvg(self, df: pd.DataFrame, max_gaps: int = 5) -> List[Dict]:
+        """Detect Fair Value Gaps (3-candle imbalance zones).
+        FVG = gap between candle 1's wick and candle 3's wick.
+        Unfilled FVGs act as magnets for price return."""
+        if len(df) < 3:
+            return []
+
+        fvgs = []
+        highs = df['high'].astype(float).values
+        lows = df['low'].astype(float).values
+        current_price = float(df.iloc[-1]['close'])
+
+        for i in range(len(df) - 2):
+            # Bullish FVG: candle3.low > candle1.high (gap up)
+            if lows[i + 2] > highs[i]:
+                gap_low = highs[i]
+                gap_high = lows[i + 2]
+                # Check if unfilled (current price hasn't fully entered the gap)
+                filled = current_price <= gap_high and current_price >= gap_low
+                fvgs.append({
+                    'type': 'bullish',
+                    'gap_low': round(gap_low, 2),
+                    'gap_high': round(gap_high, 2),
+                    'gap_size_pct': round((gap_high - gap_low) / gap_low * 100, 4),
+                    'filled': filled,
+                    'candle_idx': i + 1,
+                })
+
+            # Bearish FVG: candle3.high < candle1.low (gap down)
+            if highs[i + 2] < lows[i]:
+                gap_high = lows[i]
+                gap_low = highs[i + 2]
+                filled = current_price >= gap_low and current_price <= gap_high
+                fvgs.append({
+                    'type': 'bearish',
+                    'gap_low': round(gap_low, 2),
+                    'gap_high': round(gap_high, 2),
+                    'gap_size_pct': round((gap_high - gap_low) / gap_low * 100, 4),
+                    'filled': filled,
+                    'candle_idx': i + 1,
+                })
+
+        # Return most recent unfilled gaps first
+        unfilled = [g for g in fvgs if not g['filled']]
+        return unfilled[-max_gaps:] if unfilled else fvgs[-max_gaps:]
+
+    # ─────────────── Swing High/Low (Liquidity Levels) ───────────────
+
+    def calculate_swing_levels(self, df: pd.DataFrame, lookback: int = None) -> Dict:
+        """Find major swing highs/lows that act as liquidity pools.
+        Stop losses cluster around these levels."""
+        if len(df) < 10:
+            return {}
+
+        order = lookback or max(5, len(df) // 10)
+        highs = df['high'].astype(float).values
+        lows = df['low'].astype(float).values
+
+        high_idx = argrelextrema(highs, np.greater, order=order)[0]
+        low_idx = argrelextrema(lows, np.less, order=order)[0]
+
+        current_price = float(df.iloc[-1]['close'])
+
+        result = {
+            'swing_highs': [round(highs[i], 2) for i in high_idx[-5:]],
+            'swing_lows': [round(lows[i], 2) for i in low_idx[-5:]],
+        }
+
+        # Nearest levels above/below current price
+        above = [h for h in result['swing_highs'] if h > current_price]
+        below = [l for l in result['swing_lows'] if l < current_price]
+
+        result['nearest_resistance'] = min(above) if above else None
+        result['nearest_support'] = max(below) if below else None
+
+        return result
+
     # ─────────────── Main Entry Points ───────────────
 
-    def analyze_market_swing(self, df_1m: pd.DataFrame) -> Dict:
-        """SWING mode: 1h, 4h, 1d focus with Fibonacci + volume profile.
-        Returns ONLY factual data. AI decides everything."""
+    def analyze_market_day_trading(self, df_1m: pd.DataFrame,
+                                    df_4h: Optional[pd.DataFrame] = None) -> Dict:
+        """DAY_TRADING mode: 5m, 15m, 1h, 4h focus with VWAP/Keltner + FVG.
+        df_4h: pre-loaded from GCS if available (for EMA200 on 4h)."""
+
+        result = {
+            'mode': 'day_trading',
+            'current_price': round(float(df_1m.iloc[-1]['close']), 2),
+            'current_volume': round(float(df_1m.iloc[-1]['volume']), 2),
+            'timeframes': {},
+            'scalp_indicators': {},
+            'structure': {},
+            'fvg': {},
+            'swing_levels': {},
+        }
+
+        timeframes = {
+            '5m': self.resample_to_timeframe(df_1m, '5m'),
+            '15m': self.resample_to_timeframe(df_1m, '15m'),
+            '1h': self.resample_to_timeframe(df_1m, '1h'),
+        }
+
+        # Use GCS 4h data if available (has EMA200 depth), else resample
+        if df_4h is not None and len(df_4h) >= 20:
+            timeframes['4h'] = df_4h
+        else:
+            timeframes['4h'] = self.resample_to_timeframe(df_1m, '4h')
+
+        for tf_name, tf_df in timeframes.items():
+            if len(tf_df) >= 5:
+                result['timeframes'][tf_name] = self.calculate_indicators_for_timeframe(tf_df)
+                result['timeframes'][tf_name]['candle_count'] = len(tf_df)
+            else:
+                result['timeframes'][tf_name] = {'error': 'insufficient_data', 'candle_count': len(tf_df)}
+
+        # Scalp indicators on 5m and 15m
+        for tf_name in ['5m', '15m']:
+            tf_df = timeframes.get(tf_name, pd.DataFrame())
+            if len(tf_df) >= 20:
+                result['scalp_indicators'][tf_name] = self.calculate_scalp_indicators(tf_df)
+
+        # Structure on 15m and 1h
+        for tf_name in ['15m', '1h']:
+            tf_df = timeframes.get(tf_name, pd.DataFrame())
+            if len(tf_df) >= 20:
+                result['structure'][f'support_{tf_name}'] = self.calculate_diagonal_support(tf_df)
+                result['structure'][f'resistance_{tf_name}'] = self.calculate_diagonal_resistance(tf_df)
+                result['structure'][f'divergence_{tf_name}'] = self.detect_divergences(tf_df)
+
+        # FVG on 15m (most useful for day trading)
+        tf_15m = timeframes.get('15m', pd.DataFrame())
+        if len(tf_15m) >= 10:
+            result['fvg']['15m'] = self.calculate_fvg(tf_15m)
+
+        # Swing levels on 1h
+        tf_1h = timeframes.get('1h', pd.DataFrame())
+        if len(tf_1h) >= 20:
+            result['swing_levels']['1h'] = self.calculate_swing_levels(tf_1h)
+
+        # Recent 15m candles
+        if len(tf_15m) >= 3:
+            result['recent_15m_candles'] = self._recent_candle_data(tf_15m, count=8)
+
+        return result
+
+    def analyze_market_swing(self, df_1m: pd.DataFrame,
+                              df_1d: Optional[pd.DataFrame] = None) -> Dict:
+        """SWING mode: 1h, 4h, 1d focus with Fibonacci + volume profile + FVG.
+        df_1d: pre-loaded from GCS if available (for EMA200 on 1d)."""
 
         result = {
             'mode': 'swing',
@@ -434,14 +583,20 @@ class MathEngine:
             'structure': {},
             'fibonacci': {},
             'volume_profile': {},
+            'fvg': {},
+            'swing_levels': {},
         }
 
-        # Swing focuses on higher timeframes
         timeframes = {
             '1h': self.resample_to_timeframe(df_1m, '1h'),
             '4h': self.resample_to_timeframe(df_1m, '4h'),
-            '1d': self.resample_to_timeframe(df_1m, '1d'),
         }
+
+        # Use GCS 1d data if available, else resample
+        if df_1d is not None and len(df_1d) >= 10:
+            timeframes['1d'] = df_1d
+        else:
+            timeframes['1d'] = self.resample_to_timeframe(df_1m, '1d')
 
         for tf_name, tf_df in timeframes.items():
             if len(tf_df) >= 5:
@@ -450,7 +605,7 @@ class MathEngine:
             else:
                 result['timeframes'][tf_name] = {'error': 'insufficient_data', 'candle_count': len(tf_df)}
 
-        # Structural analysis on multiple timeframes
+        # Structural analysis on 1h and 4h
         for tf_name in ['1h', '4h']:
             tf_df = timeframes.get(tf_name, pd.DataFrame())
             if len(tf_df) >= 20:
@@ -458,12 +613,11 @@ class MathEngine:
                 result['structure'][f'resistance_{tf_name}'] = self.calculate_diagonal_resistance(tf_df)
                 result['structure'][f'divergence_{tf_name}'] = self.detect_divergences(tf_df)
 
-        # Fibonacci on 4h (most meaningful for swing)
+        # Fibonacci on 4h and 1d
         tf_4h = timeframes.get('4h', pd.DataFrame())
         if len(tf_4h) >= 20:
             result['fibonacci']['4h'] = self.calculate_fibonacci_levels(tf_4h)
 
-        # Fibonacci on 1d
         tf_1d = timeframes.get('1d', pd.DataFrame())
         if len(tf_1d) >= 10:
             result['fibonacci']['1d'] = self.calculate_fibonacci_levels(tf_1d)
@@ -472,31 +626,52 @@ class MathEngine:
         if len(tf_4h) >= 20:
             result['volume_profile']['4h'] = self.calculate_volume_profile(tf_4h)
 
-        # Last few candle patterns on 4h
+        # FVG on 4h
+        if len(tf_4h) >= 10:
+            result['fvg']['4h'] = self.calculate_fvg(tf_4h)
+
+        # Swing levels on 4h
+        if len(tf_4h) >= 20:
+            result['swing_levels']['4h'] = self.calculate_swing_levels(tf_4h)
+
+        # Recent 4h candles
         if len(tf_4h) >= 3:
             result['recent_4h_candles'] = self._recent_candle_data(tf_4h, count=5)
 
         return result
 
-    def analyze_market_scalp(self, df_1m: pd.DataFrame) -> Dict:
-        """SCALP mode: 5m, 15m, 1h focus with VWAP/Keltner/volume delta.
-        Returns ONLY factual data. AI decides everything."""
+    def analyze_market_position(self, df_1m: pd.DataFrame,
+                                 df_1d: Optional[pd.DataFrame] = None,
+                                 df_1w: Optional[pd.DataFrame] = None) -> Dict:
+        """POSITION mode: 4h, 1d, 1w focus for weeks~months holding.
+        df_1d/df_1w: pre-loaded from GCS (essential for EMA200)."""
 
         result = {
-            'mode': 'scalp',
+            'mode': 'position',
             'current_price': round(float(df_1m.iloc[-1]['close']), 2),
             'current_volume': round(float(df_1m.iloc[-1]['volume']), 2),
             'timeframes': {},
-            'scalp_indicators': {},
             'structure': {},
+            'fibonacci': {},
+            'volume_profile': {},
+            'fvg': {},
+            'swing_levels': {},
         }
 
         timeframes = {
-            '1m': df_1m,
-            '5m': self.resample_to_timeframe(df_1m, '5m'),
-            '15m': self.resample_to_timeframe(df_1m, '15m'),
-            '1h': self.resample_to_timeframe(df_1m, '1h'),
+            '4h': self.resample_to_timeframe(df_1m, '4h'),
         }
+
+        # Use GCS data for 1d and 1w (much deeper history needed)
+        if df_1d is not None and len(df_1d) >= 10:
+            timeframes['1d'] = df_1d
+        else:
+            timeframes['1d'] = self.resample_to_timeframe(df_1m, '1d')
+
+        if df_1w is not None and len(df_1w) >= 5:
+            timeframes['1w'] = df_1w
+        else:
+            timeframes['1w'] = self.resample_to_timeframe(df_1m, '1w')
 
         for tf_name, tf_df in timeframes.items():
             if len(tf_df) >= 5:
@@ -505,30 +680,51 @@ class MathEngine:
             else:
                 result['timeframes'][tf_name] = {'error': 'insufficient_data', 'candle_count': len(tf_df)}
 
-        # Scalp-specific on 5m and 15m
-        for tf_name in ['5m', '15m']:
-            tf_df = timeframes.get(tf_name, pd.DataFrame())
-            if len(tf_df) >= 20:
-                result['scalp_indicators'][tf_name] = self.calculate_scalp_indicators(tf_df)
+        # Structure on 1d
+        tf_1d = timeframes.get('1d', pd.DataFrame())
+        if len(tf_1d) >= 20:
+            result['structure']['support_1d'] = self.calculate_diagonal_support(tf_1d)
+            result['structure']['resistance_1d'] = self.calculate_diagonal_resistance(tf_1d)
+            result['structure']['divergence_1d'] = self.detect_divergences(tf_1d)
 
-        # Quick structure on 15m
-        tf_15m = timeframes.get('15m', pd.DataFrame())
-        if len(tf_15m) >= 20:
-            result['structure']['support_15m'] = self.calculate_diagonal_support(tf_15m)
-            result['structure']['resistance_15m'] = self.calculate_diagonal_resistance(tf_15m)
+        # Fibonacci on 1d and 1w
+        if len(tf_1d) >= 10:
+            result['fibonacci']['1d'] = self.calculate_fibonacci_levels(tf_1d)
 
-        # Recent 5m candles for pattern reading
-        tf_5m = timeframes.get('5m', pd.DataFrame())
-        if len(tf_5m) >= 3:
-            result['recent_5m_candles'] = self._recent_candle_data(tf_5m, count=10)
+        tf_1w = timeframes.get('1w', pd.DataFrame())
+        if len(tf_1w) >= 10:
+            result['fibonacci']['1w'] = self.calculate_fibonacci_levels(tf_1w)
+
+        # Volume profile on 1d
+        if len(tf_1d) >= 20:
+            result['volume_profile']['1d'] = self.calculate_volume_profile(tf_1d)
+
+        # FVG on 1d
+        if len(tf_1d) >= 10:
+            result['fvg']['1d'] = self.calculate_fvg(tf_1d)
+
+        # Swing levels on 1d
+        if len(tf_1d) >= 20:
+            result['swing_levels']['1d'] = self.calculate_swing_levels(tf_1d)
+
+        # Recent 1d candles
+        if len(tf_1d) >= 3:
+            result['recent_1d_candles'] = self._recent_candle_data(tf_1d, count=10)
 
         return result
 
-    def analyze_market(self, df_1m: pd.DataFrame, mode: TradingMode) -> Dict:
-        """Unified entry point. Dispatches to mode-specific analysis."""
-        if mode == TradingMode.SCALP:
-            return self.analyze_market_scalp(df_1m)
-        return self.analyze_market_swing(df_1m)
+    def analyze_market(self, df_1m: pd.DataFrame, mode: TradingMode,
+                       df_4h: Optional[pd.DataFrame] = None,
+                       df_1d: Optional[pd.DataFrame] = None,
+                       df_1w: Optional[pd.DataFrame] = None) -> Dict:
+        """Unified entry point. Dispatches to mode-specific analysis.
+        Higher timeframe DataFrames (df_4h, df_1d, df_1w) come from GCS
+        when available, providing deeper history for EMA200 etc."""
+        if mode == TradingMode.DAY_TRADING:
+            return self.analyze_market_day_trading(df_1m, df_4h=df_4h)
+        elif mode == TradingMode.POSITION:
+            return self.analyze_market_position(df_1m, df_1d=df_1d, df_1w=df_1w)
+        return self.analyze_market_swing(df_1m, df_1d=df_1d)
 
     # ─────────────── Compact Data Formatting ───────────────
 
@@ -574,7 +770,28 @@ class MathEngine:
                 if v:
                     lines.append(f"  {k}: {v}")
 
-        candles = analysis.get('recent_4h_candles') or analysis.get('recent_5m_candles')
+        fvg = analysis.get('fvg', {})
+        if fvg:
+            lines.append("[FVG]")
+            for tf, gaps in fvg.items():
+                if gaps:
+                    for g in gaps:
+                        status = "FILLED" if g.get('filled') else "UNFILLED"
+                        lines.append(f"  {tf} {g['type']}: {g['gap_low']}~{g['gap_high']} ({status})")
+
+        sl = analysis.get('swing_levels', {})
+        if sl:
+            lines.append("[SWING_LEVELS]")
+            for tf, levels in sl.items():
+                if levels:
+                    lines.append(f"  {tf}: highs={levels.get('swing_highs',[])} lows={levels.get('swing_lows',[])}")
+                    if levels.get('nearest_resistance'):
+                        lines.append(f"  nearest_R={levels['nearest_resistance']} nearest_S={levels.get('nearest_support')}")
+
+        candles = (analysis.get('recent_4h_candles')
+                   or analysis.get('recent_15m_candles')
+                   or analysis.get('recent_5m_candles')
+                   or analysis.get('recent_1d_candles'))
         if candles:
             lines.append("[RECENT_CANDLES]")
             for c in candles:

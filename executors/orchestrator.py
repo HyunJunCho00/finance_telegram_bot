@@ -55,7 +55,7 @@ except ImportError:
 
 class AnalysisState(TypedDict):
     symbol: str
-    mode: str  # "swing" or "scalp"
+    mode: str  # "day_trading", "swing", or "position"
     is_emergency: bool
 
     # Data collection results
@@ -64,6 +64,7 @@ class AnalysisState(TypedDict):
     narrative_text: str
     funding_context: str
     cvd_context: str
+    liquidation_context: str
     rag_context: str
     telegram_news: str
     feedback_text: str
@@ -90,16 +91,31 @@ class AnalysisState(TypedDict):
 # ── Node functions ──
 
 def node_collect_data(state: AnalysisState) -> dict:
-    """Fetch 1m OHLCV data from Supabase."""
+    """Fetch 1m OHLCV data from Supabase + higher TFs from GCS if available."""
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
-    candle_limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.SCALP_CANDLE_LIMIT
+    candle_limit = settings.candle_limit
 
     df = db.get_latest_market_data(symbol, limit=candle_limit)
     if df.empty:
         return {"df_size": 0, "errors": state.get("errors", []) + [f"No market data for {symbol}"]}
 
-    market_data = math_engine.analyze_market(df, mode)
+    # Load higher timeframe data from GCS for deeper indicator history
+    df_4h, df_1d, df_1w = None, None, None
+    try:
+        from processors.gcs_parquet import gcs_parquet_store
+        if gcs_parquet_store.enabled:
+            if mode == TradingMode.DAY_TRADING:
+                df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=2)
+            elif mode == TradingMode.SWING:
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
+            elif mode == TradingMode.POSITION:
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
+                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=60)
+    except Exception as e:
+        logger.warning(f"GCS load skipped: {e}")
+
+    market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
     compact = math_engine.format_compact(market_data)
 
     return {
@@ -161,10 +177,14 @@ def node_funding_context(state: AnalysisState) -> dict:
 
 
 def node_cvd_context(state: AnalysisState) -> dict:
-    """Fetch CVD (Cumulative Volume Delta) context."""
+    """Fetch CVD (Cumulative Volume Delta) + Whale CVD context."""
     symbol = state["symbol"]
+    mode = TradingMode(state["mode"])
+    lookback = settings.data_lookback_hours
+    limit = lookback * 60  # 1m resolution
+
     try:
-        cvd_df = db.get_cvd_data(symbol, limit=240)
+        cvd_df = db.get_cvd_data(symbol, limit=limit)
         if cvd_df.empty:
             return {"cvd_context": "CVD: No data available"}
 
@@ -175,16 +195,70 @@ def node_cvd_context(state: AnalysisState) -> dict:
         cvd_direction = "BUYING" if total_delta > 0 else "SELLING"
         recent_direction = "BUYING" if recent_delta > 0 else "SELLING"
 
-        return {
-            "cvd_context": (
-                f"[CVD] 4H Delta={total_delta:.2f} ({cvd_direction}) | "
-                f"1H Delta={recent_delta:.2f} ({recent_direction}) | "
-                f"CVD={cvd_final:.2f}"
+        parts = [
+            f"[CVD] {lookback}H Delta={total_delta:.2f} ({cvd_direction}) | "
+            f"1H Delta={recent_delta:.2f} ({recent_direction}) | "
+            f"CVD={cvd_final:.2f}"
+        ]
+
+        # Whale CVD if available
+        if 'whale_cvd' in cvd_df.columns:
+            whale_buy = cvd_df['whale_buy_vol'].sum()
+            whale_sell = cvd_df['whale_sell_vol'].sum()
+            whale_delta = whale_buy - whale_sell
+            whale_dir = "ACCUMULATING" if whale_delta > 0 else "DISTRIBUTING"
+            ratio = whale_buy / max(whale_sell, 1)
+            parts.append(
+                f"[WHALE_CVD] Buy=${whale_buy:,.0f} Sell=${whale_sell:,.0f} "
+                f"Ratio={ratio:.2f} ({whale_dir})"
             )
-        }
+
+        return {"cvd_context": " | ".join(parts)}
     except Exception as e:
         logger.error(f"CVD context error: {e}")
         return {"cvd_context": "CVD: Error"}
+
+
+def node_liquidation_context(state: AnalysisState) -> dict:
+    """Fetch recent liquidation data for text context."""
+    symbol = state["symbol"]
+    lookback = settings.data_lookback_hours
+    limit = lookback * 60
+
+    try:
+        liq_df = db.get_liquidation_data(symbol, limit=limit)
+        if liq_df.empty:
+            return {"liquidation_context": "Liquidation: No data (WebSocket may not be running)"}
+
+        total_long = float(liq_df['long_liq_usd'].sum())
+        total_short = float(liq_df['short_liq_usd'].sum())
+        total = total_long + total_short
+
+        # Recent 1h
+        recent = liq_df.tail(60)
+        recent_long = float(recent['long_liq_usd'].sum())
+        recent_short = float(recent['short_liq_usd'].sum())
+
+        # Largest single event
+        if 'largest_single_usd' in liq_df.columns:
+            max_row = liq_df.loc[liq_df['largest_single_usd'].idxmax()]
+            largest = f"${max_row['largest_single_usd']:,.0f} {max_row.get('largest_single_side', '?')} @{max_row.get('largest_single_price', '?')}"
+        else:
+            largest = "N/A"
+
+        dominant = "LONGS_REKT" if total_long > total_short else "SHORTS_REKT"
+
+        text = (
+            f"[LIQUIDATION] {lookback}H: Total=${total:,.0f} ({dominant}) | "
+            f"Long_Liq=${total_long:,.0f} Short_Liq=${total_short:,.0f} | "
+            f"1H: Long=${recent_long:,.0f} Short=${recent_short:,.0f} | "
+            f"Largest={largest}"
+        )
+        return {"liquidation_context": text}
+
+    except Exception as e:
+        logger.debug(f"Liquidation context: {e}")
+        return {"liquidation_context": "Liquidation: No data"}
 
 
 def node_rag_query(state: AnalysisState) -> dict:
@@ -307,23 +381,48 @@ def node_risk_agent(state: AnalysisState) -> dict:
 
 
 def node_generate_chart(state: AnalysisState) -> dict:
-    """Generate chart (SWING mode only, for Judge)."""
+    """Generate structure chart for all modes (for Judge VLM)."""
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
+    candle_limit = settings.candle_limit
 
-    candle_limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.SCALP_CANDLE_LIMIT
     df = db.get_latest_market_data(symbol, limit=candle_limit)
     if df.empty:
         return {"chart_image_b64": None, "chart_bytes": None}
 
-    market_data = math_engine.analyze_market(df, mode)
-    chart_bytes = chart_generator.generate_chart(df, market_data, symbol, mode)
+    # Load higher TF data from GCS
+    df_4h, df_1d, df_1w = None, None, None
+    try:
+        from processors.gcs_parquet import gcs_parquet_store
+        if gcs_parquet_store.enabled:
+            if mode == TradingMode.DAY_TRADING:
+                df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=2)
+            elif mode == TradingMode.SWING:
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
+            elif mode == TradingMode.POSITION:
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
+                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=60)
+    except Exception as e:
+        logger.warning(f"GCS load for chart skipped: {e}")
+
+    market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
+
+    # Load liquidation data for chart markers
+    liquidation_df = None
+    try:
+        liq_limit = settings.data_lookback_hours * 60
+        liquidation_df = db.get_liquidation_data(symbol, limit=liq_limit)
+    except Exception:
+        pass
+
+    chart_bytes = chart_generator.generate_chart(df, market_data, symbol, mode,
+                                                  liquidation_df=liquidation_df)
 
     chart_image_b64 = None
     if chart_bytes:
         chart_bytes_for_vlm = chart_generator.resize_for_low_res(chart_bytes)
         chart_image_b64 = chart_generator.chart_to_base64(chart_bytes_for_vlm)
-        logger.info(f"Chart for Judge: {len(chart_bytes_for_vlm)} bytes (low-res)")
+        logger.info(f"Chart for Judge ({mode.value}): {len(chart_bytes_for_vlm)} bytes (low-res)")
 
     return {"chart_image_b64": chart_image_b64, "chart_bytes": chart_bytes}
 
@@ -385,10 +484,11 @@ def node_generate_report(state: AnalysisState) -> dict:
 # ── Helper ──
 
 def _build_full_context(state: AnalysisState) -> str:
-    """Build full context string for agents (narrative + cvd + rag + news + feedback)."""
+    """Build full context string for agents (narrative + cvd + liquidation + rag + news + feedback)."""
     parts = [
         state.get("narrative_text", ""),
         state.get("cvd_context", ""),
+        state.get("liquidation_context", ""),
         state.get("microstructure_context", ""),
         state.get("macro_context", ""),
         state.get("rag_context", ""),
@@ -401,8 +501,8 @@ def _build_full_context(state: AnalysisState) -> str:
 # ── Conditional edge ──
 
 def should_generate_chart(state: AnalysisState) -> str:
-    """Conditional: generate chart only in SWING mode."""
-    if state.get("mode") == "swing" and state.get("df_size", 0) > 0:
+    """Conditional: generate chart for all modes if enabled."""
+    if settings.should_use_chart and state.get("df_size", 0) > 0:
         return "generate_chart"
     return "judge_agent"
 
@@ -419,6 +519,7 @@ def build_analysis_graph():
     graph.add_node("rag_ingest", node_rag_ingest)
     graph.add_node("funding_context", node_funding_context)
     graph.add_node("cvd_context", node_cvd_context)
+    graph.add_node("liquidation_context", node_liquidation_context)
     graph.add_node("rag_query", node_rag_query)
     graph.add_node("telegram_news", node_telegram_news)
     graph.add_node("self_correction", node_self_correction)
@@ -439,7 +540,8 @@ def build_analysis_graph():
     graph.add_edge("perplexity_search", "rag_ingest")
     graph.add_edge("rag_ingest", "funding_context")
     graph.add_edge("funding_context", "cvd_context")
-    graph.add_edge("cvd_context", "rag_query")
+    graph.add_edge("cvd_context", "liquidation_context")
+    graph.add_edge("liquidation_context", "rag_query")
     graph.add_edge("rag_query", "telegram_news")
     graph.add_edge("telegram_news", "self_correction")
     graph.add_edge("self_correction", "microstructure_context")
@@ -510,6 +612,7 @@ class Orchestrator:
             "narrative_text": "",
             "funding_context": "",
             "cvd_context": "",
+            "liquidation_context": "",
             "rag_context": "",
             "telegram_news": "",
             "feedback_text": "",
@@ -542,8 +645,8 @@ class Orchestrator:
         # Run each node sequentially
         for node_fn in [
             node_collect_data, node_perplexity_search, node_rag_ingest,
-            node_funding_context, node_cvd_context, node_rag_query,
-            node_telegram_news, node_self_correction,
+            node_funding_context, node_cvd_context, node_liquidation_context,
+            node_rag_query, node_telegram_news, node_self_correction,
             node_microstructure_context, node_macro_context,
             node_bull_agent, node_bear_agent, node_risk_agent,
         ]:
@@ -553,8 +656,8 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Node {node_fn.__name__} error: {e}")
 
-        # Conditional chart
-        if mode == TradingMode.SWING and state.get("df_size", 0) > 0:
+        # Conditional chart (all modes now)
+        if settings.should_use_chart and state.get("df_size", 0) > 0:
             try:
                 state.update(node_generate_chart(state))
             except Exception as e:
