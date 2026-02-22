@@ -13,6 +13,19 @@ cd "$INSTALL_DIR"
 # 소유자 불일치로 인한 git 권한 에러 방지
 git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
 
+# GCP Secret Manager에서 시크릿 로드 (scheduler.service와 동일한 환경)
+export USE_SECRET_MANAGER=true
+export PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}"
+export VERTEX_REGION="${VERTEX_REGION:-us-central1}"
+
+if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" ]]; then
+  echo "ERROR: PROJECT_ID를 확인할 수 없습니다."
+  echo "  gcloud config set project YOUR_PROJECT_ID 후 재실행하세요."
+  exit 1
+fi
+
+echo "Project: $PROJECT_ID"
+
 source venv/bin/activate
 
 echo "[1/6] Fear & Greed Index..."
