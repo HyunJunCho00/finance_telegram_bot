@@ -35,6 +35,8 @@ from typing import Dict, List, Optional
 
 import ccxt
 import pandas as pd
+import requests
+import yfinance as yf
 from loguru import logger
 
 # Add project root to path
@@ -503,37 +505,350 @@ class UpbitBulkLoader:
         return {"rows": len(df)}
 
 
+# ─────────────── Fear & Greed Bulk Loader ───────────────
+
+class FearGreedBulkLoader:
+    """Load historical Fear & Greed Index from alternative.me (no API key, free)."""
+
+    FNG_URL = "https://api.alternative.me/fng/"
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({'Accept': 'application/json'})
+
+    def fetch_range(self, days: int = 2190) -> pd.DataFrame:
+        """Fetch historical F&G. alternative.me supports up to ~2000+ days via ?limit=."""
+        try:
+            resp = self._session.get(
+                self.FNG_URL,
+                params={'limit': days, 'format': 'json'},
+                timeout=30,
+            )
+            resp.raise_for_status()
+            entries = resp.json().get('data', [])
+            if not entries:
+                logger.warning("Fear & Greed: empty response")
+                return pd.DataFrame()
+
+            rows = []
+            for i, e in enumerate(entries):
+                value = int(e['value'])
+                prev = entries[i + 1] if i + 1 < len(entries) else None
+                ts = pd.Timestamp(int(e['timestamp']), unit='s', tz='UTC').normalize()
+                rows.append({
+                    'timestamp': ts,
+                    'value': value,
+                    'classification': e['value_classification'],
+                    'value_prev': int(prev['value']) if prev else None,
+                    'classification_prev': prev['value_classification'] if prev else None,
+                    'change': (value - int(prev['value'])) if prev else None,
+                })
+
+            df = pd.DataFrame(rows)
+            logger.info(f"Fetched {len(df)} Fear & Greed records (oldest: {df['timestamp'].min().date()})")
+            return df
+
+        except Exception as e:
+            logger.error(f"Fear & Greed bulk fetch error: {e}")
+            return pd.DataFrame()
+
+    def save_to_db(self, df: pd.DataFrame) -> int:
+        """Save all records to PostgreSQL (small dataset, save everything)."""
+        if df.empty:
+            return 0
+
+        count = 0
+        for _, r in df.iterrows():
+            try:
+                db.upsert_fear_greed({
+                    'timestamp': r['timestamp'].isoformat(),
+                    'value': int(r['value']),
+                    'classification': r['classification'],
+                    'value_prev': int(r['value_prev']) if pd.notna(r.get('value_prev')) else None,
+                    'classification_prev': r.get('classification_prev'),
+                    'change': int(r['change']) if pd.notna(r.get('change')) else None,
+                })
+                count += 1
+            except Exception as e:
+                logger.debug(f"Fear & Greed upsert error: {e}")
+
+        logger.info(f"Saved {count} Fear & Greed records to PostgreSQL")
+        return count
+
+
+# ─────────────── Deribit DVOL Bulk Loader ───────────────
+
+class DeribitDVOLBulkLoader:
+    """Load historical DVOL index from Deribit public API (no auth required).
+
+    Only DVOL is available historically.
+    PCR / IV Term Structure / Skew require live option chain → real-time only.
+    """
+
+    DERIBIT_URL = "https://www.deribit.com/api/v2/public"
+    RESOLUTION = 3600  # 1h in seconds (Deribit resolution values: 1, 60, 3600, 43200, 86400)
+
+    def __init__(self):
+        self._session = requests.Session()
+        self._session.headers.update({'Accept': 'application/json'})
+
+    def fetch_range(self, currency: str, days: int = 2190) -> pd.DataFrame:
+        """Fetch historical DVOL hourly candles with pagination."""
+        all_rows = []
+        end_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        start_ms = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp() * 1000)
+        resolution_ms = self.RESOLUTION * 1000
+        current_start = start_ms
+        request_count = 0
+
+        logger.info(f"Fetching Deribit DVOL {currency}: {days} days (1h resolution)")
+
+        while current_start < end_ms:
+            try:
+                resp = self._session.get(
+                    f"{self.DERIBIT_URL}/get_volatility_index_data",
+                    params={
+                        'currency': currency,
+                        'start_timestamp': current_start,
+                        'end_timestamp': end_ms,
+                        'resolution': str(self.RESOLUTION),
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                result = resp.json().get('result', {})
+                data = result.get('data', [])
+
+                if not data:
+                    break
+
+                for point in data:
+                    # [ts_ms, open, high, low, close]
+                    all_rows.append({
+                        'timestamp': pd.Timestamp(int(point[0]), unit='ms', tz='UTC'),
+                        'symbol': currency,
+                        'dvol': round(float(point[4]), 4),  # close value
+                    })
+
+                last_ts = int(data[-1][0])
+                current_start = last_ts + resolution_ms
+                request_count += 1
+
+                if request_count % 10 == 0:
+                    logger.info(f"  ... {len(all_rows):,} DVOL records ({request_count} requests)")
+
+                # Deribit returns fewer points when approaching end_ms
+                if len(data) < 10:
+                    break
+
+                time.sleep(0.2)
+
+            except Exception as e:
+                logger.error(f"Deribit DVOL fetch error at ts={current_start}: {e}")
+                time.sleep(2)
+                current_start += resolution_ms * 100  # skip ahead on error
+                continue
+
+        df = pd.DataFrame(all_rows) if all_rows else pd.DataFrame()
+        if not df.empty:
+            logger.info(f"Fetched {len(df):,} DVOL records for {currency} "
+                        f"(oldest: {df['timestamp'].min().date()})")
+        return df
+
+    def save_to_db(self, df: pd.DataFrame) -> int:
+        """Save DVOL records to deribit_data table (only dvol field, others NULL)."""
+        if df.empty:
+            return 0
+
+        count = 0
+        for _, r in df.iterrows():
+            try:
+                db.upsert_deribit_data({
+                    'timestamp': r['timestamp'].isoformat(),
+                    'symbol': r['symbol'],
+                    'dvol': float(r['dvol']),
+                    # PCR / IV / Skew are NULL for historical rows (live option chain required)
+                })
+                count += 1
+            except Exception as e:
+                logger.debug(f"Deribit DVOL upsert error: {e}")
+
+        logger.info(f"Saved {count} Deribit DVOL records to PostgreSQL")
+        return count
+
+
+# ─────────────── Macro Bulk Loader ───────────────
+
+class MacroBulkLoader:
+    """Load historical macro data from FRED API and yfinance.
+
+    FRED series (daily/monthly): DGS2, DGS10, CPIAUCSL, FEDFUNDS
+    yfinance (daily close): DXY, NASDAQ, Gold, Oil
+    Merged into daily snapshots with forward-fill for weekends/holidays.
+    """
+
+    FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
+    FRED_SERIES = {
+        "dgs2": "DGS2",
+        "dgs10": "DGS10",
+        "cpiaucsl": "CPIAUCSL",
+        "fedfunds": "FEDFUNDS",
+    }
+    TICKERS = {
+        "dxy": "DX-Y.NYB",
+        "nasdaq": "^IXIC",
+        "gold": "GC=F",
+        "oil": "CL=F",
+    }
+
+    def __init__(self):
+        self.fred_api_key = settings.FRED_API_KEY
+        self._session = requests.Session()
+
+    def _fetch_fred(self, series_id: str, days: int) -> pd.Series:
+        if not self.fred_api_key:
+            logger.warning(f"FRED_API_KEY not set — skipping {series_id}")
+            return pd.Series(dtype=float, name=series_id.lower())
+
+        start_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%d')
+        try:
+            resp = self._session.get(self.FRED_BASE, params={
+                "series_id": series_id,
+                "api_key": self.fred_api_key,
+                "file_type": "json",
+                "sort_order": "asc",
+                "observation_start": start_date,
+            }, timeout=30)
+            resp.raise_for_status()
+            obs = resp.json().get("observations", [])
+            data = {o["date"]: float(o["value"]) for o in obs
+                    if o.get("value") not in (None, ".")}
+            s = pd.Series(data, name=series_id.lower())
+            s.index = pd.to_datetime(s.index)
+            logger.info(f"FRED {series_id}: {len(s)} records")
+            return s
+        except Exception as e:
+            logger.warning(f"FRED {series_id} error: {e}")
+            return pd.Series(dtype=float, name=series_id.lower())
+
+    def _fetch_yf(self, ticker: str, name: str) -> pd.Series:
+        try:
+            hist = yf.Ticker(ticker).history(period="max")["Close"].dropna()
+            hist.index = hist.index.tz_localize(None).normalize()
+            hist.name = name
+            logger.info(f"yfinance {ticker} ({name}): {len(hist)} records")
+            return hist
+        except Exception as e:
+            logger.warning(f"yfinance {ticker} error: {e}")
+            return pd.Series(dtype=float, name=name)
+
+    def build_snapshots(self, days: int = 2190) -> pd.DataFrame:
+        """Merge FRED + yfinance into daily macro snapshots with forward-fill."""
+        all_series = []
+
+        for col, sid in self.FRED_SERIES.items():
+            s = self._fetch_fred(sid, days)
+            s.name = col
+            all_series.append(s)
+
+        for col, ticker in self.TICKERS.items():
+            s = self._fetch_yf(ticker, col)
+            all_series.append(s)
+
+        df = pd.concat(all_series, axis=1)
+
+        # Forward-fill weekends/holidays (FRED updates only on business days)
+        df = df.ffill()
+
+        # Filter to requested period
+        start = pd.Timestamp(datetime.now(timezone.utc) - timedelta(days=days)).tz_localize(None)
+        df = df[df.index >= start]
+
+        # Yield curve spread
+        if 'dgs2' in df.columns and 'dgs10' in df.columns:
+            df['ust_2s10s_spread'] = (df['dgs10'] - df['dgs2']).round(4)
+
+        df = df.dropna(how='all').reset_index().rename(columns={'index': 'date'})
+        logger.info(f"Built {len(df)} macro daily snapshots "
+                    f"(oldest: {df['date'].min().date() if not df.empty else 'N/A'})")
+        return df
+
+    def save_to_db(self, df: pd.DataFrame) -> int:
+        if df.empty:
+            return 0
+
+        def _safe(r, col):
+            v = r.get(col)
+            return float(v) if pd.notna(v) else None
+
+        count = 0
+        for _, r in df.iterrows():
+            try:
+                ts = pd.Timestamp(r['date'])
+                if ts.tzinfo is None:
+                    ts = ts.tz_localize('UTC')
+                db.upsert_macro_data({
+                    'timestamp': ts.isoformat(),
+                    'source': 'macro_bulk_loader',
+                    'dgs2': _safe(r, 'dgs2'),
+                    'dgs10': _safe(r, 'dgs10'),
+                    'ust_2s10s_spread': _safe(r, 'ust_2s10s_spread'),
+                    'cpiaucsl': _safe(r, 'cpiaucsl'),
+                    'fedfunds': _safe(r, 'fedfunds'),
+                    'dxy': _safe(r, 'dxy'),
+                    'nasdaq': _safe(r, 'nasdaq'),
+                    'gold': _safe(r, 'gold'),
+                    'oil': _safe(r, 'oil'),
+                })
+                count += 1
+            except Exception as e:
+                logger.debug(f"Macro upsert error: {e}")
+
+        logger.info(f"Saved {count} macro snapshots to PostgreSQL")
+        return count
+
+
 # ─────────────── Main Entry Point ───────────────
 
 def run_cold_start(mode: str = "all", days: int = 210,
                    symbols: Optional[List[str]] = None,
-                   db_days: int = 3,
+                   db_days: int = 7,
                    ohlcv_days: Optional[int] = None,
                    funding_days: Optional[int] = None,
                    telegram_days: Optional[int] = None,
-                   upbit_days: Optional[int] = None):
+                   upbit_days: Optional[int] = None,
+                   fear_greed_days: Optional[int] = None,
+                   deribit_days: Optional[int] = None,
+                   macro_days: Optional[int] = None):
     """Run cold start data loading.
 
     Args:
-        mode: "all", "ohlcv", "funding", "telegram", "resample", "upbit"
-        days: How many days of history to fetch
-        symbols: List of symbols (default: ["BTCUSDT", "ETHUSDT"])
-        db_days: How many recent days to keep in PostgreSQL
-        ohlcv_days: Days override for OHLCV loader (default: days)
-        funding_days: Days override for funding loader (default: days)
-        telegram_days: Days override for Telegram loader (default: min(days, 90))
-        upbit_days: Days override for Upbit loader (default: days)
+        mode: "all", "ohlcv", "funding", "telegram", "resample", "upbit",
+              "fear_greed", "deribit_dvol", "macro"
+        days: Default days of history for all loaders
+        symbols: List of Binance Futures symbols (default: ["BTCUSDT", "ETHUSDT"])
+        db_days: Recent days to keep in PostgreSQL hot cache (rest → GCS)
+        ohlcv_days: Override for OHLCV loader
+        funding_days: Override for Funding loader
+        telegram_days: Override for Telegram loader (no default cap — fetch all)
+        upbit_days: Override for Upbit loader
+        fear_greed_days: Override for Fear & Greed loader
+        deribit_days: Override for Deribit DVOL loader
+        macro_days: Override for Macro loader
     """
     if symbols is None:
         symbols = ["BTCUSDT", "ETHUSDT"]
 
-    logger.info(f"=== COLD START: mode={mode}, days={days}, symbols={symbols} ===")
+    logger.info(f"=== COLD START: mode={mode}, days={days}, db_days={db_days}, symbols={symbols} ===")
     results = {}
 
     effective_ohlcv_days = ohlcv_days if ohlcv_days is not None else days
     effective_funding_days = funding_days if funding_days is not None else days
-    effective_telegram_days = telegram_days if telegram_days is not None else min(days, 90)
+    effective_telegram_days = telegram_days if telegram_days is not None else days  # no cap
     effective_upbit_days = upbit_days if upbit_days is not None else days
+    effective_fear_greed_days = fear_greed_days if fear_greed_days is not None else days
+    effective_deribit_days = deribit_days if deribit_days is not None else days
+    effective_macro_days = macro_days if macro_days is not None else days
 
     # ── OHLCV (Binance Futures) ──
     if mode in ("all", "ohlcv"):
@@ -542,7 +857,6 @@ def run_cold_start(mode: str = "all", days: int = 210,
             end = datetime.now(timezone.utc)
             start = end - timedelta(days=effective_ohlcv_days)
             df = loader.fetch_range(symbol, start, end)
-
             db_count = loader.save_to_db(df, db_days=db_days)
             gcs_result = loader.save_to_gcs(df, symbol)
             results[f"ohlcv_{symbol}"] = {
@@ -569,7 +883,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
         loader = FundingBulkLoader()
         for symbol in symbols:
             df = loader.fetch_range(symbol, days=effective_funding_days)
-            db_count = loader.save_to_db(df, db_days=7)
+            db_count = loader.save_to_db(df, db_days=db_days)
             gcs_result = loader.save_to_gcs(df, symbol)
             results[f"funding_{symbol}"] = {
                 "total_records": len(df),
@@ -583,7 +897,31 @@ def run_cold_start(mode: str = "all", days: int = 210,
         count = loader.load(days=effective_telegram_days)
         results["telegram"] = {"messages": count}
 
-    # ── Resample (generate 1h/4h/1d/1w from 1m) ──
+    # ── Fear & Greed Index ──
+    if mode in ("all", "fear_greed"):
+        loader = FearGreedBulkLoader()
+        df = loader.fetch_range(days=effective_fear_greed_days)
+        count = loader.save_to_db(df)
+        results["fear_greed"] = {"total_records": len(df), "db_rows": count}
+
+    # ── Deribit DVOL History ──
+    if mode in ("all", "deribit_dvol"):
+        loader = DeribitDVOLBulkLoader()
+        deribit_currencies = [s[:-4] for s in symbols if s.endswith("USDT")
+                              and s[:-4] in ("BTC", "ETH")]
+        for currency in deribit_currencies:
+            df = loader.fetch_range(currency, days=effective_deribit_days)
+            count = loader.save_to_db(df)
+            results[f"deribit_dvol_{currency}"] = {"total_records": len(df), "db_rows": count}
+
+    # ── Macro (FRED + yfinance) ──
+    if mode in ("all", "macro"):
+        loader = MacroBulkLoader()
+        df = loader.build_snapshots(days=effective_macro_days)
+        count = loader.save_to_db(df)
+        results["macro"] = {"total_records": len(df), "db_rows": count}
+
+    # ── Resample (generate 1h/4h/1d/1w from 1m in GCS) ──
     if mode in ("all", "resample"):
         uploader = ResampleUploader()
         for symbol in symbols:
@@ -602,22 +940,29 @@ def run_cold_start(mode: str = "all", days: int = 210,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cold Start Data Loader")
     parser.add_argument("--mode", default="all",
-                        choices=["all", "ohlcv", "funding", "telegram", "resample", "upbit"],
-                        help="What to load")
-    parser.add_argument("--days", type=int, default=210,
-                        help="Days of history (default: 210 for 1d EMA200)")
+                        choices=["all", "ohlcv", "funding", "telegram", "resample",
+                                 "upbit", "fear_greed", "deribit_dvol", "macro"],
+                        help="What to load (default: all)")
+    parser.add_argument("--days", type=int, default=2190,
+                        help="Days of history for all loaders (default: 2190 = 6 years)")
     parser.add_argument("--symbol", type=str, default=None,
-                        help="Single symbol (default: BTCUSDT + ETHUSDT)")
-    parser.add_argument("--db-days", type=int, default=3,
-                        help="Days to keep in PostgreSQL hot cache")
+                        help="Single symbol e.g. BTCUSDT (default: BTCUSDT + ETHUSDT)")
+    parser.add_argument("--db-days", type=int, default=7,
+                        help="Days to keep in PostgreSQL hot cache (rest → GCS)")
     parser.add_argument("--ohlcv-days", type=int, default=None,
-                        help="Override days only for OHLCV loader")
+                        help="Override --days for OHLCV loader")
     parser.add_argument("--funding-days", type=int, default=None,
-                        help="Override days only for funding loader")
+                        help="Override --days for Funding loader")
     parser.add_argument("--telegram-days", type=int, default=None,
-                        help="Override days only for Telegram loader")
+                        help="Override --days for Telegram loader")
     parser.add_argument("--upbit-days", type=int, default=None,
-                        help="Override days only for Upbit loader")
+                        help="Override --days for Upbit loader")
+    parser.add_argument("--fear-greed-days", type=int, default=None,
+                        help="Override --days for Fear & Greed loader")
+    parser.add_argument("--deribit-days", type=int, default=None,
+                        help="Override --days for Deribit DVOL loader")
+    parser.add_argument("--macro-days", type=int, default=None,
+                        help="Override --days for Macro (FRED + yfinance) loader")
 
     args = parser.parse_args()
 
@@ -631,4 +976,7 @@ if __name__ == "__main__":
         funding_days=args.funding_days,
         telegram_days=args.telegram_days,
         upbit_days=args.upbit_days,
+        fear_greed_days=args.fear_greed_days,
+        deribit_days=args.deribit_days,
+        macro_days=args.macro_days,
     )
