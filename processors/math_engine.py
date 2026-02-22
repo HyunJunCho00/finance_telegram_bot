@@ -503,6 +503,290 @@ class MathEngine:
 
         return result
 
+    # ─────────────── Market Structure (MSB / CHoCH) ───────────────
+
+    def detect_market_structure(self, df: pd.DataFrame) -> Dict:
+        """Detect HH/HL/LH/LL sequence and Market Structure Breaks.
+
+        MSB  (Market Structure Break): price breaks through last significant
+             swing level — confirms trend change.
+        CHoCH (Change of Character): first counter-trend swing — early warning.
+        """
+        if len(df) < 20:
+            return {'structure': 'insufficient_data'}
+        try:
+            high  = df['high'].astype(float).values
+            low   = df['low'].astype(float).values
+            close = df['close'].astype(float).values
+
+            order = max(3, len(df) // 15)
+            min_idx = argrelextrema(low,  np.less,    order=order)[0]
+            max_idx = argrelextrema(high, np.greater, order=order)[0]
+
+            if len(min_idx) < 2 or len(max_idx) < 2:
+                return {'structure': 'insufficient_pivots'}
+
+            recent_highs = [float(high[i]) for i in max_idx[-4:]]
+            recent_lows  = [float(low[i])  for i in min_idx[-4:]]
+
+            hh = sum(1 for i in range(1, len(recent_highs)) if recent_highs[i] > recent_highs[i-1])
+            lh = sum(1 for i in range(1, len(recent_highs)) if recent_highs[i] < recent_highs[i-1])
+            hl = sum(1 for i in range(1, len(recent_lows))  if recent_lows[i]  > recent_lows[i-1])
+            ll = sum(1 for i in range(1, len(recent_lows))  if recent_lows[i]  < recent_lows[i-1])
+
+            if hh >= lh and hl >= ll:
+                structure = 'uptrend'
+            elif lh > hh and ll > hl:
+                structure = 'downtrend'
+            else:
+                structure = 'ranging'
+
+            current_price        = float(close[-1])
+            last_swing_high      = round(float(high[max_idx[-1]]), 2)
+            last_swing_low       = round(float(low[min_idx[-1]]),  2)
+            prev_swing_high      = round(float(high[max_idx[-2]]), 2)
+            prev_swing_low       = round(float(low[min_idx[-2]]),  2)
+
+            # CHoCH: first counter-trend swing
+            choch = None
+            if structure == 'uptrend' and recent_lows[-1] < recent_lows[-2]:
+                choch = {
+                    'type': 'bearish_choch',
+                    'price': round(recent_lows[-1], 2),
+                    'note': 'First LL in uptrend — early reversal warning',
+                }
+            elif structure == 'downtrend' and recent_highs[-1] > recent_highs[-2]:
+                choch = {
+                    'type': 'bullish_choch',
+                    'price': round(recent_highs[-1], 2),
+                    'note': 'First HH in downtrend — early reversal warning',
+                }
+
+            # MSB: price already through last key level
+            msb = None
+            if structure == 'uptrend' and current_price < last_swing_low:
+                msb = {
+                    'type': 'bearish_msb',
+                    'broken_level': last_swing_low,
+                    'note': 'Price broke below last swing low — structure break',
+                }
+            elif structure == 'downtrend' and current_price > last_swing_high:
+                msb = {
+                    'type': 'bullish_msb',
+                    'broken_level': last_swing_high,
+                    'note': 'Price broke above last swing high — structure break',
+                }
+
+            return {
+                'structure':       structure,
+                'hh': hh, 'lh': lh, 'hl': hl, 'll': ll,
+                'last_swing_high': last_swing_high,
+                'last_swing_low':  last_swing_low,
+                'prev_swing_high': prev_swing_high,
+                'prev_swing_low':  prev_swing_low,
+                'choch':           choch,
+                'msb':             msb,
+                'current_price':   round(current_price, 2),
+            }
+        except Exception as e:
+            logger.error(f"Market structure detection error: {e}")
+            return {}
+
+    # ─────────────── Trendline Quality Score ───────────────
+
+    def score_trendline_quality(self, df: pd.DataFrame,
+                                 line_info: Optional[Dict],
+                                 line_type: str = 'support') -> Optional[Dict]:
+        """Score a diagonal trendline on 4 dimensions (0-100).
+
+        Dimensions:
+          Angle      (30pts) — 15-45° normalised slope is sustainable
+          Touches    (40pts) — more confirmed bounces = stronger line
+          Recency    (20pts) — how recently was it last tested?
+          Distance   (10pts) — how close is current price to the line?
+        """
+        if not line_info or len(df) < 10:
+            return None
+        try:
+            price_key   = 'support_price' if line_type == 'support' else 'resistance_price'
+            current_val = line_info.get(price_key)
+            slope       = line_info.get('slope', 0)
+            if current_val is None:
+                return None
+
+            avg_price = float(df['close'].mean())
+            if avg_price == 0:
+                return None
+
+            # ── 1. Angle score ──────────────────────────────────────
+            norm_slope = abs(float(slope)) / avg_price * 100   # % per candle
+            if 0.005 <= norm_slope <= 0.35:
+                angle_score, angle_tag = 30, 'optimal'
+            elif norm_slope < 0.005:
+                angle_score, angle_tag = 12, 'too_flat'
+            else:
+                angle_score, angle_tag = 6,  'too_steep'
+
+            # ── 2. Touch count score ────────────────────────────────
+            n          = len(df)
+            x          = np.arange(n)
+            intercept  = float(current_val) - float(slope) * (n - 1)
+            line_vals  = float(slope) * x + intercept
+            close_vals = df['close'].astype(float).values
+            tolerance  = avg_price * 0.006   # 0.6 % band around the line
+
+            touches = int(np.sum(np.abs(close_vals - line_vals) <= tolerance))
+
+            if touches >= 5:
+                touch_score, touch_tag = 40, 'very_strong'
+            elif touches == 4:
+                touch_score, touch_tag = 32, 'strong'
+            elif touches == 3:
+                touch_score, touch_tag = 22, 'moderate'
+            elif touches == 2:
+                touch_score, touch_tag = 12, 'weak'
+            else:
+                touch_score, touch_tag = 4,  'very_weak'
+
+            # ── 3. Recency score (pivot_count as proxy for age) ─────
+            pivot_count = line_info.get('pivot_count', 0)
+            if pivot_count >= 4:
+                recency_score = 20
+            elif pivot_count == 3:
+                recency_score = 14
+            else:
+                recency_score = 7
+
+            # ── 4. Distance score ───────────────────────────────────
+            dist_pct = abs(line_info.get('distance_pct', 100))
+            if dist_pct <= 0.5:
+                dist_score, dist_tag = 10, 'testing_now'
+            elif dist_pct <= 2.0:
+                dist_score, dist_tag = 7,  'nearby'
+            elif dist_pct <= 5.0:
+                dist_score, dist_tag = 3,  'approaching'
+            else:
+                dist_score, dist_tag = 0,  'distant'
+
+            total = angle_score + touch_score + recency_score + dist_score
+            total = min(100, total)
+            grade = 'A' if total >= 80 else ('B' if total >= 60 else ('C' if total >= 40 else 'D'))
+
+            return {
+                'score':       total,
+                'grade':       grade,
+                'touch_count': touches,
+                'angle_tag':   angle_tag,
+                'touch_tag':   touch_tag,
+                'dist_tag':    dist_tag,
+            }
+        except Exception as e:
+            logger.error(f"Trendline quality score error: {e}")
+            return None
+
+    # ─────────────── Multi-TF Confluence Detection ───────────────
+
+    def detect_confluence_zones(self, multi_tf_analysis: Dict,
+                                  tolerance_pct: float = 0.8) -> List[Dict]:
+        """Find price zones where ≥2 TF levels converge.
+
+        Scans fibonacci, diagonal support/resistance, and swing levels
+        across all provided timeframe analyses and clusters nearby prices.
+
+        Returns top-5 zones sorted by strength (descending).
+        """
+        levels: List[Dict] = []
+
+        weight_map = {'1w': 4, '1d': 3, '4h': 2, '1h': 1, '15m': 1}
+
+        for tf, analysis in multi_tf_analysis.items():
+            if not isinstance(analysis, dict):
+                continue
+            w = weight_map.get(tf, 1)
+
+            # Fibonacci levels
+            fib_data = analysis.get('fibonacci', {})
+            for fib_tf, fib in fib_data.items():
+                if not isinstance(fib, dict):
+                    continue
+                fib_w = weight_map.get(fib_tf, 1)
+                for key, price in fib.items():
+                    if key.startswith('fib_') and isinstance(price, (int, float)):
+                        levels.append({'price': float(price), 'source': key,
+                                       'tf': fib_tf, 'weight': fib_w})
+
+            # Diagonal support / resistance
+            struct = analysis.get('structure', {})
+            for key, val in struct.items():
+                if not isinstance(val, dict):
+                    continue
+                if 'support' in key:
+                    p = val.get('support_price')
+                    if p:
+                        levels.append({'price': float(p), 'source': 'diag_support',
+                                       'tf': key.replace('support_', ''), 'weight': w + 1})
+                elif 'resistance' in key:
+                    p = val.get('resistance_price')
+                    if p:
+                        levels.append({'price': float(p), 'source': 'diag_resistance',
+                                       'tf': key.replace('resistance_', ''), 'weight': w + 1})
+
+            # Swing levels
+            swing_data = analysis.get('swing_levels', {})
+            for stf, swing in swing_data.items():
+                if not isinstance(swing, dict):
+                    continue
+                sw = weight_map.get(stf, 1)
+                for h in swing.get('swing_highs', []):
+                    levels.append({'price': float(h), 'source': 'swing_high',
+                                   'tf': stf, 'weight': sw})
+                for l in swing.get('swing_lows', []):
+                    levels.append({'price': float(l), 'source': 'swing_low',
+                                   'tf': stf, 'weight': sw})
+
+        if not levels:
+            return []
+
+        prices    = [l['price'] for l in levels]
+        avg_price = float(np.mean(prices))
+        tolerance = avg_price * (tolerance_pct / 100.0)
+
+        clusters: List[Dict] = []
+        used: set = set()
+
+        for i, lvl in enumerate(levels):
+            if i in used:
+                continue
+            group = [lvl]
+            used.add(i)
+            for j, other in enumerate(levels):
+                if j in used:
+                    continue
+                if abs(lvl['price'] - other['price']) <= tolerance:
+                    group.append(other)
+                    used.add(j)
+
+            if len(group) < 2:
+                continue
+
+            cluster_price = float(np.mean([g['price'] for g in group]))
+            total_weight  = sum(g['weight'] for g in group)
+            tfs           = sorted(set(g['tf'] for g in group))
+            sources       = sorted(set(g['source'] for g in group))
+
+            clusters.append({
+                'price':       round(cluster_price, 2),
+                'price_low':   round(min(g['price'] for g in group), 2),
+                'price_high':  round(max(g['price'] for g in group), 2),
+                'strength':    total_weight,
+                'level_count': len(group),
+                'timeframes':  tfs,
+                'sources':     sources,
+            })
+
+        clusters.sort(key=lambda x: x['strength'], reverse=True)
+        return clusters[:5]
+
     # ─────────────── Main Entry Points ───────────────
 
     def analyze_market_day_trading(self, df_1m: pd.DataFrame,
@@ -581,10 +865,13 @@ class MathEngine:
             'current_volume': round(float(df_1m.iloc[-1]['volume']), 2),
             'timeframes': {},
             'structure': {},
+            'market_structure': {},
+            'trendline_quality': {},
             'fibonacci': {},
             'volume_profile': {},
             'fvg': {},
             'swing_levels': {},
+            'confluence_zones': [],
         }
 
         timeframes = {
@@ -609,9 +896,17 @@ class MathEngine:
         for tf_name in ['1h', '4h']:
             tf_df = timeframes.get(tf_name, pd.DataFrame())
             if len(tf_df) >= 20:
-                result['structure'][f'support_{tf_name}'] = self.calculate_diagonal_support(tf_df)
+                result['structure'][f'support_{tf_name}']    = self.calculate_diagonal_support(tf_df)
                 result['structure'][f'resistance_{tf_name}'] = self.calculate_diagonal_resistance(tf_df)
                 result['structure'][f'divergence_{tf_name}'] = self.detect_divergences(tf_df)
+                result['market_structure'][tf_name]          = self.detect_market_structure(tf_df)
+
+                sup = result['structure'].get(f'support_{tf_name}')
+                res = result['structure'].get(f'resistance_{tf_name}')
+                if sup:
+                    result['trendline_quality'][f'support_{tf_name}']    = self.score_trendline_quality(tf_df, sup, 'support')
+                if res:
+                    result['trendline_quality'][f'resistance_{tf_name}'] = self.score_trendline_quality(tf_df, res, 'resistance')
 
         # Fibonacci on 4h and 1d
         tf_4h = timeframes.get('4h', pd.DataFrame())
@@ -634,6 +929,9 @@ class MathEngine:
         if len(tf_4h) >= 20:
             result['swing_levels']['4h'] = self.calculate_swing_levels(tf_4h)
 
+        # Multi-TF confluence zones
+        result['confluence_zones'] = self.detect_confluence_zones(result)
+
         # Recent 4h candles
         if len(tf_4h) >= 3:
             result['recent_4h_candles'] = self._recent_candle_data(tf_4h, count=5)
@@ -652,10 +950,13 @@ class MathEngine:
             'current_volume': round(float(df_1m.iloc[-1]['volume']), 2),
             'timeframes': {},
             'structure': {},
+            'market_structure': {},
+            'trendline_quality': {},
             'fibonacci': {},
             'volume_profile': {},
             'fvg': {},
             'swing_levels': {},
+            'confluence_zones': [],
         }
 
         timeframes = {
@@ -683,15 +984,26 @@ class MathEngine:
         # Structure on 1d
         tf_1d = timeframes.get('1d', pd.DataFrame())
         if len(tf_1d) >= 20:
-            result['structure']['support_1d'] = self.calculate_diagonal_support(tf_1d)
+            result['structure']['support_1d']    = self.calculate_diagonal_support(tf_1d)
             result['structure']['resistance_1d'] = self.calculate_diagonal_resistance(tf_1d)
             result['structure']['divergence_1d'] = self.detect_divergences(tf_1d)
+            result['market_structure']['1d']     = self.detect_market_structure(tf_1d)
+
+            # Trendline quality scores
+            sup  = result['structure'].get('support_1d')
+            res  = result['structure'].get('resistance_1d')
+            if sup:
+                result['trendline_quality']['support_1d']    = self.score_trendline_quality(tf_1d, sup, 'support')
+            if res:
+                result['trendline_quality']['resistance_1d'] = self.score_trendline_quality(tf_1d, res, 'resistance')
+
+        tf_1w = timeframes.get('1w', pd.DataFrame())
+        if len(tf_1w) >= 10:
+            result['market_structure']['1w'] = self.detect_market_structure(tf_1w)
 
         # Fibonacci on 1d and 1w
         if len(tf_1d) >= 10:
             result['fibonacci']['1d'] = self.calculate_fibonacci_levels(tf_1d)
-
-        tf_1w = timeframes.get('1w', pd.DataFrame())
         if len(tf_1w) >= 10:
             result['fibonacci']['1w'] = self.calculate_fibonacci_levels(tf_1w)
 
@@ -706,6 +1018,9 @@ class MathEngine:
         # Swing levels on 1d
         if len(tf_1d) >= 20:
             result['swing_levels']['1d'] = self.calculate_swing_levels(tf_1d)
+
+        # Multi-TF confluence zones
+        result['confluence_zones'] = self.detect_confluence_zones(result)
 
         # Recent 1d candles
         if len(tf_1d) >= 3:
@@ -787,6 +1102,42 @@ class MathEngine:
                     lines.append(f"  {tf}: highs={levels.get('swing_highs',[])} lows={levels.get('swing_lows',[])}")
                     if levels.get('nearest_resistance'):
                         lines.append(f"  nearest_R={levels['nearest_resistance']} nearest_S={levels.get('nearest_support')}")
+
+        ms = analysis.get('market_structure', {})
+        if ms:
+            lines.append("[MARKET_STRUCTURE]")
+            for tf, s in ms.items():
+                if not isinstance(s, dict):
+                    continue
+                struct   = s.get('structure', '?')
+                hh, lh   = s.get('hh', 0), s.get('lh', 0)
+                hl, ll   = s.get('hl', 0), s.get('ll', 0)
+                choch    = s.get('choch')
+                msb      = s.get('msb')
+                row = (f"  {tf}: {struct} HH={hh} LH={lh} HL={hl} LL={ll}"
+                       f" SwH={s.get('last_swing_high')} SwL={s.get('last_swing_low')}")
+                lines.append(row)
+                if choch:
+                    lines.append(f"    CHoCH={choch['type']} @ {choch['price']} — {choch['note']}")
+                if msb:
+                    lines.append(f"    MSB={msb['type']} broken={msb['broken_level']} — {msb['note']}")
+
+        tq = analysis.get('trendline_quality', {})
+        if tq:
+            lines.append("[TRENDLINE_QUALITY]")
+            for key, q in tq.items():
+                if q:
+                    lines.append(f"  {key}: score={q['score']} grade={q['grade']}"
+                                 f" touches={q['touch_count']} angle={q['angle_tag']}"
+                                 f" dist={q['dist_tag']}")
+
+        cz = analysis.get('confluence_zones', [])
+        if cz:
+            lines.append("[CONFLUENCE_ZONES]")
+            for z in cz:
+                lines.append(f"  price={z['price']} ({z['price_low']}~{z['price_high']})"
+                             f" strength={z['strength']} levels={z['level_count']}"
+                             f" tfs={z['timeframes']} src={z['sources']}")
 
         candles = (analysis.get('recent_4h_candles')
                    or analysis.get('recent_15m_candles')

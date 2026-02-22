@@ -134,7 +134,13 @@ class ChartGenerator:
             # ── Overlay 1: Pivot Points (turning points) ──
             self._draw_pivot_points(price_ax, chart_df)
 
-            # ── Overlay 2: Diagonal Trendlines (support/resistance) ──
+            # ── Overlay 2: Market Structure Labels (HH/HL/LH/LL) ──
+            self._draw_market_structure_labels(price_ax, chart_df)
+
+            # ── Overlay 3: EMA200 line ──
+            self._draw_ema200(price_ax, chart_df)
+
+            # ── Overlay 4: Diagonal Trendlines (support/resistance) ──
             structure = analysis.get('structure', {}) or {}
             for tf in config['structure_tfs']:
                 self._draw_diagonal_line(price_ax, chart_df,
@@ -144,7 +150,7 @@ class ChartGenerator:
                                          structure.get(f'resistance_{tf}'),
                                          'resistance_price', '#C62828')
 
-            # ── Overlay 3: Fibonacci Levels ──
+            # ── Overlay 5: Fibonacci Levels ──
             fib = (analysis.get('fibonacci', {}) or {}).get(config['fib_tf'])
             if not fib:
                 # Fallback to any available fib
@@ -155,11 +161,14 @@ class ChartGenerator:
                         break
             self._draw_fibonacci(price_ax, chart_df, fib)
 
-            # ── Overlay 4: Swing High/Low (Liquidity Levels) ──
+            # ── Overlay 6: Swing High/Low (Liquidity Levels) ──
             swing = (analysis.get('swing_levels', {}) or {}).get(config['swing_tf'])
             self._draw_swing_levels(price_ax, chart_df, swing)
 
-            # ── Overlay 5: Liquidation Markers ──
+            # ── Overlay 7: Volume Profile Histogram (right side) ──
+            self._draw_volume_profile_histogram(price_ax, chart_df)
+
+            # ── Overlay 8: Liquidation Markers ──
             if liquidation_df is not None and not liquidation_df.empty:
                 self._draw_liquidation_markers(price_ax, chart_df, liquidation_df)
 
@@ -175,6 +184,125 @@ class ChartGenerator:
             return None
 
     # ─────────────── Overlay Drawing Methods ───────────────
+
+    def _draw_ema200(self, ax, chart_df: pd.DataFrame):
+        """Draw EMA200 line. Falls back to EMA of available length if < 200 candles."""
+        try:
+            import pandas_ta as ta
+            close = chart_df['close'].astype(float)
+            length = min(200, len(close) - 1)
+            if length < 10:
+                return
+            ema = ta.ema(close, length=length)
+            if ema is None or ema.isna().all():
+                return
+            label = f'EMA{length}'
+            ax.plot(chart_df.index, ema.values,
+                    color='#FF9800', linewidth=1.5,
+                    linestyle='-', alpha=0.85, zorder=4)
+            last_val = ema.dropna().iloc[-1] if not ema.dropna().empty else None
+            if last_val:
+                ax.text(chart_df.index[-1], float(last_val),
+                        f' {label}', color='#FF9800',
+                        fontsize=7, va='center', ha='left')
+        except Exception as e:
+            logger.debug(f"EMA200 draw error: {e}")
+
+    def _draw_market_structure_labels(self, ax, chart_df: pd.DataFrame):
+        """Label pivot highs/lows as HH, LH, HL, LL for market structure context."""
+        try:
+            high = chart_df['high'].astype(float).values
+            low = chart_df['low'].astype(float).values
+            if len(high) < 15:
+                return
+
+            order = max(3, len(high) // 20)
+            min_idx = argrelextrema(low, np.less, order=order)[0]
+            max_idx = argrelextrema(high, np.greater, order=order)[0]
+
+            # Label swing highs: HH or LH
+            for i, idx in enumerate(max_idx):
+                if i == 0:
+                    label = 'H'
+                else:
+                    prev = high[max_idx[i - 1]]
+                    label = 'HH' if high[idx] > prev else 'LH'
+                ax.annotate(label,
+                            xy=(chart_df.index[idx], high[idx]),
+                            xytext=(0, 7), textcoords='offset points',
+                            fontsize=6, color='#C62828', ha='center',
+                            va='bottom', fontweight='bold',
+                            annotation_clip=True)
+
+            # Label swing lows: HL or LL
+            for i, idx in enumerate(min_idx):
+                if i == 0:
+                    label = 'L'
+                else:
+                    prev = low[min_idx[i - 1]]
+                    label = 'HL' if low[idx] > prev else 'LL'
+                ax.annotate(label,
+                            xy=(chart_df.index[idx], low[idx]),
+                            xytext=(0, -7), textcoords='offset points',
+                            fontsize=6, color='#1565C0', ha='center',
+                            va='top', fontweight='bold',
+                            annotation_clip=True)
+        except Exception as e:
+            logger.debug(f"Market structure labels error: {e}")
+
+    def _draw_volume_profile_histogram(self, ax, chart_df: pd.DataFrame, bins: int = 24):
+        """Draw horizontal volume profile histogram on right side of price panel."""
+        try:
+            prices = chart_df['close'].astype(float).values
+            volumes = chart_df['volume'].astype(float).values
+            if len(prices) < 10:
+                return
+
+            price_min = float(prices.min())
+            price_max = float(prices.max())
+            if price_max <= price_min:
+                return
+
+            price_bins = np.linspace(price_min, price_max, bins + 1)
+            vol_at_price = []
+            for i in range(bins):
+                mask = (prices >= price_bins[i]) & (prices < price_bins[i + 1])
+                vol_at_price.append(float(volumes[mask].sum()))
+
+            max_vol = max(vol_at_price) if max(vol_at_price) > 0 else 1
+            vol_norm = [v / max_vol for v in vol_at_price]
+            poc_idx = int(np.argmax(vol_at_price))
+            threshold = float(np.percentile(vol_at_price, 70))
+
+            # Inset axes on right side: [x0, y0, width, height] in axes fraction
+            ax_vp = ax.inset_axes([0.86, 0.0, 0.14, 1.0])
+            ax_vp.set_xlim(0, 1)
+            ax_vp.set_ylim(price_min, price_max)
+            ax_vp.set_facecolor('none')
+            for spine in ax_vp.spines.values():
+                spine.set_visible(False)
+            ax_vp.tick_params(left=False, bottom=False,
+                              labelleft=False, labelbottom=False)
+
+            bar_h = (price_bins[1] - price_bins[0]) * 0.85
+            for i in range(bins):
+                center = (price_bins[i] + price_bins[i + 1]) / 2.0
+                if i == poc_idx:
+                    color, alpha = '#FF5722', 0.85   # POC: red-orange
+                elif vol_at_price[i] >= threshold:
+                    color, alpha = '#FFA726', 0.65   # HVN: orange
+                else:
+                    color, alpha = '#90A4AE', 0.30   # Normal: grey
+                ax_vp.barh(center, vol_norm[i], height=bar_h,
+                           color=color, alpha=alpha)
+
+            # POC label
+            poc_center = (price_bins[poc_idx] + price_bins[poc_idx + 1]) / 2.0
+            ax_vp.text(min(vol_norm[poc_idx] + 0.05, 0.95), poc_center,
+                       'POC', fontsize=6, color='#FF5722',
+                       va='center', ha='left', fontweight='bold')
+        except Exception as e:
+            logger.debug(f"Volume profile histogram error: {e}")
 
     def _draw_pivot_points(self, ax, chart_df: pd.DataFrame):
         """Draw turning point markers on pivot highs/lows."""

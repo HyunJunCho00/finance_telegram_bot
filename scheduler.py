@@ -6,6 +6,8 @@ from collectors.volatility_monitor import volatility_monitor
 from collectors.dune_collector import dune_collector
 from collectors.microstructure_collector import microstructure_collector
 from collectors.macro_collector import macro_collector
+from collectors.deribit_collector import deribit_collector
+from collectors.fear_greed_collector import fear_greed_collector
 from executors.orchestrator import orchestrator
 from evalutors.feedback_generator import feedback_generator
 from processors.light_rag import light_rag
@@ -35,6 +37,22 @@ def job_15min_dune():
         dune_collector.run_due_queries(limit=200, offset=0)
     except Exception as e:
         logger.error(f"15-minute Dune job error: {e}")
+
+
+def job_1hour_deribit():
+    """Collect Deribit options data: DVOL, PCR, IV Term Structure, 25d Skew."""
+    try:
+        deribit_collector.run()
+    except Exception as e:
+        logger.error(f"Deribit collection job error: {e}")
+
+
+def job_daily_fear_greed():
+    """Collect Crypto Fear & Greed Index (alternative.me, daily)."""
+    try:
+        fear_greed_collector.run()
+    except Exception as e:
+        logger.error(f"Fear & Greed collection job error: {e}")
 
 
 def job_analysis():
@@ -110,7 +128,7 @@ def main():
     logger.info(f"  Candle limit: {settings.candle_limit}")
     logger.info(f"  Data lookback: {settings.data_lookback_hours}h")
     logger.info(f"  Chart for VLM: {settings.should_use_chart}")
-    logger.info(f"  Symbols: BTCUSDT, ETHUSDT")
+    logger.info(f"  Symbols: {', '.join(settings.trading_symbols)}")
     logger.info(f"  AI: Gemini Flash (agents) + Claude Opus 4.6 (judge)")
     logger.info(f"  Data: Global OI + CVD + Whale CVD + Liquidations + Perplexity + LightRAG")
     logger.info(f"  Dune: {'enabled' if dune_collector else 'disabled'}")
@@ -143,6 +161,23 @@ def main():
         'interval',
         minutes=15,
         id='job_15min_dune',
+        max_instances=1
+    )
+
+    # Deribit options data: DVOL, PCR, IV Term Structure, 25d Skew — every 1 hour
+    scheduler.add_job(
+        job_1hour_deribit,
+        'interval',
+        hours=1,
+        id='job_1hour_deribit',
+        max_instances=1
+    )
+
+    # Fear & Greed Index — daily at 00:15 UTC (after data refreshes)
+    scheduler.add_job(
+        job_daily_fear_greed,
+        CronTrigger(hour=0, minute=15),
+        id='job_daily_fear_greed',
         max_instances=1
     )
 

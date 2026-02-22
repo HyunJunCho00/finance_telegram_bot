@@ -41,8 +41,8 @@ WHALE_THRESHOLD_USD = 100_000
 # Flush interval in seconds
 FLUSH_INTERVAL = 60
 
-# Symbols to track
-SYMBOLS = ["btcusdt", "ethusdt"]
+# Symbols to track — derived from central TRADING_SYMBOLS config
+SYMBOLS = [s.lower() for s in settings.trading_symbols]
 
 
 # ─────────────── Buffer Classes ───────────────

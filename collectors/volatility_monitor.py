@@ -9,8 +9,7 @@ from datetime import datetime, timezone
 class VolatilityMonitor:
     def __init__(self):
         self.threshold = settings.VOLATILITY_THRESHOLD
-        # BTC and ETH only
-        self.symbols = ['BTCUSDT', 'ETHUSDT']
+        self.symbols = settings.trading_symbols
 
     def calculate_price_change(self, symbol: str) -> Optional[float]:
         try:

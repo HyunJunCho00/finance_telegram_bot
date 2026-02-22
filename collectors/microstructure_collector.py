@@ -28,7 +28,7 @@ class MicrostructureCollector:
             "enableRateLimit": True,
             "options": {"defaultType": "future"},
         })
-        self.symbols = ["BTC/USDT", "ETH/USDT"]
+        self.symbols = settings.trading_symbols_slash
         self.depth_levels = 5
         self.slippage_notional_usd = 100_000.0
 

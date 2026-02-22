@@ -40,10 +40,9 @@ class PriceCollector:
             'enableRateLimit': True
         })
 
-        # BTC and ETH only
         self.symbols = {
-            'binance': ['BTC/USDT', 'ETH/USDT'],
-            'upbit': ['BTC/KRW', 'ETH/KRW']
+            'binance': settings.trading_symbols_slash,
+            'upbit': settings.trading_symbols_krw,
         }
 
     def fetch_binance_ohlcv_with_cvd(

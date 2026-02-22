@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
 from google.cloud import secretmanager
 from functools import lru_cache
+from typing import List
 from enum import Enum
 import os
 import json
@@ -51,6 +52,16 @@ class Settings(BaseSettings):
     MILVUS_URI: str = ""  # e.g. https://in03-xxxxxx.api.gcp-us-west1.zillizcloud.com
     MILVUS_TOKEN: str = ""
 
+
+    # ===== Trading Symbols (single source of truth) =====
+    # Comma-separated, Binance Futures format (no slashes).
+    # Adding a symbol here automatically propagates to ALL collectors.
+    # Upbit KRW pairs and Deribit currencies are auto-derived.
+    TRADING_SYMBOLS: str = "BTCUSDT,ETHUSDT"
+
+    # Deribit public options data (DVOL, PCR, IV Term Structure, 25d Skew)
+    # No API key required — free public REST API
+    DERIBIT_ENABLED: bool = True
 
     # Dune API (on-chain/DEX macro signals)
     DUNE_API_KEY: str = ""
@@ -197,6 +208,32 @@ class Settings(BaseSettings):
         elif mode == TradingMode.POSITION:
             return ["4h", "1d", "1w"]
         return ["1h", "4h", "1d"]
+
+    @property
+    def trading_symbols(self) -> List[str]:
+        """['BTCUSDT', 'ETHUSDT', ...] — canonical format used throughout."""
+        return [s.strip().upper() for s in self.TRADING_SYMBOLS.split(',') if s.strip()]
+
+    @property
+    def trading_symbols_slash(self) -> List[str]:
+        """['BTC/USDT', 'ETH/USDT', ...] — ccxt / Binance API format."""
+        return [f"{s[:-4]}/USDT" for s in self.trading_symbols if s.endswith('USDT')]
+
+    @property
+    def trading_symbols_base(self) -> List[str]:
+        """['BTC', 'ETH', ...] — base currency only."""
+        return [s[:-4] for s in self.trading_symbols if s.endswith('USDT')]
+
+    @property
+    def trading_symbols_krw(self) -> List[str]:
+        """['BTC/KRW', 'ETH/KRW', ...] — Upbit format."""
+        return [f"{s[:-4]}/KRW" for s in self.trading_symbols if s.endswith('USDT')]
+
+    @property
+    def deribit_currencies(self) -> List[str]:
+        """Deribit options exist only for BTC and ETH (exchange constraint)."""
+        _available = {'BTC', 'ETH'}
+        return [b for b in self.trading_symbols_base if b in _available]
 
     @property
     def data_lookback_hours(self) -> int:

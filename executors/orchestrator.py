@@ -70,6 +70,8 @@ class AnalysisState(TypedDict):
     feedback_text: str
     microstructure_context: str
     macro_context: str
+    deribit_context: str
+    fear_greed_context: str
 
     # Agent opinions
     bull_opinion: str
@@ -339,6 +341,65 @@ def node_macro_context(state: AnalysisState) -> dict:
         logger.error(f"Macro context error: {e}")
         return {"macro_context": "Macro: Error"}
 
+def node_deribit_context(state: AnalysisState) -> dict:
+    """Fetch latest Deribit options data: DVOL, PCR, IV Term Structure, 25d Skew.
+    Returns empty string for symbols without Deribit options (non-BTC/ETH)."""
+    symbol = state["symbol"]
+    currency = symbol[:-4] if symbol.endswith('USDT') else symbol  # BTCUSDT → BTC
+    try:
+        data = db.get_latest_deribit_data(currency)
+        if not data:
+            return {"deribit_context": f"Deribit({currency}): No data"}
+
+        parts = [f"[DERIBIT {currency}]"]
+
+        if data.get('dvol') is not None:
+            parts.append(f"DVOL={data['dvol']}")
+
+        if data.get('pcr_oi') is not None:
+            parts.append(f"PCR_OI={data['pcr_oi']} PCR_VOL={data.get('pcr_vol', 'N/A')}")
+
+        iv_parts = []
+        for b in ['1w', '2w', '1m', '3m', '6m']:
+            iv = data.get(f'iv_{b}')
+            if iv is not None:
+                iv_parts.append(f"{b}={iv}")
+        if iv_parts:
+            inverted_flag = " [INVERTED=panic]" if data.get('term_inverted') else ""
+            parts.append(f"IV_Term: {' '.join(iv_parts)}{inverted_flag}")
+
+        skew_parts = []
+        for b in ['1w', '2w', '1m', '3m']:
+            sk = data.get(f'skew_{b}')
+            if sk is not None:
+                skew_parts.append(f"{b}={sk:+.2f}")
+        if skew_parts:
+            parts.append(f"25dSkew(put-call): {' '.join(skew_parts)}")
+
+        return {"deribit_context": " | ".join(parts)}
+    except Exception as e:
+        logger.error(f"Deribit context error: {e}")
+        return {"deribit_context": f"Deribit({currency}): Error"}
+
+
+def node_fear_greed_context(state: AnalysisState) -> dict:
+    """Fetch latest Crypto Fear & Greed Index (market-wide daily sentiment)."""
+    try:
+        data = db.get_latest_fear_greed()
+        if not data:
+            return {"fear_greed_context": "Fear&Greed: No data"}
+
+        value = data.get('value', 'N/A')
+        classification = data.get('classification', 'Unknown')
+        change = data.get('change')
+        change_str = f" Δ{change:+d}" if change is not None else ""
+
+        return {"fear_greed_context": f"[FEAR&GREED] {value}/100 — {classification}{change_str}"}
+    except Exception as e:
+        logger.error(f"Fear & Greed context error: {e}")
+        return {"fear_greed_context": "Fear&Greed: Error"}
+
+
 def node_bull_agent(state: AnalysisState) -> dict:
     """Run bullish analyst (Gemini Flash, text-only)."""
     mode = TradingMode(state["mode"])
@@ -484,13 +545,15 @@ def node_generate_report(state: AnalysisState) -> dict:
 # ── Helper ──
 
 def _build_full_context(state: AnalysisState) -> str:
-    """Build full context string for agents (narrative + cvd + liquidation + rag + news + feedback)."""
+    """Build full context string for agents."""
     parts = [
         state.get("narrative_text", ""),
         state.get("cvd_context", ""),
         state.get("liquidation_context", ""),
         state.get("microstructure_context", ""),
         state.get("macro_context", ""),
+        state.get("deribit_context", ""),      # DVOL / PCR / IV term / 25d skew
+        state.get("fear_greed_context", ""),   # F&G daily sentiment
         state.get("rag_context", ""),
         f"Telegram News:\n{state.get('telegram_news', '')}",
         state.get("feedback_text", ""),
@@ -525,6 +588,8 @@ def build_analysis_graph():
     graph.add_node("self_correction", node_self_correction)
     graph.add_node("microstructure_context", node_microstructure_context)
     graph.add_node("macro_context", node_macro_context)
+    graph.add_node("deribit_context", node_deribit_context)
+    graph.add_node("fear_greed_context", node_fear_greed_context)
     graph.add_node("bull_agent", node_bull_agent)
     graph.add_node("bear_agent", node_bear_agent)
     graph.add_node("risk_agent", node_risk_agent)
@@ -546,9 +611,11 @@ def build_analysis_graph():
     graph.add_edge("telegram_news", "self_correction")
     graph.add_edge("self_correction", "microstructure_context")
     graph.add_edge("microstructure_context", "macro_context")
+    graph.add_edge("macro_context", "deribit_context")
+    graph.add_edge("deribit_context", "fear_greed_context")
 
     # Agent chain
-    graph.add_edge("macro_context", "bull_agent")
+    graph.add_edge("fear_greed_context", "bull_agent")
     graph.add_edge("bull_agent", "bear_agent")
     graph.add_edge("bear_agent", "risk_agent")
 
@@ -574,7 +641,7 @@ def build_analysis_graph():
 
 class Orchestrator:
     def __init__(self):
-        self.symbols = ['BTCUSDT', 'ETHUSDT']
+        self.symbols = settings.trading_symbols
         self._graph = None
 
     @property

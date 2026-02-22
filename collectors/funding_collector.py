@@ -40,14 +40,15 @@ class FundingCollector:
             'options': {'defaultType': 'swap'}
         })
 
-        # BTC and ETH only
-        self.symbols = ['BTC/USDT', 'ETH/USDT']
+        self.symbols = settings.trading_symbols_slash
 
-        # Symbol mappings per exchange
+        # Symbol mappings per exchange — auto-generated from settings
+        # Binance futures: BTC/USDT stays as-is
+        # Bybit/OKX perpetual swaps: BTC/USDT → BTC/USDT:USDT
         self._symbol_map = {
-            'binance': {'BTC/USDT': 'BTC/USDT', 'ETH/USDT': 'ETH/USDT'},
-            'bybit': {'BTC/USDT': 'BTC/USDT:USDT', 'ETH/USDT': 'ETH/USDT:USDT'},
-            'okx': {'BTC/USDT': 'BTC/USDT:USDT', 'ETH/USDT': 'ETH/USDT:USDT'},
+            'binance': {s: s for s in self.symbols},
+            'bybit':   {s: f"{s.split('/')[0]}/USDT:USDT" for s in self.symbols},
+            'okx':     {s: f"{s.split('/')[0]}/USDT:USDT" for s in self.symbols},
         }
 
     def fetch_funding_rate(self, symbol: str) -> Dict:

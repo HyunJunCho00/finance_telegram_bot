@@ -202,3 +202,57 @@ CREATE TABLE IF NOT EXISTS macro_data (
 );
 
 CREATE INDEX idx_macro_data_timestamp ON macro_data(timestamp DESC);
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Deribit Options Data  (DVOL, PCR, IV Term Structure, 25-delta Skew)
+-- Collected hourly via public Deribit REST API (no auth required)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS deribit_data (
+    id           BIGSERIAL PRIMARY KEY,
+    symbol       VARCHAR(10)     NOT NULL,          -- BTC | ETH
+    timestamp    TIMESTAMPTZ     NOT NULL,
+    dvol         DECIMAL(10, 4),                    -- 30-day IV index (DVOL)
+    spot_price   DECIMAL(20, 4),
+    -- Put/Call Ratio
+    pcr_oi       DECIMAL(10, 6),                    -- by Open Interest
+    pcr_vol      DECIMAL(10, 6),                    -- by Volume
+    put_oi       DECIMAL(20, 4),
+    call_oi      DECIMAL(20, 4),
+    put_vol      DECIMAL(20, 8),
+    call_vol     DECIMAL(20, 8),
+    -- IV Term Structure (average ATM IV per expiry bucket)
+    iv_1w        DECIMAL(10, 4),
+    iv_2w        DECIMAL(10, 4),
+    iv_1m        DECIMAL(10, 4),
+    iv_3m        DECIMAL(10, 4),
+    iv_6m        DECIMAL(10, 4),
+    term_inverted BOOLEAN        DEFAULT FALSE,     -- front IV > back IV = panic
+    -- 25-delta Skew (put_IV - call_IV; positive = fear, negative = greed)
+    skew_1w      DECIMAL(10, 4),
+    skew_2w      DECIMAL(10, 4),
+    skew_1m      DECIMAL(10, 4),
+    skew_3m      DECIMAL(10, 4),
+    created_at   TIMESTAMPTZ     DEFAULT NOW(),
+    UNIQUE(symbol, timestamp)
+);
+
+CREATE INDEX idx_deribit_data_symbol_timestamp ON deribit_data(symbol, timestamp DESC);
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- Crypto Fear & Greed Index  (alternative.me, daily, no API key)
+-- ─────────────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS fear_greed_data (
+    id                  BIGSERIAL PRIMARY KEY,
+    timestamp           TIMESTAMPTZ  NOT NULL,      -- daily midnight UTC
+    value               INTEGER      NOT NULL,       -- 0-100
+    classification      VARCHAR(30)  NOT NULL,       -- Extreme Fear … Extreme Greed
+    value_prev          INTEGER,                     -- yesterday's value
+    classification_prev VARCHAR(30),
+    change              INTEGER,                     -- today - yesterday
+    created_at          TIMESTAMPTZ  DEFAULT NOW(),
+    UNIQUE(timestamp)
+);
+
+CREATE INDEX idx_fear_greed_timestamp ON fear_greed_data(timestamp DESC);

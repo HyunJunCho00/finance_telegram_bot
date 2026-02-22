@@ -233,6 +233,39 @@ class DatabaseClient:
 
         return response.data[0] if response.data else None
 
+    # ─────────────── Deribit Options Data ───────────────
+
+    def upsert_deribit_data(self, data: Dict) -> Dict:
+        """Upsert Deribit options snapshot (DVOL, PCR, IV Term Structure, Skew)."""
+        return self.client.table("deribit_data").upsert(
+            data, on_conflict="symbol,timestamp"
+        ).execute()
+
+    def get_latest_deribit_data(self, symbol: str) -> Optional[Dict]:
+        response = self.client.table("deribit_data")\
+            .select("*")\
+            .eq("symbol", symbol)\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
+    # ─────────────── Fear & Greed Data ───────────────
+
+    def upsert_fear_greed(self, data: Dict) -> Dict:
+        """Upsert daily Crypto Fear & Greed Index snapshot."""
+        return self.client.table("fear_greed_data").upsert(
+            data, on_conflict="timestamp"
+        ).execute()
+
+    def get_latest_fear_greed(self) -> Optional[Dict]:
+        response = self.client.table("fear_greed_data")\
+            .select("*")\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
     # ─────────────── AI Reports ───────────────
 
     def insert_ai_report(self, data: Dict) -> Dict:
@@ -395,6 +428,29 @@ class DatabaseClient:
                 results['liquidations_deleted'] = len(r.data) if r.data else 0
             except Exception:
                 results['liquidations_deleted'] = 0  # Table may not exist yet
+
+            # Deribit options data (same retention as market data)
+            try:
+                r = self.client.table("deribit_data")\
+                    .delete()\
+                    .lt("timestamp", cutoff)\
+                    .execute()
+                results['deribit_deleted'] = len(r.data) if r.data else 0
+            except Exception:
+                results['deribit_deleted'] = 0
+
+            # Fear & Greed data (keep 90 days — same as reports)
+            cutoff_fg = (datetime.now(timezone.utc) - timedelta(
+                days=settings.RETENTION_REPORTS_DAYS
+            )).isoformat()
+            try:
+                r = self.client.table("fear_greed_data")\
+                    .delete()\
+                    .lt("timestamp", cutoff_fg)\
+                    .execute()
+                results['fear_greed_deleted'] = len(r.data) if r.data else 0
+            except Exception:
+                results['fear_greed_deleted'] = 0
 
             logger.info(f"Data cleanup completed: {results}")
             return results

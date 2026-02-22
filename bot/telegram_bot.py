@@ -54,7 +54,7 @@ class TradingBot:
             mode = settings.trading_mode.value.upper()
             lines = [f"Mode: {mode}\n"]
 
-            for symbol in ['BTCUSDT', 'ETHUSDT']:
+            for symbol in settings.trading_symbols:
                 report = db.get_latest_report(symbol=symbol)
                 if report:
                     fd = report.get('final_decision')
@@ -82,8 +82,9 @@ class TradingBot:
 
     async def cmd_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         args = context.args
-        if not args or args[0].upper() not in ['BTC', 'ETH']:
-            await update.message.reply_text("Usage: /analyze BTC or /analyze ETH")
+        valid_bases = settings.trading_symbols_base
+        if not args or args[0].upper() not in valid_bases:
+            await update.message.reply_text(f"Usage: /analyze {'|'.join(valid_bases)}")
             return
 
         symbol = args[0].upper() + 'USDT'
@@ -134,7 +135,7 @@ class TradingBot:
 
     async def cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
-            for symbol in ['BTCUSDT', 'ETHUSDT']:
+            for symbol in settings.trading_symbols:
                 report = db.get_latest_report(symbol=symbol)
                 if report:
                     fd = report.get('final_decision')
