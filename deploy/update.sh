@@ -8,6 +8,9 @@ echo "=== Bot Update ==="
 
 cd "$INSTALL_DIR"
 
+# 소유자 불일치로 인한 git 권한 에러 방지
+git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
+
 echo "[1/3] Git pull..."
 git pull origin main
 

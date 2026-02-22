@@ -9,6 +9,10 @@ echo "Supabase schema.sql 먼저 실행했는지 확인하세요!"
 echo ""
 
 cd "$INSTALL_DIR"
+
+# 소유자 불일치로 인한 git 권한 에러 방지
+git config --global --add safe.directory "$INSTALL_DIR" 2>/dev/null || true
+
 source venv/bin/activate
 
 echo "[1/6] Fear & Greed Index..."
