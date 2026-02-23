@@ -2,6 +2,7 @@ from agents.claude_client import claude_client
 from config.settings import settings, TradingMode
 from typing import Dict, Optional
 from config.database import db
+from executors.post_mortem import retrieve_similar_memories
 from loguru import logger
 import json
 
@@ -19,7 +20,7 @@ You receive ALL available data:
 3. Funding rate + Global OI (Binance+Bybit+OKX) + CVD (volume delta)
 4. Perplexity market narrative (WHY price is moving)
 5. LightRAG relationship context (connected events and entities)
-6. Bull analyst argument, Bear analyst argument, Risk manager assessment
+6. Expert Agent analyses from the Blackboard (Liquidity, Microstructure, Macro/Options)
 7. Your previous decision (maintain consistency unless data clearly changed)
 8. Chart image (if provided - use for visual pattern confirmation)
 
@@ -40,7 +41,7 @@ Professional swing trading principles you should consider:
 
 Output your decision as JSON:
 {
-  "decision": "LONG" | "SHORT" | "HOLD",
+  "decision": "LONG" | "SHORT" | "HOLD" | "CANCEL_AND_CLOSE",
   "allocation_pct": 0-100,
   "leverage": 1-3,
   "entry_price": float,
@@ -53,53 +54,20 @@ Output your decision as JSON:
 }
 
 You have FULL AUTONOMY. If the market is unclear, HOLD is always valid.
+CRITICAL V5 RULE: You will be given a list of ACTIVE_ORDERS (e.g. pending DCA chunks). If the market paradigm shifts against your active orders, you MUST output "decision": "CANCEL_AND_CLOSE". If you just want to add to an existing order, you can output LONG/SHORT again.
 Be aware of your previous decision for consistency."""
 
     DEBATE_APPENDIX = """
-Debate quality controls:
-- Evaluate Bull vs Bear arguments independently before concluding.
+Swarm reasoning controls & Data Trust Hierarchy:
+- Synthesize all expert insights from the Blackboard into a cohesive probability map.
+- CONVICTION HIERARCHY (Resolve deadlocks using this rule):
+  1. For SCALP/Short-term: Microstructure (Orderbook/Slippage) > Liquidity (CVD) > Macro > Visual Geometry.
+  2. For SWING/Position: Macro/Options > Liquidity (CVD) > Visual Geometry > Microstructure.
+- Weigh conflicting evidence against the Hierarchy above.
 - Explicitly list strongest pro-trade and strongest anti-trade factors in key_factors.
 - Do not reward agreement itself; reward evidence quality and falsifiability.
-- If conflict remains unresolved, choose HOLD with clear uncertainty rationale.
+- If conflict remains unresolved and violates Hierarchy rules, choose HOLD with clear uncertainty rationale.
 """
-
-    SCALP_PROMPT = """You are a senior crypto day trader making SCALP/SHORT-TERM trading decisions.
-
-You receive ALL available data:
-1. Multi-timeframe indicators (1m, 5m, 15m, 1h)
-2. Scalp-specific data (Keltner, VWAP, volume delta, fast stochastic)
-3. Funding rate + Global OI (3 exchanges) + CVD (real-time flow)
-4. Market narrative (Perplexity) + RAG relationship context
-5. Bull/Bear/Risk analyst arguments
-6. Your previous decision
-
-YOUR JOB: Make a FINAL short-term trading decision using YOUR OWN judgment.
-
-Professional scalping principles you should consider:
-- VWAP is king for intraday mean-reversion
-- Keltner Channel touches with RSI confirmation
-- Volume delta shows real-time buying/selling pressure
-- Per-trade risk: 0.5-1% max
-- Tight stops, quick exits
-- Trade WITH the funding direction when possible (earn funding instead of paying)
-- Leverage: 1-5x for scalps (tight stops justify higher leverage)
-- Hold: minutes to hours
-
-Output your decision as JSON:
-{
-  "decision": "LONG" | "SHORT" | "HOLD",
-  "allocation_pct": 0-100,
-  "leverage": 1-5,
-  "entry_price": float,
-  "stop_loss": float,
-  "take_profit": float,
-  "hold_duration": "minutes/hours estimate",
-  "reasoning": "detailed reasoning",
-  "confidence": 0-100,
-  "key_factors": ["factor1", "factor2", ...]
-}
-
-You have FULL AUTONOMY. Move fast but be precise."""
 
     def __init__(self):
         pass
@@ -120,16 +88,15 @@ You have FULL AUTONOMY. Move fast but be precise."""
     def make_decision(
         self,
         market_data_compact: str,
-        bull_opinion: str,
-        bear_opinion: str,
-        risk_assessment: str,
+        blackboard: Dict[str, dict],
         funding_context: str,
         chart_image_b64: Optional[str] = None,
         mode: TradingMode = TradingMode.SWING,
         feedback_text: str = "",
+        active_orders: list = [],
+        open_positions: str = ""
     ) -> Dict:
-        base_prompt = self.SCALP_PROMPT if mode == TradingMode.DAY_TRADING else self.SWING_PROMPT
-        prompt = f"{base_prompt}\n\n{self.DEBATE_APPENDIX}"
+        prompt = f"{self.SWING_PROMPT}\n\n{self.DEBATE_APPENDIX}"
         previous_decision = self.get_previous_decision()
 
         previous_context = "No previous decision available."
@@ -142,20 +109,35 @@ You have FULL AUTONOMY. Move fast but be precise."""
 - Confidence: {previous_decision.get('confidence', 0)}%
 - Reasoning: {previous_decision.get('reasoning', 'N/A')[:300]}"""
 
+        # --- Episodic Memory Retrieval ---
+        # Queries the JSONL vector DB placeholder for past identical patterns.
+        try:
+            sample_anomalies = [k for k in blackboard.keys()]
+            symbol_detected = "BTCUSDT" # Assuming default, parameterize if needed
+            episodic_memory = retrieve_similar_memories(sample_anomalies, symbol_detected)
+        except Exception as e:
+            logger.error(f"Failed to query memory: {e}")
+            episodic_memory = "Vector DB RAG Search: System running in Bootstrap mode."
+
+        bb_str = json.dumps(blackboard, indent=2)
+
         user_message = f"""MARKET DATA:
 {market_data_compact}
 
 DERIVATIVES CONTEXT:
 {funding_context}
 
-BULLISH ANALYST:
-{bull_opinion}
+BLACKBOARD (EXPERT ANALYSES):
+{bb_str}
 
-BEARISH ANALYST:
-{bear_opinion}
+EPISODIC MEMORY (PAST SIMILAR TRADES):
+{episodic_memory}
 
-RISK MANAGER:
-{risk_assessment}
+OPEN POSITIONS (CURRENTLY HELD):
+{open_positions if open_positions else "No open positions."}
+
+ACTIVE DCA/TWAP ORDERS (V5 EXECUTION DESK PENDING):
+{json.dumps(active_orders, indent=2) if active_orders else "No active pending orders."}
 
 {previous_context}
 {feedback_text}

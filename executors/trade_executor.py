@@ -3,6 +3,7 @@ from typing import Dict
 from datetime import datetime, timezone
 from config.settings import settings
 from config.database import db
+from config.local_state import state_manager
 from loguru import logger
 
 
@@ -29,6 +30,88 @@ class TradeExecutor:
             'secret': settings.COINBASE_API_SECRET,
             'enableRateLimit': True
         })
+    def execute_from_decision(self, final_decision: dict, mode: str, symbol: str) -> dict:
+        """Calculate order sizes and execute based on PM/CRO decision and trading mode."""
+        try:
+            direction = final_decision.get("decision", "HOLD")
+            
+            # V5: Handle Emergency Cancel Hook
+            if direction == "CANCEL_AND_CLOSE":
+                active = state_manager.get_active_orders()
+                cancelled_count = 0
+                for o in active:
+                    if o['symbol'] == symbol:
+                        state_manager.update_status(o['intent_id'], 'CANCELLED')
+                        cancelled_count += 1
+                return {
+                    "success": True, 
+                    "receipts": [{"note": f"CANCEL_AND_CLOSE executed. {cancelled_count} pending intents cancelled."}],
+                    "strategy_applied": "CASINO_EXIT",
+                    "total_notional": 0
+                }
+                
+            if direction not in ["LONG", "SHORT"]:
+                return {"success": False, "note": "No valid trade direction"}
+                
+            allocation_pct = final_decision.get("allocation_pct", 0)
+            leverage = final_decision.get("leverage", 1)
+            target_exchange = final_decision.get("target_exchange", "BINANCE").lower()
+            exec_style = final_decision.get("recommended_execution_style", "MOMENTUM_SNIPER")
+            
+            if allocation_pct <= 0:
+                return {"success": False, "note": "Allocation is 0% (Vetoed or No Confidence)"}
+                
+            price = self._get_reference_price(symbol, exchange=target_exchange)
+            if price <= 0: return {"success": False, "error": "Could not fetch price"}
+            
+            # V8 Multi-Exchange Wallet Balances
+            if target_exchange == 'split':
+                alloc_pct = allocation_pct / 100.0
+                binance_notional = (settings.BINANCE_PAPER_BALANCE_USD * alloc_pct * leverage) * 0.5
+                upbit_notional = (settings.UPBIT_PAPER_BALANCE_KRW * alloc_pct * leverage) * 0.5
+                
+                intent_b = state_manager.add_intent(symbol=symbol, direction=direction, style=exec_style, amount=binance_notional, exchange="binance")
+                intent_u = state_manager.add_intent(symbol=symbol, direction=direction, style=exec_style, amount=upbit_notional, exchange="upbit")
+                
+                receipts = [
+                    {"order_id": intent_b, "exchange": "BINANCE", "side": direction, "notional": binance_notional, "paper": settings.PAPER_TRADING_MODE, "note": f"SPLIT Intent: {exec_style}"},
+                    {"order_id": intent_u, "exchange": "UPBIT", "side": direction, "notional": upbit_notional, "paper": settings.PAPER_TRADING_MODE, "note": f"SPLIT Intent: {exec_style}"}
+                ]
+                total_not_usd = binance_notional # Reporting only USD side for summary
+            else:
+                wallet_balance = settings.BINANCE_PAPER_BALANCE_USD if target_exchange == "binance" else settings.UPBIT_PAPER_BALANCE_KRW 
+                target_notional = wallet_balance * (allocation_pct / 100.0) * leverage
+                
+                # V5: Register Intent with Local State Manager instead of immediate naive execution
+                intent_id = state_manager.add_intent(
+                    symbol=symbol,
+                    direction=direction,
+                    style=exec_style,
+                    amount=target_notional,
+                    exchange=target_exchange
+                )
+                
+                # For logging in Telegram
+                receipts = [{
+                    "order_id": intent_id,
+                    "exchange": target_exchange.upper(),
+                    "side": direction,
+                    "notional": target_notional,
+                    "paper": settings.PAPER_TRADING_MODE,
+                    "note": f"Registered Intent: {exec_style}"
+                }]
+                total_not_usd = target_notional
+            
+            return {
+                "success": True,
+                "receipts": receipts,
+                "strategy_applied": exec_style,
+                "total_notional": total_not_usd
+            }
+                
+        except Exception as e:
+            logger.error(f"Execution formatting error: {e}")
+            return {"success": False, "error": str(e)}
 
     def execute(
         self,
@@ -36,7 +119,8 @@ class TradeExecutor:
         side: str,
         amount: float,
         leverage: int = 1,
-        exchange: str = 'binance'
+        exchange: str = 'binance',
+        style: str = "SMART_DCA"
     ) -> Dict:
         try:
             side = side.upper()
@@ -44,13 +128,13 @@ class TradeExecutor:
 
             # Default-safe path: no real order API call
             if settings.PAPER_TRADING_MODE:
-                result = self._simulate_order(symbol, side, amount, leverage, exchange)
+                result = self._simulate_order(symbol, side, amount, leverage, exchange, style)
             else:
                 if exchange == 'binance':
                     result = self._execute_binance(symbol, side, amount, leverage)
                 elif exchange == 'upbit':
                     if settings.UPBIT_PAPER_ONLY:
-                        result = self._simulate_order(symbol, side, amount, leverage, exchange)
+                        result = self._simulate_order(symbol, side, amount, leverage, exchange, style)
                     else:
                         result = self._execute_upbit(symbol, side, amount)
                 elif exchange == 'coinbase':
@@ -86,22 +170,40 @@ class TradeExecutor:
             logger.warning(f"Reference price fetch failed ({exchange}, {symbol}): {e}")
             return 0.0
 
-    def _simulate_order(self, symbol: str, side: str, amount: float, leverage: int, exchange: str) -> Dict:
+    def _simulate_order(self, symbol: str, side: str, amount: float, leverage: int, exchange: str, style: str) -> Dict:
         price = self._get_reference_price(symbol, exchange)
-        notional = round(price * amount, 4) if price > 0 else 0
+        if not price:
+            return {"success": False, "error": "Could not get reference price"}
+
+        # V7: Paper Exchange Engine provides realistic slippage and wallet deduction
+        from executors.paper_exchange import paper_engine
+        
+        sim_res = paper_engine.simulate_execution(
+            exchange=exchange,
+            symbol=symbol,
+            direction=side,
+            amount_usd=amount,
+            leverage=leverage,
+            style=style,
+            raw_price=price
+        )
+        
+        if not sim_res.get('success'):
+            return sim_res
+
         return {
             "success": True,
             "paper": True,
             "exchange": exchange,
             "symbol": symbol,
             "side": side,
-            "amount": amount,
+            "amount": sim_res['size_coin'],
             "leverage": leverage,
-            "order_id": f"paper-{exchange}-{int(datetime.now(timezone.utc).timestamp())}",
-            "filled_price": price,
-            "notional": notional,
+            "order_id": sim_res['order_id'],
+            "filled_price": sim_res['filled_price'],
+            "notional": amount,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "note": "PAPER_TRADING_MODE enabled - no live order sent",
+            "note": f"V7 PAPER ENGINE - Slippage: {sim_res['slippage_applied_pct']:.3f}% applied",
         }
 
     def _execute_binance(self, symbol: str, side: str, amount: float, leverage: int) -> Dict:

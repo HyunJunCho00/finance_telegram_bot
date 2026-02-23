@@ -1,4 +1,5 @@
 from typing import Dict, Optional
+import os
 from datetime import datetime, timezone
 from config.database import db
 from config.settings import settings, TradingMode
@@ -8,7 +9,8 @@ import asyncio
 import threading
 from loguru import logger
 import json
-
+import requests
+from utils.retry import api_retry
 
 class ReportGenerator:
     def __init__(self):
@@ -38,8 +40,9 @@ class ReportGenerator:
         }
 
         try:
-            db.insert_ai_report(report)
-            logger.info(f"Report generated for {symbol} ({mode.value})")
+            report_id = db.insert_ai_report(report)
+            logger.info(f"Report generated for {symbol} ({mode.value}) with ID: {report_id}")
+            report['report_id'] = report_id
             return report
         except Exception as e:
             logger.error(f"Report generation error: {e}")
@@ -89,6 +92,37 @@ class ReportGenerator:
 
         hold_duration = decision.get('hold_duration', 'N/A')
 
+        # CRO Risk Note
+        veto_flag = "🚨 <b>CRO VETO APPLIED!</b>\n" if decision.get('cro_veto_applied') else ""
+        cro_note = f"\n{veto_flag}<b>CRO Risk Note:</b>\n{decision.get('risk_manager_note', 'No overlay applied.')}\n" if 'risk_manager_note' in decision else ""
+
+        # Execution Receipt
+        receipt_text = ""
+        receipt = decision.get("execution_receipt")
+        if receipt and receipt.get("success"):
+            strat = receipt.get('strategy_applied', 'UNKNOWN')
+            notional = receipt.get('total_notional', 0)
+            
+            # Formulate receipts block
+            orders = "\n".join([
+                f"    - [{r.get('exchange', '?')}] {r.get('side')} ${r.get('notional', 0):.0f} | ID: {r.get('order_id', '?')[:8]} | {r.get('note', '')}" 
+                for r in receipt.get('receipts', [])
+            ])
+            
+            # Formulate Active Pending Orders block from the State
+            active_list = report.get('active_orders', [])
+            active_str = ""
+            if active_list:
+                active_str = "\n<b>⏳ ACTIVE INTENTS (V5):</b>\n" + "\n".join([
+                    f"    - {o.get('execution_style')} | {o.get('side', o.get('direction', ''))} | Rem: ${o.get('remaining_amount', 0):.0f}"
+                    for o in active_list
+                ]) + "\n"
+                
+            mode_prefix = "[PAPER]" if settings.PAPER_TRADING_MODE else "[LIVE]"
+            receipt_text = f"<b>{mode_prefix} EXECUTION DESK ({strat})</b>\n  Total Notional: ${notional:.0f}\n{orders}\n{active_str}"
+        elif recipe := decision.get("execution_receipt"):
+            receipt_text = f"<b>🚨 EXECUTION FAILED:</b> {recipe.get('error', recipe.get('note', 'Unknown'))}\n"
+
         message = f"""{icon} <b>{mode_label} REPORT</b> {mode_icon}
 
 <b>Symbol:</b> {report['symbol']}
@@ -104,17 +138,19 @@ class ReportGenerator:
 <b>Stop Loss:</b> {decision.get('stop_loss', 'N/A')}
 <b>Take Profit:</b> {decision.get('take_profit', 'N/A')}
 
-<b>Key Factors:</b>
+{receipt_text}
+<b>Key Factors (PM):</b>
 {factors_text}
-
+{cro_note}
 <b>{tf_labels[0]}:</b> RSI={tf_primary.get('rsi', '?')} MACD={tf_primary.get('macd_histogram', '?')} ADX={tf_primary.get('adx', '?')}
 <b>{tf_labels[1]}:</b> RSI={tf_secondary.get('rsi', '?')} MACD={tf_secondary.get('macd_histogram', '?')} ADX={tf_secondary.get('adx', '?')}{fib_text}
 
-<b>Reasoning:</b>
+<b>PM Reasoning:</b>
 {decision.get('reasoning', 'N/A')[:700]}"""
 
         return message
 
+    @api_retry(max_attempts=3, delay_seconds=10)
     async def send_telegram_notification(self, report: Dict, chart_bytes: Optional[bytes] = None,
                                           mode: TradingMode = TradingMode.SWING) -> None:
         try:

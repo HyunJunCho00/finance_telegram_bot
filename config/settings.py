@@ -8,12 +8,10 @@ import json
 
 
 class TradingMode(str, Enum):
-    """Three trading modes with distinct timeframes and analysis intervals.
-    DAY_TRADING: minutes~hours, 15m/1h analysis cycle
+    """Two trading modes with distinct timeframes and analysis intervals.
     SWING: days~2weeks, 4h analysis cycle
     POSITION: weeks~months, 1d analysis cycle
     """
-    DAY_TRADING = "day_trading"
     SWING = "swing"
     POSITION = "position"
 
@@ -84,6 +82,13 @@ class Settings(BaseSettings):
     PAPER_TRADING_PRICE_SOURCE: str = "ticker"  # ticker | last_report
     BINANCE_USE_TESTNET: bool = False
     UPBIT_PAPER_ONLY: bool = True
+    
+    # ===== V8: Retail Multi-Exchange Execution Limits =====
+    # Hardcoded by User Request for Retail Scale limits
+    BINANCE_PAPER_BALANCE_USD: float = 2000.0
+    UPBIT_PAPER_BALANCE_KRW: float = 2000000.0
+    MAX_LEVERAGE: int = 3
+    
     COINBASE_API_KEY: str = ""
     COINBASE_API_SECRET: str = ""
 
@@ -91,37 +96,36 @@ class Settings(BaseSettings):
     ANALYSIS_INTERVAL_HOURS: int = 4
 
     # ===== AI Models =====
-    # Agents (bull/bear/risk): Gemini 3 Flash/Pro via Vertex AI (us-central1)
+    # Agents (Liquidity, Microstructure, Macro, VLM): Gemini 3.1 Pro via Vertex AI (us-central1)
     # Judge: Claude Opus 4.6 via Vertex AI Model Garden
     #
     # Model status (2026-02-23):
-    #   gemini-3-flash        : GA, us-central1 ✅  (Fast, cost-efficient for high-throughput)
-    #   gemini-3.1-pro-preview: Preview, us-central1 ✅ (Advanced reasoning, large context)
+    #   gemini-3.1-pro-preview: Preview, us-central1 ✅ (Advanced reasoning, large context, Multimodal)
     #   claude-opus-4-6       : GA, Vertex AI ✅  (Financial SOTA, ultimate judge)
-    MODEL_ENDPOINT: str = "gemini-3-flash"
+    MODEL_ENDPOINT: str = "gemini-3.1-pro-preview"
 
 
-    # ===== Role-based model routing (2026 ops tuning) =====
-    MODEL_BULLISH: str = "gemini-3-flash"
-    MODEL_BEARISH: str = "gemini-3-flash"
-    MODEL_RISK: str = "gemini-3.1-pro-preview"
+    # ===== Role-based model routing (2026 SOTA tuning) =====
+    MODEL_LIQUIDITY: str = "gemini-3.1-pro-preview"
+    MODEL_MICROSTRUCTURE: str = "gemini-3.1-pro-preview"
+    MODEL_MACRO: str = "gemini-3.1-pro-preview"
+    MODEL_VLM_GEOMETRIC: str = "gemini-3.1-pro-preview"
     MODEL_JUDGE: str = "claude-opus-4-6"
-    MODEL_SELF_CORRECTION: str = "gemini-3-flash"
+    MODEL_SELF_CORRECTION: str = "gemini-3.1-pro-preview"
     MODEL_RAG_EXTRACTION: str = "gemini-3.1-pro-preview"
 
     # Soft input caps (character-based) to improve token efficiency
-    MAX_INPUT_CHARS_BULLISH: int = 12000
-    MAX_INPUT_CHARS_BEARISH: int = 12000
-    MAX_INPUT_CHARS_RISK: int = 14000
-    MAX_INPUT_CHARS_JUDGE: int = 18000
+    MAX_INPUT_CHARS_LIQUIDITY: int = 15000
+    MAX_INPUT_CHARS_MICROSTRUCTURE: int = 15000
+    MAX_INPUT_CHARS_MACRO: int = 15000
+    MAX_INPUT_CHARS_JUDGE: int = 25000
     MAX_INPUT_CHARS_SELF_CORRECTION: int = 10000
     MAX_INPUT_CHARS_RAG_EXTRACTION: int = 5000
 
     # ===== Trading Mode =====
-    # "day_trading" = intraday (minutes~hours), 15m~1h analysis cycle
     # "swing"       = multi-day (days~2weeks), 4h analysis cycle
     # "position"    = long-term (weeks~months), 1d analysis cycle
-    TRADING_MODE: str = "position"
+    TRADING_MODE: str = "swing"
 
     # ===== Chart Image / VLM Cost Control =====
     # Smart image strategy:
@@ -134,18 +138,14 @@ class Settings(BaseSettings):
     CHART_IMAGE_DPI: int = 100
 
     # ===== Candle Limits per Mode (1m candles needed from DB) =====
-    # DAY_TRADING: 1440 (1 day) → for 5m/15m/1h + needs 4h from GCS
     # SWING: 4320 (3 days) → for 1h/4h + needs 1d from GCS
     # POSITION: 10080 (7 days) → for 4h + needs 1d/1w from GCS
-    DAY_TRADING_CANDLE_LIMIT: int = 1440
     SWING_CANDLE_LIMIT: int = 4320
     POSITION_CANDLE_LIMIT: int = 10080
 
     # ===== Analysis Intervals per Mode =====
-    # DAY_TRADING: every 1 hour
     # SWING: every 4 hours
     # POSITION: every 24 hours (once daily at 09:00 KST)
-    DAY_TRADING_INTERVAL_HOURS: int = 1
     SWING_INTERVAL_HOURS: int = 4
     POSITION_INTERVAL_HOURS: int = 24
 
@@ -174,18 +174,14 @@ class Settings(BaseSettings):
     @property
     def candle_limit(self) -> int:
         mode = self.trading_mode
-        if mode == TradingMode.DAY_TRADING:
-            return self.DAY_TRADING_CANDLE_LIMIT
-        elif mode == TradingMode.POSITION:
+        if mode == TradingMode.POSITION:
             return self.POSITION_CANDLE_LIMIT
         return self.SWING_CANDLE_LIMIT
 
     @property
     def analysis_interval_hours(self) -> int:
         mode = self.trading_mode
-        if mode == TradingMode.DAY_TRADING:
-            return self.DAY_TRADING_INTERVAL_HOURS
-        elif mode == TradingMode.POSITION:
+        if mode == TradingMode.POSITION:
             return self.POSITION_INTERVAL_HOURS
         return self.SWING_INTERVAL_HOURS
 
@@ -198,9 +194,7 @@ class Settings(BaseSettings):
     def chart_timeframe(self) -> str:
         """Primary chart timeframe per mode."""
         mode = self.trading_mode
-        if mode == TradingMode.DAY_TRADING:
-            return "15m"
-        elif mode == TradingMode.POSITION:
+        if mode == TradingMode.POSITION:
             return "1d"
         return "4h"
 
@@ -208,9 +202,7 @@ class Settings(BaseSettings):
     def analysis_timeframes(self) -> list:
         """Timeframes to analyze per mode."""
         mode = self.trading_mode
-        if mode == TradingMode.DAY_TRADING:
-            return ["5m", "15m", "1h", "4h"]
-        elif mode == TradingMode.POSITION:
+        if mode == TradingMode.POSITION:
             return ["4h", "1d", "1w"]
         return ["1h", "4h", "1d"]
 
@@ -244,9 +236,7 @@ class Settings(BaseSettings):
     def data_lookback_hours(self) -> int:
         """How far back to look for supplementary data (funding, CVD, liquidations)."""
         mode = self.trading_mode
-        if mode == TradingMode.DAY_TRADING:
-            return 4
-        elif mode == TradingMode.POSITION:
+        if mode == TradingMode.POSITION:
             return 168  # 7 days
         return 24
 

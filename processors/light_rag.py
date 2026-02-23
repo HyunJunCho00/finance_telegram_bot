@@ -741,7 +741,22 @@ Rules:
         ).hexdigest()
 
         if doc_id in self._ingested_ids:
-            return {"status": "duplicate", "doc_id": doc_id}
+            return {"status": "duplicate_id", "doc_id": doc_id}
+
+        # Step 0: Semantic Deduplication using Vector Store
+        embedding = self._get_embedding(text[:512])
+        if embedding is not None:
+            # Search for highly similar past messages
+            similar_docs = []
+            if isinstance(self.vector_store, InMemoryFallback):
+                similar_docs = self.vector_store.search_vectors(embedding, top_k=1)
+            else:
+                similar_docs = self.vector_store.search(embedding, top_k=1)
+                
+            if similar_docs and similar_docs[0].get("score", 0) > 0.92:
+                logger.info(f"RAG Dedup: Skipping '{text[:50]}...' (Score: {similar_docs[0].get('score', 0):.2f})")
+                self._ingested_ids.add(doc_id)
+                return {"status": "duplicate_semantic", "doc_id": doc_id}
 
         # Step 1: LLM-based extraction (or regex fallback)
         ai = self._get_ai_client()
@@ -782,7 +797,6 @@ Rules:
             )
 
         # Step 4: Embed and store in vector store
-        embedding = self._get_embedding(text[:512])
         if embedding is not None:
             if isinstance(self.vector_store, InMemoryFallback):
                 self.vector_store.upsert_vector(

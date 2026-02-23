@@ -14,7 +14,11 @@ from processors.light_rag import light_rag
 from processors.gcs_archive import gcs_archive_exporter
 from config.settings import settings, TradingMode
 from config.database import db
+from executors.order_manager import execution_desk
+from executors.evaluator_daemon import EvaluatorDaemon
+from executors.paper_exchange import paper_engine
 from loguru import logger
+import ccxt
 import sys
 import threading
 
@@ -27,6 +31,25 @@ def job_1min_tick():
         volatility_monitor.run()
     except Exception as e:
         logger.error(f"1-minute tick job error: {e}")
+
+def job_1min_execution():
+    """V5: Process Orders, V7: Check Margin Calls"""
+    try:
+        execution_desk.process_intents()
+        
+        if settings.PAPER_TRADING_MODE:
+            prices = {}
+            ex = ccxt.binance()
+            for symbol in settings.trading_symbols:
+                try:
+                    t = ex.fetch_ticker(symbol)
+                    prices[symbol] = float(t['last'])
+                except Exception:
+                    pass
+            paper_engine.check_liquidations(prices)
+            
+    except Exception as e:
+        logger.error(f"1-minute execution job error: {e}")
 
 
 def job_15min_dune():
@@ -73,6 +96,15 @@ def job_24hour_evaluation():
         feedback_generator.run_feedback_cycle()
     except Exception as e:
         logger.error(f"24-hour evaluation job error: {e}")
+
+def job_1hour_evaluation():
+    """V6: Self-Healing RAG evaluation of completed trades."""
+    try:
+        logger.info("Running 1-hour episodic memory evaluation")
+        daemon = EvaluatorDaemon()
+        daemon.evaluate_recent_trades()
+    except Exception as e:
+        logger.error(f"1-hour evaluation job error: {e}")
 
 
 def job_daily_cleanup():
@@ -154,6 +186,15 @@ def main():
         id='job_1min_tick',
         max_instances=1
     )
+    
+    # 1-minute execution tick: ExecutionDesk and Paper Engine Liquidations
+    scheduler.add_job(
+        job_1min_execution,
+        'interval',
+        minutes=1,
+        id='job_1min_execution',
+        max_instances=1
+    )
 
     # 15-minute Dune
     scheduler.add_job(
@@ -194,6 +235,15 @@ def main():
         job_24hour_evaluation,
         CronTrigger(hour=0, minute=30),
         id='job_24hour_evaluation',
+        max_instances=1
+    )
+    
+    # 1-Hour RAG Episodic Memory Evaluation (V6)
+    scheduler.add_job(
+        job_1hour_evaluation,
+        'interval',
+        hours=1,
+        id='job_1hour_evaluation',
         max_instances=1
     )
 

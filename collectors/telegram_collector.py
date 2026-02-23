@@ -1,3 +1,4 @@
+import os
 from telethon import TelegramClient
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict
@@ -5,11 +6,15 @@ from config.settings import settings
 from config.database import db
 from loguru import logger
 
+# 세션 파일 경로: 프로젝트 루트 고정 (VM 어느 위치에서 실행해도 동일)
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SESSION_PATH = os.path.join(_PROJECT_ROOT, 'trading_session')
+
 
 class TelegramCollector:
     def __init__(self):
         self.client = TelegramClient(
-            'trading_session',
+            SESSION_PATH,
             int(settings.TELEGRAM_API_ID),
             settings.TELEGRAM_API_HASH
         )

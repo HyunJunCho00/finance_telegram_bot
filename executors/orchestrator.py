@@ -35,12 +35,21 @@ from processors.light_rag import light_rag
 from collectors.telegram_collector import telegram_collector
 from collectors.perplexity_collector import perplexity_collector
 from collectors.macro_collector import macro_collector
-from agents.bullish_agent import bullish_agent
-from agents.bearish_agent import bearish_agent
-from agents.risk_agent import risk_agent
+from agents.liquidity_agent import liquidity_agent
+from agents.microstructure_agent import microstructure_agent
+from agents.macro_options_agent import macro_options_agent
+from agents.vlm_geometric_agent import vlm_geometric_agent
 from agents.judge_agent import judge_agent
+from agents.risk_manager_agent import risk_manager_agent
+from config.local_state import state_manager
 from executors.report_generator import report_generator
+from executors.trade_executor import trade_executor
+from executors.post_mortem import write_post_mortem
+from utils.retry import api_retry
+from utils.cooldown import is_on_cooldown, set_cooldown
 from loguru import logger
+import numpy as np
+import pandas as pd
 import json
 
 try:
@@ -72,11 +81,15 @@ class AnalysisState(TypedDict):
     macro_context: str
     deribit_context: str
     fear_greed_context: str
+    active_orders: list
+    open_positions: str
 
-    # Agent opinions
-    bull_opinion: str
-    bear_opinion: str
-    risk_assessment: str
+    # Blackboard Pattern State
+    budget: int
+    turn_count: int
+    anomalies: list
+    blackboard: Dict[str, dict]
+    conviction_score: float
 
     # Chart
     chart_image_b64: Optional[str]
@@ -120,12 +133,31 @@ def node_collect_data(state: AnalysisState) -> dict:
     market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
     compact = math_engine.format_compact(market_data)
 
+    # V5: Fetch currently active orders for this symbol to inject into the PM context
+    all_active = state_manager.get_active_orders()
+    active_for_symbol = [o for o in all_active if o['symbol'] == symbol]
+    
+    # V7: Fetch open positions to prevent double-ordering
+    open_position_text = "No open positions."
+    if settings.PAPER_TRADING_MODE:
+        try:
+            from executors.paper_exchange import paper_engine
+            cursor = paper_engine._conn.cursor()
+            cursor.execute("SELECT * FROM paper_positions WHERE is_open = 1 AND symbol = ?", (symbol,))
+            pos = cursor.fetchall()
+            if pos:
+                open_position_text = "\n".join([f"[{p['exchange']}] {p['side']} {p['size']:.4f} coins @ ${p['entry_price']:.2f}" for p in pos])
+        except Exception as e:
+            logger.error(f"Failed to fetch paper positions: {e}")
+
     return {
         "df_size": len(df),
         "market_data_compact": compact,
+        "active_orders": active_for_symbol,
+        "open_positions": open_position_text,
+        "errors": state.get("errors", [])
     }
-
-
+@api_retry(max_attempts=3, delay_seconds=2)
 def node_perplexity_search(state: AnalysisState) -> dict:
     """Search Perplexity for market narrative."""
     symbol = state["symbol"]
@@ -152,6 +184,7 @@ def node_rag_ingest(state: AnalysisState) -> dict:
     return {}
 
 
+@api_retry(max_attempts=3, delay_seconds=1)
 def node_funding_context(state: AnalysisState) -> dict:
     """Fetch funding rate and Global OI data."""
     symbol = state["symbol"]
@@ -400,45 +433,136 @@ def node_fear_greed_context(state: AnalysisState) -> dict:
         return {"fear_greed_context": "Fear&Greed: Error"}
 
 
-def node_bull_agent(state: AnalysisState) -> dict:
-    """Run bullish analyst (Gemini Flash, text-only)."""
-    mode = TradingMode(state["mode"])
-    full_context = _build_full_context(state)
+def node_triage(state: AnalysisState) -> dict:
+    """Evaluate Python/Pandas rules for Anomaly Detection before waking LLMs."""
+    anomalies = []
+    symbol = state["symbol"]
+    
+    # 1. Volume-Backed Breakout (Mathematical)
+    try:
+        df = db.get_latest_market_data(symbol, limit=4320) # 3 days of 1m
+        if not df.empty:
+            df_1h = df.resample('1h', on='timestamp').agg({
+                'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
+            }).dropna()
+            
+            if len(df_1h) >= 30:
+                df_1h['tr'] = np.maximum(
+                    df_1h['high'] - df_1h['low'],
+                    np.maximum(
+                        abs(df_1h['high'] - df_1h['close'].shift(1)),
+                        abs(df_1h['low'] - df_1h['close'].shift(1))
+                    )
+                )
+                df_1h['atr'] = df_1h['tr'].rolling(14).mean()
+                df_1h['vol_ma'] = df_1h['volume'].rolling(24).mean() # 24h avg vol
+                
+                recent_atr = df_1h['atr'].iloc[-3:].mean()
+                hist_atr = df_1h['atr'].iloc[:-3].mean()
+                recent_vol = df_1h['volume'].iloc[-1]
+                hist_vol = df_1h['vol_ma'].iloc[-2]
+                
+                # Fetch recent OI to detect if volume is from new positions or just liquidations
+                try:
+                    oi_res = db.client.table("funding_data").select("oi_binance", "timestamp").eq("symbol", symbol).order("timestamp", desc=True).limit(2).execute()
+                    if oi_res.data and len(oi_res.data) >= 2:
+                        recent_oi = float(oi_res.data[0].get("oi_binance", 0))
+                        prev_oi = float(oi_res.data[1].get("oi_binance", 0))
+                        oi_delta_pct = ((recent_oi - prev_oi) / prev_oi) * 100 if prev_oi else 0
+                    else:
+                        oi_delta_pct = 0
+                except Exception:
+                    oi_delta_pct = 0
+                
+                # Condition: Volatility up 50% + Volume up 100%
+                if recent_atr > (hist_atr * 1.5) and recent_vol > (hist_vol * 2.0):
+                    # THE WHIPSAW FILTER: 
+                    # If OI dropped heavily (< -2%), it's a liquidation cascade (whipsaw). 
+                    # We might want to fade it, but it's not a "true breakout".
+                    # If OI increased (> 1%), it means NEW MONEY is driving the move. Truly actionable.
+                    if oi_delta_pct > 0.5:
+                        if not is_on_cooldown("true_breakout", symbol):
+                            anomalies.append("true_breakout")
+                            set_cooldown("true_breakout", symbol)
+                    elif oi_delta_pct < -2.0:
+                        if not is_on_cooldown("liquidation_cascade", symbol):
+                            anomalies.append("liquidation_cascade")
+                            set_cooldown("liquidation_cascade", symbol)
+    except Exception as e:
+        logger.error(f"Triage volatility math error: {e}")
 
-    opinion = bullish_agent.analyze(
-        state.get("market_data_compact", ""),
-        full_context,
-        state.get("funding_context", ""),
-        mode
+    # 2. The Big Squeeze 
+    liq_ctx = state.get("liquidation_context", "")
+    if "LONGS_REKT" in liq_ctx or "SHORTS_REKT" in liq_ctx:
+        # Require >$10M liquidation in 1H for emergency trigger
+        if "Total=" in liq_ctx:
+            if not is_on_cooldown("liquidation_cluster", symbol):
+                anomalies.append("liquidation_cluster")
+                set_cooldown("liquidation_cluster", symbol)
+
+    # 3. Microstructure Breakdown
+    if "imbalance" in state.get("microstructure_context", ""):
+        # Check standard deviation of spread/imbalance in future PR
+        anomalies.append("microstructure_imbalance")
+        
+    # 4. Options Panic (DVOL Spike or Term Inversion)
+    if "INVERTED" in state.get("deribit_context", "") or "DVOL=" in state.get("deribit_context", ""):
+        if not is_on_cooldown("options_panic", symbol):
+            anomalies.append("options_panic")
+            set_cooldown("options_panic", symbol)
+
+    # If is_emergency was forced via UI/Telegram command
+    if state.get("is_emergency") and not anomalies:
+        anomalies.append("manual_emergency_trigger")
+
+    return {
+        "budget": 100,
+        "turn_count": 0,
+        "anomalies": list(set(anomalies)), # deduplicate
+    }
+
+def node_liquidity_expert(state: AnalysisState) -> dict:
+    """Run Liquidity Agent."""
+    bb = state.get("blackboard", {})
+    if state.get("budget", 0) <= 0: return {}
+    
+    result = liquidity_agent.analyze(
+        state.get("cvd_context", ""),
+        state.get("liquidation_context", "")
     )
-    return {"bull_opinion": opinion}
+    bb["liquidity"] = result
+    return {"blackboard": bb, "budget": state["budget"] - 20, "turn_count": state.get("turn_count", 0) + 1}
 
+def node_microstructure_expert(state: AnalysisState) -> dict:
+    """Run Microstructure Agent."""
+    bb = state.get("blackboard", {})
+    if state.get("budget", 0) <= 0: return {}
+    
+    result = microstructure_agent.analyze(state.get("microstructure_context", ""))
+    bb["microstructure"] = result
+    return {"blackboard": bb, "budget": state["budget"] - 15, "turn_count": state.get("turn_count", 0) + 1}
 
-def node_bear_agent(state: AnalysisState) -> dict:
-    """Run bearish analyst (Gemini Flash, text-only)."""
-    mode = TradingMode(state["mode"])
-    full_context = _build_full_context(state)
-
-    opinion = bearish_agent.analyze(
-        state.get("market_data_compact", ""),
-        full_context,
-        state.get("funding_context", ""),
-        mode
+def node_macro_options_expert(state: AnalysisState) -> dict:
+    """Run Macro Options Agent."""
+    bb = state.get("blackboard", {})
+    if state.get("budget", 0) <= 0: return {}
+    
+    result = macro_options_agent.analyze(
+        state.get("deribit_context", ""),
+        state.get("macro_context", "")
     )
-    return {"bear_opinion": opinion}
+    bb["macro"] = result
+    return {"blackboard": bb, "budget": state["budget"] - 15, "turn_count": state.get("turn_count", 0) + 1}
 
-
-def node_risk_agent(state: AnalysisState) -> dict:
-    """Run risk manager (Gemini Flash, text-only)."""
-    mode = TradingMode(state["mode"])
-    assessment = risk_agent.analyze(
-        state.get("market_data_compact", ""),
-        state.get("bull_opinion", ""),
-        state.get("bear_opinion", ""),
-        state.get("funding_context", ""),
-        mode
-    )
-    return {"risk_assessment": assessment}
+def node_vlm_geometric_expert(state: AnalysisState) -> dict:
+    """Run VLM Geometric visual analysis."""
+    bb = state.get("blackboard", {})
+    if state.get("budget", 0) <= 0: return {}
+    
+    # Needs chart image generated previously
+    result = vlm_geometric_agent.analyze(state.get("chart_image_b64", ""))
+    bb["vlm_geometry"] = result
+    return {"blackboard": bb, "budget": state["budget"] - 25, "turn_count": state.get("turn_count", 0) + 1}
 
 
 def node_generate_chart(state: AnalysisState) -> dict:
@@ -489,20 +613,55 @@ def node_generate_chart(state: AnalysisState) -> dict:
 
 
 def node_judge_agent(state: AnalysisState) -> dict:
-    """Run Judge (Claude Opus 4.6). Gets chart in SWING mode."""
+    """Run Judge (Claude Opus 4.6). Reads Blackboard."""
     mode = TradingMode(state["mode"])
+    
+    # Extract necessary state variables
+    compact = state.get("market_data_compact", "")
+    blackboard = state.get("blackboard", {})
+    funding_context = state.get("funding_context", "")
+    feedback_text = state.get("feedback_text", "")
+    open_positions = state.get("open_positions", "")
+
+    # Pass blackboard data
     decision = judge_agent.make_decision(
-        state.get("market_data_compact", ""),
-        state.get("bull_opinion", ""),
-        state.get("bear_opinion", ""),
-        state.get("risk_assessment", ""),
-        funding_context=state.get("funding_context", ""),
+        market_data_compact=compact,
+        blackboard=blackboard,
+        funding_context=funding_context,
         chart_image_b64=state.get("chart_image_b64"),
         mode=mode,
-        feedback_text=state.get("feedback_text", ""),
+        feedback_text=feedback_text,
+        active_orders=state.get("active_orders", []),
+        open_positions=open_positions
     )
-    return {"final_decision": decision}
+    
+    conviction = decision.get("confidence", 0) if isinstance(decision, dict) else 0
+    return {"final_decision": decision, "conviction_score": conviction}
 
+def node_risk_manager(state: AnalysisState) -> dict:
+    """Run Risk Manager (CRO). VETO power over Judge's draft."""
+    draft = state.get("final_decision", {})
+    
+    # Needs macro and funding context for risk overlays
+    funding = state.get("funding_context", "")
+    deribit = state.get("deribit_context", "")
+    
+    final_decision = risk_manager_agent.evaluate_trade(draft, funding, deribit)
+    return {"final_decision": final_decision}
+
+def node_execute_trade(state: AnalysisState) -> dict:
+    """Execute the final approved trade autonomously (Live or Paper)."""
+    decision = state.get("final_decision", {})
+    symbol = state["symbol"]
+    mode = TradingMode(state["mode"]).value.upper()
+    
+    # Bridge to execution
+    # This will simulate DCA or single entries based on the mode and CRO sizing
+    execution_result = trade_executor.execute_from_decision(decision, mode, symbol)
+    
+    # Attach execution receipt back to the decision for reporting
+    decision["execution_receipt"] = execution_result
+    return {"final_decision": decision}
 
 def node_generate_report(state: AnalysisState) -> dict:
     """Generate and send report to Telegram."""
@@ -522,16 +681,24 @@ def node_generate_report(state: AnalysisState) -> dict:
     except Exception:
         raw_funding = {}
 
+    bb_str = json.dumps(state.get("blackboard", {}), indent=2)
     report = report_generator.generate_report(
         symbol=symbol,
         market_data=market_data,
-        bull_opinion=state.get("bull_opinion", ""),
-        bear_opinion=state.get("bear_opinion", ""),
-        risk_assessment=state.get("risk_assessment", ""),
+        bull_opinion=f"Blackboard:\n{bb_str}",
+        bear_opinion=f"Anomalies Detected: {state.get('anomalies', [])}",
+        risk_assessment="",
         final_decision=state.get("final_decision", {}),
         funding_data=raw_funding,
         mode=mode,
     )
+    
+    # Fire and Forget Post-Mortem Logic
+    write_post_mortem({
+        "symbol": symbol,
+        "final_decision": state.get("final_decision", {}),
+        "bear_opinion": f"Anomalies: {state.get('anomalies', [])}"
+    }, current_price=0.0)  # Ideally pass actual last close price here
 
     if report:
         chart_bytes = state.get("chart_bytes")
@@ -563,11 +730,44 @@ def _build_full_context(state: AnalysisState) -> str:
 
 # ── Conditional edge ──
 
-def should_generate_chart(state: AnalysisState) -> str:
-    """Conditional: generate chart for all modes if enabled."""
-    if settings.should_use_chart and state.get("df_size", 0) > 0:
+# ── Conditional edge ──
+
+def route_triage(state: AnalysisState) -> str:
+    anomalies = state.get("anomalies", [])
+    if not anomalies:
+        return "generate_report"
+    
+    if "liquidation_cluster" in anomalies or "whale_cvd_divergence" in anomalies:
+        return "liquidity_expert"
+    elif "microstructure_imbalance" in anomalies:
+        return "microstructure_expert"
+    elif "options_panic" in anomalies:
+        return "macro_expert"
+    return "generate_chart"
+
+def route_swarm(state: AnalysisState) -> str:
+    budget = state.get("budget", 0)
+    turns = state.get("turn_count", 0)
+    
+    if budget <= 0 or turns >= 5:
         return "generate_chart"
-    return "judge_agent"
+        
+    bb = state.get("blackboard", {})
+    
+    # If all text experts have spoken, go to chart generation and then VLM
+    if "liquidity" in bb and "microstructure" in bb and "macro" in bb:
+        return "generate_chart"
+        
+    if "microstructure" not in bb:
+        return "microstructure_expert"
+    if "macro" not in bb:
+        return "macro_expert"
+        
+    return "generate_chart"
+
+def route_vlm(state: AnalysisState) -> str:
+    """Route to VLM Expert after chart is generated, then Judge."""
+    return "vlm_expert"
 
 
 # ── Build the LangGraph StateGraph ──
@@ -590,17 +790,22 @@ def build_analysis_graph():
     graph.add_node("macro_context", node_macro_context)
     graph.add_node("deribit_context", node_deribit_context)
     graph.add_node("fear_greed_context", node_fear_greed_context)
-    graph.add_node("bull_agent", node_bull_agent)
-    graph.add_node("bear_agent", node_bear_agent)
-    graph.add_node("risk_agent", node_risk_agent)
+    
+    # Triage and Experts
+    graph.add_node("triage", node_triage)
+    graph.add_node("liquidity_expert", node_liquidity_expert)
+    graph.add_node("microstructure_expert", node_microstructure_expert)
+    graph.add_node("macro_expert", node_macro_options_expert)
+    
     graph.add_node("generate_chart", node_generate_chart)
+    graph.add_node("vlm_expert", node_vlm_geometric_expert)
     graph.add_node("judge_agent", node_judge_agent)
+    graph.add_node("risk_manager", node_risk_manager)
+    graph.add_node("execute_trade", node_execute_trade)
     graph.add_node("generate_report", node_generate_report)
 
-    # Set entry point
     graph.set_entry_point("collect_data")
 
-    # Data collection chain
     graph.add_edge("collect_data", "perplexity_search")
     graph.add_edge("perplexity_search", "rag_ingest")
     graph.add_edge("rag_ingest", "funding_context")
@@ -613,25 +818,36 @@ def build_analysis_graph():
     graph.add_edge("microstructure_context", "macro_context")
     graph.add_edge("macro_context", "deribit_context")
     graph.add_edge("deribit_context", "fear_greed_context")
+    graph.add_edge("fear_greed_context", "triage")
 
-    # Agent chain
-    graph.add_edge("fear_greed_context", "bull_agent")
-    graph.add_edge("bull_agent", "bear_agent")
-    graph.add_edge("bear_agent", "risk_agent")
+    graph.add_conditional_edges("triage", route_triage, {
+        "liquidity_expert": "liquidity_expert",
+        "microstructure_expert": "microstructure_expert",
+        "macro_expert": "macro_expert",
+        "generate_chart": "generate_chart",
+        "generate_report": "generate_report"
+    })
+    
+    graph.add_conditional_edges("liquidity_expert", route_swarm, {
+        "microstructure_expert": "microstructure_expert",
+        "macro_expert": "macro_expert",
+        "generate_chart": "generate_chart"
+    })
+    
+    graph.add_conditional_edges("microstructure_expert", route_swarm, {
+        "macro_expert": "macro_expert",
+        "generate_chart": "generate_chart"
+    })
+    
+    graph.add_conditional_edges("macro_expert", route_swarm, {
+        "generate_chart": "generate_chart"
+    })
 
-    # Conditional chart generation
-    graph.add_conditional_edges(
-        "risk_agent",
-        should_generate_chart,
-        {
-            "generate_chart": "generate_chart",
-            "judge_agent": "judge_agent",
-        }
-    )
-    graph.add_edge("generate_chart", "judge_agent")
-
-    # Final decision and report
-    graph.add_edge("judge_agent", "generate_report")
+    graph.add_edge("generate_chart", "vlm_expert")
+    graph.add_edge("vlm_expert", "judge_agent")
+    graph.add_edge("judge_agent", "risk_manager")
+    graph.add_edge("risk_manager", "execute_trade")
+    graph.add_edge("execute_trade", "generate_report")
     graph.add_edge("generate_report", END)
 
     return graph.compile()
@@ -685,9 +901,13 @@ class Orchestrator:
             "feedback_text": "",
             "microstructure_context": "",
             "macro_context": "",
-            "bull_opinion": "",
-            "bear_opinion": "",
-            "risk_assessment": "",
+            "deribit_context": "",
+            "fear_greed_context": "",
+            "budget": 100,
+            "turn_count": 0,
+            "anomalies": [],
+            "blackboard": {},
+            "conviction_score": 0.0,
             "chart_image_b64": None,
             "chart_bytes": None,
             "final_decision": {},
