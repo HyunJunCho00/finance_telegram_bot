@@ -420,12 +420,22 @@ class UpbitBulkLoader:
         db_symbol = symbol.replace("/", "")
         logger.info(f"Fetching {symbol} from Upbit: {days} days")
 
+        consecutive_empty = 0
+
         while current_since < end_ms:
             try:
                 ohlcv = self.exchange.fetch_ohlcv(upbit_symbol, '1m',
                                                    since=current_since, limit=200)
                 if not ohlcv:
-                    break
+                    consecutive_empty += 1
+                    if consecutive_empty >= 5:
+                        logger.warning(f"Upbit {symbol}: 5 consecutive empty responses, stopping")
+                        break
+                    current_since += 60000 * 200  # skip ahead ~200 minutes
+                    time.sleep(1)
+                    continue
+
+                consecutive_empty = 0
 
                 for candle in ohlcv:
                     ts_utc = pd.Timestamp(candle[0], unit='ms', tz='UTC').floor('min')
@@ -440,8 +450,14 @@ class UpbitBulkLoader:
                         'symbol': db_symbol,
                     })
 
-                current_since = ohlcv[-1][0] + 60000
-                if len(ohlcv) < 200:
+                last_ts = ohlcv[-1][0]
+                current_since = last_ts + 60000
+
+                if len(all_rows) % 50000 == 0 and len(all_rows) > 0:
+                    logger.info(f"  ... {len(all_rows):,} Upbit candles fetched")
+
+                # Only stop on short response if we've actually reached end
+                if len(ohlcv) < 200 and current_since >= end_ms:
                     break
 
                 time.sleep(0.2)  # Upbit rate limit is stricter
@@ -943,8 +959,9 @@ if __name__ == "__main__":
                         choices=["all", "ohlcv", "funding", "telegram", "resample",
                                  "upbit", "fear_greed", "deribit_dvol", "macro"],
                         help="What to load (default: all)")
-    parser.add_argument("--days", type=int, default=2190,
-                        help="Days of history for all loaders (default: 2190 = 6 years)")
+    _default_days = (datetime.now(timezone.utc) - datetime(2020, 1, 1, tzinfo=timezone.utc)).days
+    parser.add_argument("--days", type=int, default=_default_days,
+                        help=f"Days of history for all loaders (default: since 2020-01-01 = {_default_days} days)")
     parser.add_argument("--symbol", type=str, default=None,
                         help="Single symbol e.g. BTCUSDT (default: BTCUSDT + ETHUSDT)")
     parser.add_argument("--db-days", type=int, default=7,
