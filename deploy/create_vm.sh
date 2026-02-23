@@ -18,14 +18,14 @@ INSTANCE_NAME="crypto-trading-vm"
 REGION="${REGION:-asia-northeast3}"
 ZONE="${ZONE:-${REGION}-a}"
 VERTEX_REGION="${VERTEX_REGION:-us-central1}"
-MACHINE_TYPE="e2-small"
+MACHINE_TYPE="e2-medium"
 BOOT_DISK_SIZE_GB="${BOOT_DISK_SIZE_GB:-50}"
 BOOT_DISK_TYPE="${BOOT_DISK_TYPE:-pd-balanced}"
 IMAGE_FAMILY="ubuntu-2204-lts"
 IMAGE_PROJECT="ubuntu-os-cloud"
 SA_NAME="crypto-trading-sa"
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
-REPO_URL="${REPO_URL:-https://github.com/<your-org>/finance_telegram_bot.git}"
+REPO_URL="${REPO_URL:-https://github.com/HyunJunCho00/finance_telegram_bot.git}"
 
 if [[ -z "$REPO_URL" || "$REPO_URL" == *"<your-org>"* ]]; then
   echo "ERROR: REPO_URL is not set to a real repository URL."
@@ -58,12 +58,15 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 read -r -d '' STARTUP_SCRIPT <<'SCRIPT' || true
 #!/bin/bash
 apt-get update
-apt-get install -y python3-pip python3-venv git
+apt-get install -y software-properties-common git
+add-apt-repository -y ppa:deadsnakes/ppa
+apt-get update
+apt-get install -y python3.11 python3.11-venv python3.11-dev python3-pip
 
 cd /opt
 git clone "__REPO_URL__" /opt/crypto_trading_system
 cd /opt/crypto_trading_system
-python3 -m venv venv
+python3.11 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 

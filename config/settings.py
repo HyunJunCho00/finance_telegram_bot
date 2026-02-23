@@ -91,18 +91,23 @@ class Settings(BaseSettings):
     ANALYSIS_INTERVAL_HOURS: int = 4
 
     # ===== AI Models =====
-    # Agents (bull/bear/risk): Gemini 2.0 Flash via Vertex AI
+    # Agents (bull/bear/risk): Gemini 3 Flash/Pro via Vertex AI (us-central1)
     # Judge: Claude Opus 4.6 via Vertex AI Model Garden
-    MODEL_ENDPOINT: str = "gemini-2.5-flash"
+    #
+    # Model status (2026-02-23):
+    #   gemini-3-flash        : GA, us-central1 ✅  (Fast, cost-efficient for high-throughput)
+    #   gemini-3.1-pro-preview: Preview, us-central1 ✅ (Advanced reasoning, large context)
+    #   claude-opus-4-6       : GA, Vertex AI ✅  (Financial SOTA, ultimate judge)
+    MODEL_ENDPOINT: str = "gemini-3-flash"
 
 
     # ===== Role-based model routing (2026 ops tuning) =====
-    MODEL_BULLISH: str = "gemini-2.5-flash"
-    MODEL_BEARISH: str = "gemini-2.5-flash"
-    MODEL_RISK: str = "gemini-2.5-pro"
-    MODEL_JUDGE: str = "claude-opus-4-20250918"
-    MODEL_SELF_CORRECTION: str = "gemini-2.5-pro"
-    MODEL_RAG_EXTRACTION: str = "gemini-2.5-flash"
+    MODEL_BULLISH: str = "gemini-3-flash"
+    MODEL_BEARISH: str = "gemini-3-flash"
+    MODEL_RISK: str = "gemini-3.1-pro-preview"
+    MODEL_JUDGE: str = "claude-opus-4-6"
+    MODEL_SELF_CORRECTION: str = "gemini-3-flash"
+    MODEL_RAG_EXTRACTION: str = "gemini-3.1-pro-preview"
 
     # Soft input caps (character-based) to improve token efficiency
     MAX_INPUT_CHARS_BULLISH: int = 12000
