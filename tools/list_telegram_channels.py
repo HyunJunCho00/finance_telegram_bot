@@ -2,8 +2,30 @@ import asyncio
 import os
 import sys
 
-# Add parent directory to python path to allow importing config
+# Add parent directory to python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+def _load_env_from_secret_manager():
+    """Load API keys from Secret Manager before initializing settings."""
+    from google.cloud import secretmanager
+    from dotenv import load_dotenv
+    import io
+
+    print("🔹 시크릿 매니저에서 환경변수(.env) 설정 불러오는 중...")
+    try:
+        client = secretmanager.SecretManagerServiceClient()
+        project_id = os.environ.get("PROJECT_ID", "tj-trading-384306")
+        name = f"projects/{project_id}/secrets/TRADING_BOT_ENV/versions/latest"
+        response = client.access_secret_version(request={"name": name})
+        env_content = response.payload.data.decode("utf-8")
+        
+        # Load the string content into the environment as if it was a .env file
+        load_dotenv(stream=io.StringIO(env_content))
+    except Exception as e:
+        print(f"⚠️ 환경변수를 시크릿 매니저에서 불러오지 못했습니다: {e}")
+
+# Must run BEFORE importing settings!
+_load_env_from_secret_manager()
 
 from telethon import TelegramClient
 from config.settings import settings
