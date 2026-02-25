@@ -39,8 +39,8 @@ async def main():
     print(f"\n{'='*50}")
     print(f"  Telegram 세션 생성")
     print(f"{'='*50}")
-    print(f"  API ID:  {api_id}")
-    print(f"  Phone:   {phone}")
+    print(f"  API ID:  {'*' * (len(str(api_id)) - 3) + str(api_id)[-3:]}")
+    print(f"  Phone:   {'*' * (len(phone) - 4) + phone[-4:]}")
     print(f"  Session: {session_path}.session")
     print(f"{'='*50}\n")
 
@@ -51,7 +51,7 @@ async def main():
 
     me = await client.get_me()
     print(f"\n✅ 인증 성공!")
-    print(f"   계정: {me.first_name} ({me.phone})")
+    print(f"   계정: {me.first_name} (인증 완료)")
     print(f"   세션 파일: {session_path}.session")
 
     await client.disconnect()
