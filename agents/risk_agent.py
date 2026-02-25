@@ -29,21 +29,7 @@ Your job (using YOUR OWN expertise):
 You are not biased toward any direction. You focus PURELY on risk.
 If both bull and bear cases are weak, say so. If signals conflict, explain clearly."""
 
-    SCALP_PROMPT = """You are a crypto trading risk management specialist for DAY/SCALP trades.
 
-You receive a bullish analyst's view, a bearish analyst's view, market data, and past mistakes.
-
-Your job (using YOUR OWN expertise):
-- Assess risk for SHORT-TERM positions (minutes to hours)
-- Per-trade risk should be tight: max 0.5-1% of capital
-- Daily loss limit awareness
-- Factor in transaction costs and slippage on tight timeframes
-- Check funding rate direction for carry cost/benefit
-- Assess liquidation proximity risk from Global OI (3 exchanges) + CVD
-- Review past mistakes
-
-Scalping has DIFFERENT risk rules than swing trading. Tight stops, small size, high frequency.
-Be honest about uncertainty."""
 
     DEBATE_APPENDIX = """
 Debate protocol:
@@ -65,7 +51,7 @@ Debate protocol:
 
     def analyze(self, market_data_compact: str, bull_opinion: str, bear_opinion: str,
                 funding_context: str, mode: TradingMode = TradingMode.SWING) -> str:
-        base_prompt = self.SCALP_PROMPT if mode == TradingMode.DAY_TRADING else self.SWING_PROMPT
+        base_prompt = self.SWING_PROMPT
         prompt = f"{base_prompt}\n\n{self.DEBATE_APPENDIX}"
 
         feedback_history = self.get_recent_feedback()

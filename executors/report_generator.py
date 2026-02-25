@@ -55,12 +55,10 @@ class ReportGenerator:
         d = decision.get('decision', 'N/A')
         icon = {'LONG': '\U0001F7E2', 'SHORT': '\U0001F534', 'HOLD': '\U0001F7E1'}.get(d, '\u2B55')
         mode_icon_map = {
-            TradingMode.DAY_TRADING: '\u26A1',
             TradingMode.SWING: '\U0001F4C8',
             TradingMode.POSITION: '\U0001F3D4\uFE0F',
         }
         mode_label_map = {
-            TradingMode.DAY_TRADING: 'DAY_TRADING',
             TradingMode.SWING: 'SWING',
             TradingMode.POSITION: 'POSITION',
         }
@@ -71,11 +69,7 @@ class ReportGenerator:
         factors_text = '\n'.join([f'  \u2022 {f}' for f in key_factors[:5]]) if key_factors else '  N/A'
 
         # Get relevant timeframe data based on mode
-        if mode == TradingMode.DAY_TRADING:
-            tf_primary = market_data.get('timeframes', {}).get('5m', {})
-            tf_secondary = market_data.get('timeframes', {}).get('15m', {})
-            tf_labels = ('5M', '15M')
-        elif mode == TradingMode.POSITION:
+        if mode == TradingMode.POSITION:
             tf_primary = market_data.get('timeframes', {}).get('1d', {})
             tf_secondary = market_data.get('timeframes', {}).get('1w', {})
             tf_labels = ('1D', '1W')

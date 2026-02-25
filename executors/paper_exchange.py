@@ -13,6 +13,7 @@ class PaperExchangeEngine:
     def __init__(self):
         self._conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL;")
 
     def get_wallet_balance(self, exchange: str) -> float:
         cursor = self._conn.cursor()
@@ -68,6 +69,7 @@ class PaperExchangeEngine:
             (position_id, exchange, symbol, side, size, entry_price, leverage, is_open, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         ''', (pos_id, exchange.lower(), symbol, direction, coin_size, filled_price, leverage, now, now))
+        self._conn.commit()
         
         # Deduct margin from available balance (We treat paper_wallets as 'Available Balance')
         self.update_wallet_balance(exchange, -required_margin)

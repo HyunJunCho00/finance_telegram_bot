@@ -20,9 +20,14 @@ class Settings(BaseSettings):
     PROJECT_ID: str = ""
     REGION: str = "us-central1"
     VERTEX_REGION: str = ""
+    VERTEX_REGION_GEMINI: str = "global"
 
     SUPABASE_URL: str = ""
     SUPABASE_KEY: str = ""
+
+    # ===== Direct AI API Keys (Multi-LLM) =====
+    ANTHROPIC_API_KEY: str = ""
+    OPENAI_API_KEY: str = ""
 
     BINANCE_API_KEY: str = ""
     BINANCE_API_SECRET: str = ""
@@ -96,23 +101,34 @@ class Settings(BaseSettings):
     ANALYSIS_INTERVAL_HOURS: int = 4
 
     # ===== AI Models =====
-    # Agents (Liquidity, Microstructure, Macro, VLM): Gemini 3.1 Pro via Vertex AI (us-central1)
-    # Judge: Claude Opus 4.6 via Vertex AI Model Garden
-    #
-    # Model status (2026-02-23):
-    #   gemini-3.1-pro-preview: Preview, us-central1 ✅ (Advanced reasoning, large context, Multimodal)
-    #   claude-opus-4-6       : GA, Vertex AI ✅  (Financial SOTA, ultimate judge)
+    # Supports Gemini, Claude, and GPT models via routing.
+    # Model status (2026 SOTA):
+    #   gemini-3.1-pro-preview: Google's latest multimodal, extreme context window, unbeatable for big data crunching.
+    #   claude-opus-4.6 / claude-sonnet-4.6: Anthropic's flagship models, absolute SOTA in pure mathematical/logical reasoning.
+    #   gpt-5.2: OpenAI's latest general intelligence, SOTA in world knowledge, macro analysis and news.
     MODEL_ENDPOINT: str = "gemini-3.1-pro-preview"
 
 
     # ===== Role-based model routing (2026 SOTA tuning) =====
-    MODEL_LIQUIDITY: str = "gemini-3.1-pro-preview"
-    MODEL_MICROSTRUCTURE: str = "gemini-3.1-pro-preview"
-    MODEL_MACRO: str = "gemini-3.1-pro-preview"
+    # 1. High-frequency / Big Data (Lowest cost, largest context API)
+    # Using gemini-3-flash-preview (Thinking Level: LOW)
+    MODEL_LIQUIDITY: str = "gemini-3-flash-preview"
+    MODEL_MICROSTRUCTURE: str = "gemini-3-flash-preview"
+    MODEL_RAG_EXTRACTION: str = "gemini-3-flash-preview"
+    
+    # 2. Vision / Multimodal Geometry
+    # Using gemini-3.1-pro-preview (Thinking Level: HIGH)
     MODEL_VLM_GEOMETRIC: str = "gemini-3.1-pro-preview"
-    MODEL_JUDGE: str = "claude-opus-4-6"
-    MODEL_SELF_CORRECTION: str = "gemini-3.1-pro-preview"
-    MODEL_RAG_EXTRACTION: str = "gemini-3.1-pro-preview"
+    
+    # 3. World Knowledge / Macro Economy
+    # gpt-5.2: OpenAI's latest flagship (Dec 2025), unparalleled for macro text analysis and global intelligence
+    MODEL_MACRO: str = "gpt-5.2"
+    
+    # 4. Supreme Logical Reasoning / Trade Execution
+    # claude-sonnet-4.6: The actual SOTA as of Feb 2026, featuring hybrid reasoning (extended thinking)
+    # and sweeping coding/math benchmarks (e.g. 70.3% SWE-bench, 96.2% MATH 500).
+    MODEL_JUDGE: str = "claude-sonnet-4.6"
+    MODEL_SELF_CORRECTION: str = "claude-sonnet-4.6"
 
     # Soft input caps (character-based) to improve token efficiency
     MAX_INPUT_CHARS_LIQUIDITY: int = 15000
@@ -161,6 +177,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        extra = "allow"
 
     @property
     def vertex_region(self) -> str:

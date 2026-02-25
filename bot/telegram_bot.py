@@ -32,7 +32,7 @@ class TradingBot:
             f"Commands:\n"
             f"/status - Current position\n"
             f"/analyze BTC - Immediate analysis\n"
-            f"/mode day_trading|swing|position - Switch mode\n"
+            f"/mode swing|position - Switch mode\n"
             f"/report - Latest report\n"
             f"/help - Show commands"
         )
@@ -42,7 +42,6 @@ class TradingBot:
             "/status - Current positions & latest decision\n"
             "/analyze BTC|ETH - Run immediate analysis\n"
             "/mode - Show current mode\n"
-            "/mode day_trading - Switch to day trading (intraday)\n"
             "/mode swing - Switch to swing (multi-day)\n"
             "/mode position - Switch to position (long-term)\n"
             "/report - Resend latest report\n"
@@ -115,13 +114,13 @@ class TradingBot:
                 f"Current mode: {mode.upper()}\n"
                 f"Candle limit: {settings.candle_limit}\n"
                 f"Chart for AI: {settings.should_use_chart}\n\n"
-                f"Switch: /mode day_trading | swing | position"
+                f"Switch: /mode swing | position"
             )
             return
 
         new_mode = args[0].lower().strip()
-        if new_mode not in ('day_trading', 'swing', 'position'):
-            await update.message.reply_text("Invalid. Use: /mode day_trading | swing | position")
+        if new_mode not in ('swing', 'position'):
+            await update.message.reply_text("Invalid. Use: /mode swing | position")
             return
 
         os.environ['TRADING_MODE'] = new_mode

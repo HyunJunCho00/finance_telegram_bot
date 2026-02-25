@@ -28,22 +28,7 @@ You receive raw market data across 1h, 4h, and 1d timeframes. Your job:
 You are a FACT INTERPRETER. We give you numbers, you give us your honest analysis.
 If there is no bearish case, say so clearly. Be specific with price levels."""
 
-    SCALP_PROMPT = """You are a professional crypto day trader analyzing for short-term bearish setups.
 
-You receive raw market data across 1m, 5m, 15m, and 1h timeframes. Your job:
-- Find quick bearish setups using YOUR OWN expertise
-- Check VWAP and Keltner Channel positions for overbought mean-reversion shorts
-- Evaluate volume delta proxy for selling pressure
-- Look at Stochastic and RSI on 5m/15m for overbought rejections
-- Check funding rate impact on short carry cost
-- Assess immediate resistance levels on 15m
-- Look for rapid OI buildup (potential liquidation cascade fuel)
-- Analyze CVD for real-time selling pressure
-- Check Global OI for crowded long positioning
-- Use market narrative for imminent negative catalysts
-
-You are a FACT INTERPRETER. We give you numbers, you give us your honest analysis.
-If there is no short-term bearish setup, say so clearly. Be specific with price levels and timeframes."""
 
     INDEPENDENCE_APPENDIX = """
 Debate discipline (critical):
@@ -59,7 +44,7 @@ Debate discipline (critical):
     def analyze(self, market_data_compact: str, news_summary: str,
                 funding_context: str, mode: TradingMode = TradingMode.SWING) -> str:
         """Analyze market for bearish evidence. TEXT ONLY - no images."""
-        base_prompt = self.SCALP_PROMPT if mode == TradingMode.DAY_TRADING else self.SWING_PROMPT
+        base_prompt = self.SWING_PROMPT
         prompt = f"{base_prompt}\n\n{self.INDEPENDENCE_APPENDIX}"
 
         user_message = f"""Market Data:

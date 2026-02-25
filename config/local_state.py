@@ -10,6 +10,7 @@ DB_PATH = "data/local_state.db"
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA journal_mode=WAL;")
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS active_orders (
@@ -65,6 +66,7 @@ class LocalStateManager:
         init_db()
         self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL;")
 
     def add_intent(self, symbol: str, direction: str, style: str, amount: float, exchange: str, ttl_hours: int = 24) -> str:
         intent_id = str(uuid.uuid4())

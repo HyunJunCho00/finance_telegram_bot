@@ -35,29 +35,13 @@ Debate discipline (critical):
 - Never mirror generic wording; anchor claims to concrete levels/indicators/timeframes.
 """
 
-    SCALP_PROMPT = """You are a professional crypto day trader analyzing for short-term bullish setups.
-
-You receive raw market data across 1m, 5m, 15m, and 1h timeframes. Your job:
-- Find quick bullish setups using YOUR OWN expertise
-- Check VWAP and Keltner Channel positions for mean-reversion entries
-- Evaluate volume delta proxy for buying pressure
-- Analyze CVD data for real-time accumulation signals
-- Look at Stochastic and RSI on 5m/15m for oversold bounces
-- Check funding rate for carry cost/benefit direction
-- Check Global OI for overall market positioning
-- Assess immediate support levels on 15m
-- Use market narrative for any imminent catalysts
-
-You are a FACT INTERPRETER. We give you numbers, you give us your honest analysis.
-If there is no short-term bullish setup, say so clearly. Be specific with price levels and timeframes."""
-
     def __init__(self):
         pass
 
     def analyze(self, market_data_compact: str, news_summary: str,
                 funding_context: str, mode: TradingMode = TradingMode.SWING) -> str:
         """Analyze market for bullish evidence. TEXT ONLY - no images."""
-        base_prompt = self.SCALP_PROMPT if mode == TradingMode.DAY_TRADING else self.SWING_PROMPT
+        base_prompt = self.SWING_PROMPT
         prompt = f"{base_prompt}\n\n{self.INDEPENDENCE_APPENDIX}"
 
         user_message = f"""Market Data:

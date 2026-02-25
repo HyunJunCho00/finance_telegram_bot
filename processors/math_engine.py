@@ -787,72 +787,7 @@ class MathEngine:
         clusters.sort(key=lambda x: x['strength'], reverse=True)
         return clusters[:5]
 
-    # ─────────────── Main Entry Points ───────────────
 
-    def analyze_market_day_trading(self, df_1m: pd.DataFrame,
-                                    df_4h: Optional[pd.DataFrame] = None) -> Dict:
-        """DAY_TRADING mode: 5m, 15m, 1h, 4h focus with VWAP/Keltner + FVG.
-        df_4h: pre-loaded from GCS if available (for EMA200 on 4h)."""
-
-        result = {
-            'mode': 'day_trading',
-            'current_price': round(float(df_1m.iloc[-1]['close']), 2),
-            'current_volume': round(float(df_1m.iloc[-1]['volume']), 2),
-            'timeframes': {},
-            'scalp_indicators': {},
-            'structure': {},
-            'fvg': {},
-            'swing_levels': {},
-        }
-
-        timeframes = {
-            '5m': self.resample_to_timeframe(df_1m, '5m'),
-            '15m': self.resample_to_timeframe(df_1m, '15m'),
-            '1h': self.resample_to_timeframe(df_1m, '1h'),
-        }
-
-        # Use GCS 4h data if available (has EMA200 depth), else resample
-        if df_4h is not None and len(df_4h) >= 20:
-            timeframes['4h'] = df_4h
-        else:
-            timeframes['4h'] = self.resample_to_timeframe(df_1m, '4h')
-
-        for tf_name, tf_df in timeframes.items():
-            if len(tf_df) >= 5:
-                result['timeframes'][tf_name] = self.calculate_indicators_for_timeframe(tf_df)
-                result['timeframes'][tf_name]['candle_count'] = len(tf_df)
-            else:
-                result['timeframes'][tf_name] = {'error': 'insufficient_data', 'candle_count': len(tf_df)}
-
-        # Scalp indicators on 5m and 15m
-        for tf_name in ['5m', '15m']:
-            tf_df = timeframes.get(tf_name, pd.DataFrame())
-            if len(tf_df) >= 20:
-                result['scalp_indicators'][tf_name] = self.calculate_scalp_indicators(tf_df)
-
-        # Structure on 15m and 1h
-        for tf_name in ['15m', '1h']:
-            tf_df = timeframes.get(tf_name, pd.DataFrame())
-            if len(tf_df) >= 20:
-                result['structure'][f'support_{tf_name}'] = self.calculate_diagonal_support(tf_df)
-                result['structure'][f'resistance_{tf_name}'] = self.calculate_diagonal_resistance(tf_df)
-                result['structure'][f'divergence_{tf_name}'] = self.detect_divergences(tf_df)
-
-        # FVG on 15m (most useful for day trading)
-        tf_15m = timeframes.get('15m', pd.DataFrame())
-        if len(tf_15m) >= 10:
-            result['fvg']['15m'] = self.calculate_fvg(tf_15m)
-
-        # Swing levels on 1h
-        tf_1h = timeframes.get('1h', pd.DataFrame())
-        if len(tf_1h) >= 20:
-            result['swing_levels']['1h'] = self.calculate_swing_levels(tf_1h)
-
-        # Recent 15m candles
-        if len(tf_15m) >= 3:
-            result['recent_15m_candles'] = self._recent_candle_data(tf_15m, count=8)
-
-        return result
 
     def analyze_market_swing(self, df_1m: pd.DataFrame,
                               df_1d: Optional[pd.DataFrame] = None) -> Dict:
@@ -1035,9 +970,7 @@ class MathEngine:
         """Unified entry point. Dispatches to mode-specific analysis.
         Higher timeframe DataFrames (df_4h, df_1d, df_1w) come from GCS
         when available, providing deeper history for EMA200 etc."""
-        if mode == TradingMode.DAY_TRADING:
-            return self.analyze_market_day_trading(df_1m, df_4h=df_4h)
-        elif mode == TradingMode.POSITION:
+        if mode == TradingMode.POSITION:
             return self.analyze_market_position(df_1m, df_1d=df_1d, df_1w=df_1w)
         return self.analyze_market_swing(df_1m, df_1d=df_1d)
 

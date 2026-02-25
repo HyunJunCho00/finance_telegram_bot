@@ -3,7 +3,6 @@
 Architecture:
   LangGraph StateGraph manages the analysis flow as a directed graph.
   Each node is a processing step. Edges define the execution order.
-  Conditional edges route based on state (e.g., skip chart in SCALP mode).
 
 Graph:
   collect_data -> perplexity_search -> rag_ingest -> technical_analysis
@@ -15,15 +14,13 @@ Graph:
 
 Benefits over sequential:
   - Explicit state management (TypedDict)
-  - Conditional routing (chart only in SWING)
   - Error isolation per node
   - Easy to add/remove/reorder steps
   - Built-in retry support
 
 Cost optimization:
   - Bull/Bear/Risk: Gemini Flash, TEXT ONLY, compact data format
-  - Judge: Claude Opus 4.6, gets chart image ONLY in SWING mode (512x512)
-  - SCALP mode: zero images (speed + cost)
+  - Judge: Claude Opus 4.6, gets chart image (512x512)
 """
 
 from typing import Dict, Optional, TypedDict, Annotated
@@ -64,7 +61,7 @@ except ImportError:
 
 class AnalysisState(TypedDict):
     symbol: str
-    mode: str  # "day_trading", "swing", or "position"
+    mode: str  # "swing" or "position"
     is_emergency: bool
 
     # Data collection results
@@ -120,9 +117,7 @@ def node_collect_data(state: AnalysisState) -> dict:
     try:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
-            if mode == TradingMode.DAY_TRADING:
-                df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=2)
-            elif mode == TradingMode.SWING:
+            if mode == TradingMode.SWING:
                 df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
             elif mode == TradingMode.POSITION:
                 df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
@@ -494,16 +489,22 @@ def node_triage(state: AnalysisState) -> dict:
     # 2. The Big Squeeze 
     liq_ctx = state.get("liquidation_context", "")
     if "LONGS_REKT" in liq_ctx or "SHORTS_REKT" in liq_ctx:
-        # Require >$10M liquidation in 1H for emergency trigger
-        if "Total=" in liq_ctx:
+        # Require >$100k liquidation in 1H for emergency trigger
+        import re
+        match = re.search(r"Total=\$?([\d\.]+)", liq_ctx.replace(',', ''))
+        if match and float(match.group(1)) > 100000:
             if not is_on_cooldown("liquidation_cluster", symbol):
                 anomalies.append("liquidation_cluster")
                 set_cooldown("liquidation_cluster", symbol)
 
     # 3. Microstructure Breakdown
-    if "imbalance" in state.get("microstructure_context", ""):
-        # Check standard deviation of spread/imbalance in future PR
-        anomalies.append("microstructure_imbalance")
+    micro_ctx = state.get("microstructure_context", "")
+    if "imbalance" in micro_ctx:
+        # Require > 70% (0.7) imbalance
+        import re
+        match = re.search(r"imbalance[:=]\s*([-0-9\.]+)", micro_ctx)
+        if match and abs(float(match.group(1))) > 0.7:
+            anomalies.append("microstructure_imbalance")
         
     # 4. Options Panic (DVOL Spike or Term Inversion)
     if "INVERTED" in state.get("deribit_context", "") or "DVOL=" in state.get("deribit_context", ""):
@@ -580,9 +581,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
     try:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
-            if mode == TradingMode.DAY_TRADING:
-                df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=2)
-            elif mode == TradingMode.SWING:
+            if mode == TradingMode.SWING:
                 df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
             elif mode == TradingMode.POSITION:
                 df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
@@ -632,7 +631,8 @@ def node_judge_agent(state: AnalysisState) -> dict:
         mode=mode,
         feedback_text=feedback_text,
         active_orders=state.get("active_orders", []),
-        open_positions=open_positions
+        open_positions=open_positions,
+        symbol=state.get("symbol", "BTCUSDT")
     )
     
     conviction = decision.get("confidence", 0) if isinstance(decision, dict) else 0

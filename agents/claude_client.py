@@ -1,8 +1,9 @@
-"""Hybrid AI client with role-based model routing.
+"""Hybrid AI client with multi-LLM routing for 2026 SOTA models.
 
 Key goals:
-- Keep Judge on strongest reasoning model.
-- Use faster/cheaper models for high-frequency agents.
+- Route requests to Gemini, Claude, or GPT based on the prefix.
+- Keep Judge on strongest reasoning model (Claude/GPT).
+- Use faster/cheaper models for high-frequency agents (Gemini Flash).
 - Apply soft input caps per role to improve token efficiency.
 """
 
@@ -12,7 +13,8 @@ from typing import Dict, List, Optional, Tuple
 
 from google import genai
 from google.genai import types
-from anthropic import AnthropicVertex
+from anthropic import AnthropicVertex, Anthropic
+from openai import OpenAI
 from loguru import logger
 
 from config.settings import settings
@@ -20,25 +22,45 @@ from config.settings import settings
 
 class AIClient:
     def __init__(self):
+        # Gemini (Vertex AI) Client
         self._gemini_client = genai.Client(
             vertexai=True,
             project=settings.PROJECT_ID,
-            location=settings.vertex_region,
+            location=settings.VERTEX_REGION_GEMINI or "global",
         )
+        
+        # Anthropic Client (Direct API if key exists, otherwise Vertex AI)
         self._claude_client = None
+        
+        # OpenAI Client
+        self._openai_client = None
 
         # Backward-compatible defaults
         self.default_model_id = "gemini-2.5-flash"
         self.premium_model_id = settings.MODEL_JUDGE
 
     @property
-    def claude_client(self) -> AnthropicVertex:
+    def claude_client(self):
         if self._claude_client is None:
-            self._claude_client = AnthropicVertex(
-                region=settings.vertex_region,
-                project_id=settings.PROJECT_ID,
-            )
+            if settings.ANTHROPIC_API_KEY:
+                # Direct Anthropic API
+                self._claude_client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+            else:
+                # Fallback to GCP Vertex AI
+                self._claude_client = AnthropicVertex(
+                    region=settings.REGION, # usually us-central1 for claude
+                    project_id=settings.PROJECT_ID,
+                )
         return self._claude_client
+
+    @property
+    def openai_client(self):
+        if self._openai_client is None:
+            if settings.OPENAI_API_KEY:
+                self._openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+            else:
+                raise ValueError("OPENAI_API_KEY is not set.")
+        return self._openai_client
 
     def _get_role_model_and_cap(self, role: str, use_premium: bool) -> Tuple[str, int]:
         role = (role or "general").lower()
@@ -87,6 +109,15 @@ class AIClient:
                 temperature=temperature,
                 chart_image_b64=chart_image_b64,
             )
+        elif model_id.startswith("gpt-") or model_id.startswith("o1-") or model_id.startswith("o3-"):
+            return self._generate_openai(
+                model_id=model_id,
+                system_prompt=system_prompt,
+                user_message=trimmed_message,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                chart_image_b64=chart_image_b64,
+            )
 
         return self._generate_gemini(
             model_id=model_id,
@@ -116,11 +147,20 @@ class AIClient:
 
             parts.append(types.Part.from_text(text=user_message))
 
-            config = types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                max_output_tokens=max_tokens,
-                temperature=temperature,
-            )
+            config_kwargs = {
+                "system_instruction": system_prompt,
+                "max_output_tokens": max_tokens,
+                "temperature": temperature,
+            }
+
+            # Inject ThinkingConfig for Gemini 3.0 models
+            if "gemini-3" in model_id.lower():
+                # Pro models get HIGH thinking for deep reasoning, Flash models get LOW for speed/cost
+                thinking_level = "HIGH" if "pro" in model_id.lower() else "LOW"
+                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
+                # Thinking models tend to perform better with temperature=0.0 depending on the task, but we'll leave it as configured
+
+            config = types.GenerateContentConfig(**config_kwargs)
 
             response = self._gemini_client.models.generate_content(
                 model=model_id,
@@ -179,6 +219,59 @@ class AIClient:
                 chart_image_b64=chart_image_b64,
             )
 
+    def _generate_openai(
+        self,
+        model_id: str,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int,
+        temperature: float,
+        chart_image_b64: Optional[str] = None,
+    ) -> str:
+        try:
+            messages = []
+            
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+                
+            user_content = []
+            if chart_image_b64:
+                # OpenAI vision format
+                mime = mimetypes.guess_type("chart.png")[0] or "image/png"
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime};base64,{chart_image_b64}"
+                    }
+                })
+            
+            user_content.append({"type": "text", "text": user_message})
+            messages.append({"role": "user", "content": user_content})
+
+            kwargs = {
+                "model": model_id,
+                "messages": messages,
+            }
+            if not model_id.startswith("o"):
+                kwargs["temperature"] = temperature
+                kwargs["max_tokens"] = max_tokens
+
+            response = self.openai_client.chat.completions.create(**kwargs)
+
+            return response.choices[0].message.content or ""
+
+        except Exception as e:
+            logger.error(f"OpenAI API error ({model_id}): {e}")
+            logger.warning("Falling back to Gemini default model...")
+            return self._generate_gemini(
+                model_id=self.default_model_id,
+                system_prompt=system_prompt,
+                user_message=user_message,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                chart_image_b64=chart_image_b64,
+            )
+
     def generate_with_context(
         self,
         system_prompt: str,
@@ -204,6 +297,5 @@ class AIClient:
         except Exception as e:
             logger.error(f"AI API error: {e}")
             return ""
-
 
 claude_client = AIClient()

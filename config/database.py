@@ -86,10 +86,6 @@ class DatabaseClient:
                         "whale_sell_vol": record.get("whale_sell_vol", 0),
                         "whale_buy_count": record.get("whale_buy_count", 0),
                         "whale_sell_count": record.get("whale_sell_count", 0),
-                        # Preserve existing CVD fields if row exists
-                        "taker_buy_volume": 0,
-                        "taker_sell_volume": 0,
-                        "volume_delta": 0,
                     },
                     on_conflict="timestamp,symbol"
                 ).execute()

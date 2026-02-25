@@ -94,7 +94,8 @@ Swarm reasoning controls & Data Trust Hierarchy:
         mode: TradingMode = TradingMode.SWING,
         feedback_text: str = "",
         active_orders: list = [],
-        open_positions: str = ""
+        open_positions: str = "",
+        symbol: str = "BTCUSDT"
     ) -> Dict:
         prompt = f"{self.SWING_PROMPT}\n\n{self.DEBATE_APPENDIX}"
         previous_decision = self.get_previous_decision()
@@ -113,7 +114,7 @@ Swarm reasoning controls & Data Trust Hierarchy:
         # Queries the JSONL vector DB placeholder for past identical patterns.
         try:
             sample_anomalies = [k for k in blackboard.keys()]
-            symbol_detected = "BTCUSDT" # Assuming default, parameterize if needed
+            symbol_detected = symbol
             episodic_memory = retrieve_similar_memories(sample_anomalies, symbol_detected)
         except Exception as e:
             logger.error(f"Failed to query memory: {e}")

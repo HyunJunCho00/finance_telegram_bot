@@ -54,17 +54,7 @@ class ChartGenerator:
 
     def _get_mode_config(self, mode: TradingMode) -> Dict:
         """Per-mode chart configuration."""
-        if mode == TradingMode.DAY_TRADING:
-            return {
-                'resample_rule': '15min',
-                'tail_candles': 32,   # ~8 hours of 15m
-                'min_candles': 10,
-                'title_suffix': '15M DAY_TRADING',
-                'fib_tf': '15m',
-                'structure_tfs': ['15m', '1h'],
-                'swing_tf': '1h',
-            }
-        elif mode == TradingMode.POSITION:
+        if mode == TradingMode.POSITION:
             return {
                 'resample_rule': '1D',
                 'tail_candles': 90,   # ~3 months
