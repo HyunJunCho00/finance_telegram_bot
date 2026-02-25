@@ -2,73 +2,36 @@ import asyncio
 import os
 import sys
 
-# Add parent directory to python path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(_PROJECT_ROOT)
 
-def _load_env_from_secret_manager():
-    """Load API keys from Secret Manager before initializing settings."""
-    from google.cloud import secretmanager
-    from dotenv import load_dotenv
-    import io
+from dotenv import load_dotenv
+load_dotenv(os.path.join(_PROJECT_ROOT, '.env'))
 
-    print("🔹 시크릿 매니저에서 환경변수(.env) 설정 불러오는 중...")
-    try:
-        client = secretmanager.SecretManagerServiceClient()
-        project_id = os.environ.get("PROJECT_ID", "tj-trading-384306")
-        name = f"projects/{project_id}/secrets/TRADING_BOT_ENV/versions/latest"
-        response = client.access_secret_version(request={"name": name})
-        env_content = response.payload.data.decode("utf-8")
-        
-        # Load the string content into the environment as if it was a .env file
-        load_dotenv(stream=io.StringIO(env_content))
-    except Exception as e:
-        print(f"⚠️ 환경변수를 시크릿 매니저에서 불러오지 못했습니다: {e}")
+api_id = os.environ.get("TELEGRAM_API_ID")
+api_hash = os.environ.get("TELEGRAM_API_HASH")
 
-# Must run BEFORE importing settings!
-_load_env_from_secret_manager()
+if not api_id or not api_hash:
+    print("❌ .env 파일에서 TELEGRAM_API_ID 또는 TELEGRAM_API_HASH를 찾을 수 없습니다.")
+    sys.exit(1)
 
 from telethon import TelegramClient
-from config.settings import settings
 
-_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SESSION_DIR = os.path.join(_PROJECT_ROOT, 'data')
+os.makedirs(_SESSION_DIR, exist_ok=True)
 SESSION_PATH = os.path.join(_SESSION_DIR, 'trading_session')
-_SESSION_SECRET_ID = "TELEGRAM_SESSION_FILE"
-
-def _ensure_session_local():
-    """Download session securely without importing database modules"""
-    import base64
-    from google.cloud import secretmanager
-    
-    os.makedirs(_SESSION_DIR, exist_ok=True)
-    
-    try:
-        client = secretmanager.SecretManagerServiceClient()
-        project_id = os.environ.get("PROJECT_ID", "tj-trading-384306")
-        name = f"projects/{project_id}/secrets/{_SESSION_SECRET_ID}/versions/latest"
-        response = client.access_secret_version(request={"name": name})
-        session_bytes = base64.b64decode(response.payload.data)
-        
-        with open(SESSION_PATH, 'wb') as f:
-            f.write(session_bytes)
-        
-        # Set exact file permissions to 600
-        import stat
-        os.chmod(SESSION_PATH, stat.S_IRUSR | stat.S_IWUSR)
-        print("✅ Session downloaded from Secret Manager successfully.")
-    except Exception as e:
-        print(f"⚠️ Could not download session from Secret Manager: {e}")
-        print("⚠️ Trying to use local session file if it exists...")
 
 async def main():
-    print("🔹 시크릿 매니저에서 세션을 불러오고 텔레그램에 연결 중입니다...")
-    _ensure_session_local()
+    print("🔹 텔레그램에 연결 중입니다...")
     
-    client = TelegramClient(SESSION_PATH, int(settings.TELEGRAM_API_ID), settings.TELEGRAM_API_HASH)
-    await client.connect()
+    # 세션 파일이 없으면 터미널에서 전화번호와 인증번호를 물어봅니다.
+    client = TelegramClient(SESSION_PATH, int(api_id), api_hash)
+    
+    # client.start() will automatically handle the interactive login prompt if needed
+    await client.start()
     
     if not await client.is_user_authorized():
-        print("❌ 세션이 만료되었거나 인증되지 않았습니다.")
+        print("❌ 로그인이 필요합니다. 프롬프트에 따라 인증을 진행해주세요.")
         return
         
     print("\n✅ 사용자님이 입장해 계신 채널 목록 (코드에 넣을 아이디 추출):\n")
@@ -76,7 +39,6 @@ async def main():
     print("-" * 75)
     
     async for dialog in client.iter_dialogs(limit=200):
-        # 그룹이나 채널만 필터링
         if dialog.is_channel or dialog.is_group:
             entity = dialog.entity
             username = getattr(entity, 'username', None)

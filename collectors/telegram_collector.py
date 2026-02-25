@@ -119,13 +119,17 @@ class TelegramCollector:
             "Binance_Announcements": "binance_announcements",
             "Whale_Alert": "whale_alert_io",
             "PeckShield": "peckshield",
-
+            
             # 신규 추가 (Arkham 봇 및 분석 채널)
             "Arkham_Alerter": "ArkhamAlertBot",
             "DeFi_Million": "DeFiMillionz",
             "CryptoQuant": "cryptoquant_official",
+            "Glassnode": "glassnode",
+
+            # 2026 베스트 스마트 머니 + 매크로 (유저 인증 팩트 체크 완료)
             "Unfolded": "unfolded",
-            "Glassnode": "glassnode"
+            "Lookonchain": "lookonchainchannel",
+            "Watcher_Guru": "WatcherGuru"
         }
 
     @property
