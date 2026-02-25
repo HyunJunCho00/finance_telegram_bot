@@ -389,8 +389,12 @@ class TelegramBulkLoader:
         from collectors.telegram_collector import telegram_collector
         import asyncio
 
-        logger.info(f"Fetching Telegram messages: last {days} days")
-        hours = days * 24
+        if days == 0:
+            logger.info("Fetching Telegram messages: ALL HISTORY (from channel inception)")
+            hours = None
+        else:
+            logger.info(f"Fetching Telegram messages: last {days} days")
+            hours = days * 24
 
         try:
             loop = asyncio.new_event_loop()
@@ -952,15 +956,30 @@ def run_cold_start(mode: str = "all", days: int = 210,
     # ── Telegram Messages ──
     if mode in ("all", "telegram"):
         loader = TelegramBulkLoader()
-        latest = _get_latest_timestamp("telegram_messages")
-        if latest:
-            elapsed = (datetime.now(timezone.utc) - latest).total_seconds() / 86400
-            effective_days_t = max(1, int(elapsed) + 1)
-            logger.info(f"[RESUME] Telegram: DB has data up to {latest}, fetching last {effective_days_t} days")
-        else:
-            effective_days_t = effective_telegram_days
-        count = loader.load(days=effective_days_t)
+        logger.info("[COLD START] Telegram: Fetching FULL history for all channels (0 days limit).")
+        count = loader.load(days=0)
         results["telegram"] = {"messages": count}
+
+        # Print channel statistics
+        try:
+            from config.database import db
+            channels = [
+                "WalterBloomberg", "TreeNewsFeed", "cointelegraph", "wublockchainenglish",
+                "binance_announcements", "whale_alert_io", "peckshield", "ArkhamAlertBot",
+                "DeFiMillionz", "cryptoquant_official", "unfolded", "glassnode",
+                "lookonchainchannel", "WatcherGuru"
+            ]
+            logger.info("Current Telegram message counts in database:")
+            total = 0
+            for ch in channels:
+                res = db.supabase.table('telegram_messages').select('id', count='exact').eq('channel', ch).execute()
+                c = res.count if res.count else 0
+                if c > 0:
+                    logger.info(f"  {ch:<30} | {c:,} msgs")
+                total += c
+            logger.info(f"Total Telegram messages stored: {total:,}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch telegram stats: {e}")
 
     # ── Fear & Greed Index ──
     if mode in ("all", "fear_greed"):

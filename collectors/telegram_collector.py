@@ -150,13 +150,15 @@ class TelegramCollector:
                 logger.error(f"Telethon client init failed (will skip Telegram collection): {e}")
         return self._client
 
-    async def fetch_recent_messages(self, hours: int = 4) -> List[Dict]:
+    async def fetch_recent_messages(self, hours: Optional[int] = 4) -> List[Dict]:
         if self.client is None:
             logger.warning("Telegram client unavailable — skipping message fetch")
             return []
 
         messages = []
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+        cutoff_time = None
+        if hours and hours > 0:
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         try:
             async with self.client:
@@ -166,10 +168,10 @@ class TelegramCollector:
 
                         async for message in self.client.iter_messages(
                             entity,
-                            limit=100,
+                            limit=None,  # 제한 없이 cutoff_time까지 전부 조회
                             offset_date=datetime.now(timezone.utc)
                         ):
-                            if message.date.replace(tzinfo=timezone.utc) < cutoff_time:
+                            if cutoff_time and message.date.replace(tzinfo=timezone.utc) < cutoff_time:
                                 break
 
                             if message.message:
