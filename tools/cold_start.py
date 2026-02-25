@@ -978,7 +978,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
             logger.info("Current Telegram message counts in database:")
             total = 0
             for ch in channels:
-                res = db.supabase.table('telegram_messages').select('id', count='exact').eq('channel', ch).execute()
+                res = db.client.table('telegram_messages').select('id', count='exact').limit(1).eq('channel', ch).execute()
                 c = res.count if res.count else 0
                 if c > 0:
                     logger.info(f"  {ch:<30} | {c:,} msgs")

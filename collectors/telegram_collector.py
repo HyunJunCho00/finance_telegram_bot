@@ -52,7 +52,13 @@ def _download_session_from_secret_manager(local_path: str):
         client = secretmanager.SecretManagerServiceClient()
         name = f"projects/{project_id}/secrets/{_SESSION_SECRET_ID}/versions/latest"
         response = client.access_secret_version(request={"name": name})
-        session_bytes = base64.b64decode(response.payload.data)
+        raw = base64.b64decode(response.payload.data)
+        # Try zlib decompression (new format). Fall back to raw bytes (legacy format).
+        try:
+            import zlib
+            session_bytes = zlib.decompress(raw)
+        except Exception:
+            session_bytes = raw
 
         with open(local_path, 'wb') as f:
             f.write(session_bytes)
@@ -78,10 +84,12 @@ def upload_session_to_secret_manager():
         client = secretmanager.SecretManagerServiceClient()
         parent = f"projects/{project_id}/secrets/{_SESSION_SECRET_ID}"
 
-        # Read and base64-encode
+        # Read, compress, and base64-encode to fit Secret Manager's 64KB payload limit
         with open(session_file, 'rb') as f:
             session_bytes = f.read()
-        encoded = base64.b64encode(session_bytes)
+        import zlib
+        compressed = zlib.compress(session_bytes, level=9)
+        encoded = base64.b64encode(compressed)
 
         # Ensure secret exists (create if not)
         try:
