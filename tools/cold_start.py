@@ -40,7 +40,13 @@ import yfinance as yf
 from loguru import logger
 
 # Add project root to path
+import os
 sys.path.insert(0, ".")
+
+# 수동 실행 시 환경변수가 날아가는 것을 방지하기 위해 .env 강제 로드 및 시크릿 매니저 지정
+from dotenv import load_dotenv
+load_dotenv()
+os.environ.setdefault("USE_SECRET_MANAGER", "true")
 
 from config.settings import settings
 from config.database import db
