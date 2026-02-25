@@ -291,7 +291,6 @@ class SecretManager:
             "MILVUS_URI",
             "MILVUS_TOKEN",
             "GCS_ARCHIVE_BUCKET",
-            "ENABLE_GCS_ARCHIVE",
             "DUNE_API_KEY",
         ]
 
@@ -324,6 +323,8 @@ def get_settings() -> Settings:
 
         sm = SecretManager(project_id)
         secrets = sm.load_all_secrets()
+        # Filter out empty strings so Pydantic uses field defaults instead of failing validation
+        secrets = {k: v for k, v in secrets.items() if v != ""}
 
         settings = Settings(
             PROJECT_ID=project_id,
