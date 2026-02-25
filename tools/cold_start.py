@@ -47,7 +47,23 @@ from config.database import db
 from processors.gcs_parquet import gcs_parquet_store
 
 
-# ─────────────── OHLCV Bulk Loader ───────────────
+# ─────────────── Resume Helper ───────────────
+
+def _get_latest_timestamp(table: str, symbol: str = None, exchange: str = None) -> Optional[datetime]:
+    """Query Supabase for the latest timestamp in a table, for resume support."""
+    try:
+        query = db.client.table(table).select("timestamp").order("timestamp", desc=True).limit(1)
+        if symbol:
+            query = query.eq("symbol", symbol)
+        if exchange:
+            query = query.eq("exchange", exchange)
+        response = query.execute()
+        if response.data:
+            return pd.Timestamp(response.data[0]['timestamp']).to_pydatetime().replace(tzinfo=timezone.utc)
+    except Exception as e:
+        logger.warning(f"Resume check failed for {table}: {e}")
+    return None
+
 
 class OHLCVBulkLoader:
     """Load historical 1m OHLCV + CVD from Binance Futures."""
@@ -871,7 +887,18 @@ def run_cold_start(mode: str = "all", days: int = 210,
         loader = OHLCVBulkLoader()
         for symbol in symbols:
             end = datetime.now(timezone.utc)
-            start = end - timedelta(days=effective_ohlcv_days)
+            default_start = end - timedelta(days=effective_ohlcv_days)
+            # Resume: check DB for latest existing data
+            latest = _get_latest_timestamp("market_data", symbol=symbol, exchange="binance")
+            if latest and latest > default_start:
+                start = latest + timedelta(minutes=1)
+                logger.info(f"[RESUME] {symbol} OHLCV: DB has data up to {latest}, fetching from {start}")
+            else:
+                start = default_start
+            if start >= end:
+                logger.info(f"[SKIP] {symbol} OHLCV: already up to date")
+                results[f"ohlcv_{symbol}"] = {"status": "already_up_to_date"}
+                continue
             df = loader.fetch_range(symbol, start, end)
             db_count = loader.save_to_db(df, db_days=db_days)
             gcs_result = loader.save_to_gcs(df, symbol)
@@ -885,7 +912,15 @@ def run_cold_start(mode: str = "all", days: int = 210,
     if mode in ("all", "upbit"):
         loader = UpbitBulkLoader()
         for symbol in ["BTC/KRW", "ETH/KRW"]:
-            df = loader.fetch_range(symbol, effective_upbit_days)
+            db_symbol = symbol.replace("/", "")
+            latest = _get_latest_timestamp("market_data", symbol=db_symbol, exchange="upbit")
+            if latest:
+                elapsed = (datetime.now(timezone.utc) - latest).total_seconds() / 86400
+                effective_days = max(1, int(elapsed) + 1)  # fetch from last data + 1 day buffer
+                logger.info(f"[RESUME] {symbol} Upbit: DB has data up to {latest}, fetching last {effective_days} days")
+            else:
+                effective_days = effective_upbit_days
+            df = loader.fetch_range(symbol, effective_days)
             db_count = loader.save_to_db(df, db_days=db_days)
             gcs_result = loader.save_to_gcs(df, symbol)
             results[f"upbit_{symbol}"] = {
@@ -898,7 +933,14 @@ def run_cold_start(mode: str = "all", days: int = 210,
     if mode in ("all", "funding"):
         loader = FundingBulkLoader()
         for symbol in symbols:
-            df = loader.fetch_range(symbol, days=effective_funding_days)
+            latest = _get_latest_timestamp("funding_data", symbol=symbol)
+            if latest:
+                elapsed = (datetime.now(timezone.utc) - latest).total_seconds() / 86400
+                effective_days_f = max(1, int(elapsed) + 1)
+                logger.info(f"[RESUME] {symbol} Funding: DB has data up to {latest}, fetching last {effective_days_f} days")
+            else:
+                effective_days_f = effective_funding_days
+            df = loader.fetch_range(symbol, days=effective_days_f)
             db_count = loader.save_to_db(df, db_days=db_days)
             gcs_result = loader.save_to_gcs(df, symbol)
             results[f"funding_{symbol}"] = {
@@ -910,13 +952,27 @@ def run_cold_start(mode: str = "all", days: int = 210,
     # ── Telegram Messages ──
     if mode in ("all", "telegram"):
         loader = TelegramBulkLoader()
-        count = loader.load(days=effective_telegram_days)
+        latest = _get_latest_timestamp("telegram_messages")
+        if latest:
+            elapsed = (datetime.now(timezone.utc) - latest).total_seconds() / 86400
+            effective_days_t = max(1, int(elapsed) + 1)
+            logger.info(f"[RESUME] Telegram: DB has data up to {latest}, fetching last {effective_days_t} days")
+        else:
+            effective_days_t = effective_telegram_days
+        count = loader.load(days=effective_days_t)
         results["telegram"] = {"messages": count}
 
     # ── Fear & Greed Index ──
     if mode in ("all", "fear_greed"):
         loader = FearGreedBulkLoader()
-        df = loader.fetch_range(days=effective_fear_greed_days)
+        latest = _get_latest_timestamp("fear_greed_data")
+        if latest:
+            elapsed = (datetime.now(timezone.utc) - latest).total_seconds() / 86400
+            effective_days_fg = max(1, int(elapsed) + 1)
+            logger.info(f"[RESUME] Fear & Greed: DB has data up to {latest}, fetching last {effective_days_fg} days")
+        else:
+            effective_days_fg = effective_fear_greed_days
+        df = loader.fetch_range(days=effective_days_fg)
         count = loader.save_to_db(df)
         results["fear_greed"] = {"total_records": len(df), "db_rows": count}
 
@@ -926,14 +982,28 @@ def run_cold_start(mode: str = "all", days: int = 210,
         deribit_currencies = [s[:-4] for s in symbols if s.endswith("USDT")
                               and s[:-4] in ("BTC", "ETH")]
         for currency in deribit_currencies:
-            df = loader.fetch_range(currency, days=effective_deribit_days)
+            latest = _get_latest_timestamp("deribit_data", symbol=currency)
+            if latest:
+                elapsed = (datetime.now(timezone.utc) - latest).total_seconds() / 86400
+                effective_days_d = max(1, int(elapsed) + 1)
+                logger.info(f"[RESUME] Deribit DVOL {currency}: DB has data up to {latest}, fetching last {effective_days_d} days")
+            else:
+                effective_days_d = effective_deribit_days
+            df = loader.fetch_range(currency, days=effective_days_d)
             count = loader.save_to_db(df)
             results[f"deribit_dvol_{currency}"] = {"total_records": len(df), "db_rows": count}
 
     # ── Macro (FRED + yfinance) ──
     if mode in ("all", "macro"):
         loader = MacroBulkLoader()
-        df = loader.build_snapshots(days=effective_macro_days)
+        latest = _get_latest_timestamp("macro_data")
+        if latest:
+            elapsed = (datetime.now(timezone.utc) - latest).total_seconds() / 86400
+            effective_days_m = max(1, int(elapsed) + 1)
+            logger.info(f"[RESUME] Macro: DB has data up to {latest}, fetching last {effective_days_m} days")
+        else:
+            effective_days_m = effective_macro_days
+        df = loader.build_snapshots(days=effective_days_m)
         count = loader.save_to_db(df)
         results["macro"] = {"total_records": len(df), "db_rows": count}
 
