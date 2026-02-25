@@ -65,22 +65,36 @@ class TradeExecutor:
             if price <= 0: return {"success": False, "error": "Could not fetch price"}
             
             # V8 Multi-Exchange Wallet Balances
+            tp_price = float(final_decision.get("take_profit", 0))
+            sl_price = float(final_decision.get("stop_loss", 0))
+
             if target_exchange == 'split':
                 alloc_pct = allocation_pct / 100.0
                 binance_notional = (settings.BINANCE_PAPER_BALANCE_USD * alloc_pct * leverage) * 0.5
-                upbit_notional = (settings.UPBIT_PAPER_BALANCE_KRW * alloc_pct * leverage) * 0.5
+                # [FIX HIGH-8] Upbit is spot-only — no leverage
+                upbit_notional = (settings.UPBIT_PAPER_BALANCE_KRW * alloc_pct * 1) * 0.5
                 
-                intent_b = state_manager.add_intent(symbol=symbol, direction=direction, style=exec_style, amount=binance_notional, exchange="binance")
-                intent_u = state_manager.add_intent(symbol=symbol, direction=direction, style=exec_style, amount=upbit_notional, exchange="upbit")
+                intent_b = state_manager.add_intent(
+                    symbol=symbol, direction=direction, style=exec_style,
+                    amount=binance_notional, exchange="binance",
+                    leverage=leverage, tp_price=tp_price, sl_price=sl_price,
+                )
+                intent_u = state_manager.add_intent(
+                    symbol=symbol, direction=direction, style=exec_style,
+                    amount=upbit_notional, exchange="upbit",
+                    leverage=1, tp_price=tp_price, sl_price=sl_price,
+                )
                 
                 receipts = [
                     {"order_id": intent_b, "exchange": "BINANCE", "side": direction, "notional": binance_notional, "paper": settings.PAPER_TRADING_MODE, "note": f"SPLIT Intent: {exec_style}"},
-                    {"order_id": intent_u, "exchange": "UPBIT", "side": direction, "notional": upbit_notional, "paper": settings.PAPER_TRADING_MODE, "note": f"SPLIT Intent: {exec_style}"}
+                    {"order_id": intent_u, "exchange": "UPBIT", "side": direction, "notional": upbit_notional, "paper": settings.PAPER_TRADING_MODE, "note": f"SPLIT Intent: {exec_style} (lev=1x)"}
                 ]
                 total_not_usd = binance_notional # Reporting only USD side for summary
             else:
-                wallet_balance = settings.BINANCE_PAPER_BALANCE_USD if target_exchange == "binance" else settings.UPBIT_PAPER_BALANCE_KRW 
-                target_notional = wallet_balance * (allocation_pct / 100.0) * leverage
+                # Upbit spot: force leverage=1
+                lev_for_exchange = 1 if target_exchange == 'upbit' else leverage
+                wallet_balance = settings.BINANCE_PAPER_BALANCE_USD if target_exchange == "binance" else settings.UPBIT_PAPER_BALANCE_KRW
+                target_notional = wallet_balance * (allocation_pct / 100.0) * lev_for_exchange
                 
                 # V5: Register Intent with Local State Manager instead of immediate naive execution
                 intent_id = state_manager.add_intent(
@@ -88,7 +102,10 @@ class TradeExecutor:
                     direction=direction,
                     style=exec_style,
                     amount=target_notional,
-                    exchange=target_exchange
+                    exchange=target_exchange,
+                    leverage=lev_for_exchange,
+                    tp_price=tp_price,
+                    sl_price=sl_price,
                 )
                 
                 # For logging in Telegram
@@ -120,7 +137,9 @@ class TradeExecutor:
         amount: float,
         leverage: int = 1,
         exchange: str = 'binance',
-        style: str = "SMART_DCA"
+        style: str = "SMART_DCA",
+        tp_price: float = 0.0,
+        sl_price: float = 0.0,
     ) -> Dict:
         try:
             side = side.upper()
@@ -128,13 +147,13 @@ class TradeExecutor:
 
             # Default-safe path: no real order API call
             if settings.PAPER_TRADING_MODE:
-                result = self._simulate_order(symbol, side, amount, leverage, exchange, style)
+                result = self._simulate_order(symbol, side, amount, leverage, exchange, style, tp_price, sl_price)
             else:
                 if exchange == 'binance':
                     result = self._execute_binance(symbol, side, amount, leverage)
                 elif exchange == 'upbit':
                     if settings.UPBIT_PAPER_ONLY:
-                        result = self._simulate_order(symbol, side, amount, leverage, exchange, style)
+                        result = self._simulate_order(symbol, side, amount, leverage, exchange, style, tp_price, sl_price)
                     else:
                         result = self._execute_upbit(symbol, side, amount)
                 elif exchange == 'coinbase':
@@ -162,15 +181,22 @@ class TradeExecutor:
                     if p:
                         return float(p)
 
+            # [FIX SILENT-3] CCXT requires slash format: BTCUSDT → BTC/USDT
+            ccxt_symbol = symbol
+            if 'USDT' in symbol and '/' not in symbol:
+                ccxt_symbol = symbol.replace('USDT', '/USDT')
+            elif 'KRW' in symbol and '/' not in symbol:
+                ccxt_symbol = symbol.replace('KRW', '/KRW')
+
             # default: live ticker reference
             ex = self.binance if exchange == 'binance' else self.upbit if exchange == 'upbit' else self.coinbase
-            ticker = ex.fetch_ticker(symbol)
+            ticker = ex.fetch_ticker(ccxt_symbol)
             return float(ticker.get('last') or ticker.get('close') or 0)
         except Exception as e:
             logger.warning(f"Reference price fetch failed ({exchange}, {symbol}): {e}")
             return 0.0
 
-    def _simulate_order(self, symbol: str, side: str, amount: float, leverage: int, exchange: str, style: str) -> Dict:
+    def _simulate_order(self, symbol: str, side: str, amount: float, leverage: int, exchange: str, style: str, tp_price: float = 0.0, sl_price: float = 0.0) -> Dict:
         price = self._get_reference_price(symbol, exchange)
         if not price:
             return {"success": False, "error": "Could not get reference price"}
@@ -185,7 +211,9 @@ class TradeExecutor:
             amount_usd=amount,
             leverage=leverage,
             style=style,
-            raw_price=price
+            raw_price=price,
+            tp_price=tp_price,
+            sl_price=sl_price,
         )
         
         if not sim_res.get('success'):

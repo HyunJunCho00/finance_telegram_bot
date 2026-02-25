@@ -18,7 +18,6 @@ from executors.order_manager import execution_desk
 from executors.evaluator_daemon import EvaluatorDaemon
 from executors.paper_exchange import paper_engine
 from loguru import logger
-import ccxt
 import sys
 import threading
 
@@ -33,20 +32,26 @@ def job_1min_tick():
         logger.error(f"1-minute tick job error: {e}")
 
 def job_1min_execution():
-    """V5: Process Orders, V7: Check Margin Calls"""
+    """V5: Process Orders, V7: Check Margin Calls + TP/SL"""
     try:
         execution_desk.process_intents()
         
         if settings.PAPER_TRADING_MODE:
             prices = {}
-            ex = ccxt.binance()
-            for symbol in settings.trading_symbols:
+            # [FIX HIGH-13] Reuse existing authenticated CCXT instance
+            from executors.trade_executor import trade_executor
+            ex = trade_executor.binance
+            for symbol in settings.trading_symbols_slash:
                 try:
                     t = ex.fetch_ticker(symbol)
-                    prices[symbol] = float(t['last'])
+                    # Map back to canonical format (BTC/USDT -> BTCUSDT)
+                    canonical = symbol.replace('/', '')
+                    prices[canonical] = float(t['last'])
                 except Exception:
                     pass
             paper_engine.check_liquidations(prices)
+            # [FIX CRITICAL-2] Actually call check_tp_sl — was implemented but never invoked
+            paper_engine.check_tp_sl(prices)
             
     except Exception as e:
         logger.error(f"1-minute execution job error: {e}")
@@ -172,6 +177,17 @@ def main():
     except Exception as e:
         logger.warning(f"WebSocket collector unavailable: {e}")
 
+    # [FIX MEDIUM-18] WebSocket thread health check
+    def job_5m_ws_health_check():
+        try:
+            from collectors.websocket_collector import websocket_collector
+            if hasattr(websocket_collector, '_thread'):
+                if not websocket_collector._thread.is_alive():
+                    logger.warning("WebSocket thread died — restarting...")
+                    websocket_collector.start_background()
+        except Exception as e:
+            logger.error(f"WS health check error: {e}")
+
     # Use BackgroundScheduler so we can also run the Telegram bot
     scheduler = BackgroundScheduler()
 
@@ -252,15 +268,67 @@ def main():
         max_instances=1
     )
 
-    scheduler.start()
-    logger.info("Scheduler started. Now starting Telegram bot...")
+    # [FIX MEDIUM-18] WebSocket thread health check — every 5 minutes
+    scheduler.add_job(
+        job_5m_ws_health_check,
+        'interval',
+        minutes=5,
+        id='job_5m_ws_health',
+        max_instances=1
+    )
 
-    # Run Telegram bot in the main thread (blocking)
+    scheduler.start()
+    logger.info("Scheduler started.")
+
+    # [FIX Cold Start] Run initial data collection immediately so first analysis has data
+    logger.info("Running initial data collection (cold start bootstrap)...")
+    _initial_collectors = [
+        ("Price + Funding + Microstructure", lambda: (collector.run(), funding_collector.run(), microstructure_collector.run())),
+        ("Volatility", lambda: volatility_monitor.run()),
+        ("Deribit", lambda: deribit_collector.run()),
+        ("Fear & Greed", lambda: fear_greed_collector.run()),
+    ]
+    for name, fn in _initial_collectors:
+        try:
+            fn()
+            logger.info(f"  ✅ {name} collected")
+        except Exception as e:
+            logger.warning(f"  ⚠️ {name} collection failed (non-fatal): {e}")
+
+    # [FIX Cold Start] Run Telegram bot in a daemon thread — if it crashes,
+    # scheduler keeps running. This prevents a Telegram session error from
+    # killing the entire trading system.
+    def _run_telegram_bot():
+        try:
+            from bot.telegram_bot import trading_bot
+            trading_bot.run()  # blocking within this thread
+        except Exception as e:
+            logger.error(f"Telegram bot crashed: {e}")
+            logger.info("Trading system continues WITHOUT Telegram bot commands.")
+
+    bot_thread = threading.Thread(target=_run_telegram_bot, name="telegram-bot", daemon=True)
+    bot_thread.start()
+    logger.info("Telegram bot started in background thread.")
+
+    # Main thread: keep alive + graceful shutdown
     try:
-        from bot.telegram_bot import trading_bot
-        trading_bot.run()  # This blocks (polling loop)
+        import time
+        while True:
+            time.sleep(60)
+            # Optional: restart bot thread if it dies
+            if not bot_thread.is_alive():
+                logger.warning("Telegram bot thread died — restarting in 30s...")
+                time.sleep(30)
+                bot_thread = threading.Thread(target=_run_telegram_bot, name="telegram-bot", daemon=True)
+                bot_thread.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down...")
+        # Upload Telegram session to Secret Manager before exit
+        try:
+            from collectors.telegram_collector import upload_session_to_secret_manager
+            upload_session_to_secret_manager()
+        except Exception:
+            pass
         try:
             from collectors.websocket_collector import websocket_collector
             websocket_collector.stop()
@@ -268,22 +336,6 @@ def main():
             pass
         scheduler.shutdown()
         sys.exit(0)
-    except Exception as e:
-        logger.error(f"Telegram bot error: {e}")
-        logger.info("Bot failed but scheduler continues. Press Ctrl+C to stop.")
-        try:
-            import time
-            while True:
-                time.sleep(60)
-        except (KeyboardInterrupt, SystemExit):
-            logger.info("Shutting down...")
-            try:
-                from collectors.websocket_collector import websocket_collector
-                websocket_collector.stop()
-            except Exception:
-                pass
-            scheduler.shutdown()
-            sys.exit(0)
 
 
 if __name__ == "__main__":

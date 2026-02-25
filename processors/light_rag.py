@@ -26,6 +26,12 @@ from typing import Dict, List, Tuple, Optional, Set
 from collections import defaultdict
 from loguru import logger
 import json
+import os
+from pathlib import Path
+
+# [FIX HIGH-11] Persistent path for ingested IDs cache
+_BASE_DIR = Path(__file__).parent.parent
+_IDS_CACHE_PATH = str(_BASE_DIR / "data" / "ingested_ids.json")
 
 # Gemini embedding (google-genai SDK)
 try:
@@ -414,6 +420,10 @@ class MilvusVectorStore:
 class InMemoryFallback:
     """In-memory fallback when Neo4j/Milvus unavailable (local dev)."""
 
+    # [FIX MEDIUM-17] Memory caps to prevent OOM
+    MAX_ENTITIES = 10000
+    MAX_DOCUMENTS = 5000
+
     def __init__(self):
         self.edges = defaultdict(list)
         self.entity_meta = {}
@@ -423,6 +433,14 @@ class InMemoryFallback:
     def upsert_entity(self, name, entity_type, description, **kwargs):
         ts = kwargs.get("timestamp", "")
         name = name.lower()
+        # [FIX MEDIUM-17] Evict oldest 20% when cap reached
+        if len(self.entity_meta) >= self.MAX_ENTITIES and name not in self.entity_meta:
+            sorted_entities = sorted(self.entity_meta.items(), key=lambda x: x[1].get("last", ""))
+            to_remove = sorted_entities[:len(sorted_entities) // 5]
+            for old_name, _ in to_remove:
+                del self.entity_meta[old_name]
+                self.edges.pop(old_name, None)
+                self.edge_counts.pop(old_name, None)
         if name not in self.entity_meta:
             self.entity_meta[name] = {"type": entity_type, "desc": description, "count": 0, "first": ts}
         self.entity_meta[name]["count"] += 1
@@ -465,6 +483,11 @@ class InMemoryFallback:
         }
 
     def upsert_vector(self, doc_id, embedding, text, channel="", timestamp="", entities=None):
+        # [FIX MEDIUM-17] Evict oldest documents when cap reached
+        if len(self.documents) >= self.MAX_DOCUMENTS and doc_id not in self.documents:
+            sorted_docs = sorted(self.documents.items(), key=lambda x: x[1].get("timestamp", ""))
+            for old_id, _ in sorted_docs[:len(sorted_docs) // 5]:
+                del self.documents[old_id]
         self.documents[doc_id] = {
             "text": text[:1000], "embedding": embedding, "channel": channel,
             "timestamp": timestamp, "entities": entities or [],
@@ -561,8 +584,31 @@ Rules:
         # LLM client for extraction (lazy init)
         self._ai_client = None
 
-        # Dedup cache
-        self._ingested_ids: Set[str] = set()
+        # [FIX HIGH-11] Load from disk to avoid 1000+ LLM calls on restart
+        self._ingested_ids: Set[str] = self._load_ingested_ids()
+
+    def _load_ingested_ids(self) -> Set[str]:
+        """Load ingested message IDs from disk."""
+        try:
+            if os.path.exists(_IDS_CACHE_PATH):
+                with open(_IDS_CACHE_PATH, 'r', encoding='utf-8') as f:
+                    return set(json.load(f))
+        except Exception as e:
+            logger.warning(f"Failed to load ingested IDs cache: {e}")
+        return set()
+
+    def _save_ingested_ids(self):
+        """Persist ingested IDs to disk (keep latest 5000)."""
+        try:
+            os.makedirs(os.path.dirname(_IDS_CACHE_PATH), exist_ok=True)
+            ids_list = list(self._ingested_ids)
+            # Keep only the latest 5000 to bound file size
+            if len(ids_list) > 5000:
+                ids_list = ids_list[-5000:]
+            with open(_IDS_CACHE_PATH, 'w', encoding='utf-8') as f:
+                json.dump(ids_list, f)
+        except Exception as e:
+            logger.warning(f"Failed to save ingested IDs cache: {e}")
 
     def _get_ai_client(self):
         """Lazy-load AI client for LLM-based extraction."""
@@ -808,6 +854,9 @@ Rules:
                 )
 
         self._ingested_ids.add(doc_id)
+        # [FIX HIGH-11] Persist to disk for process restart resilience
+        if len(self._ingested_ids) % 50 == 0:  # Batch writes every 50 ingestions
+            self._save_ingested_ids()
 
         return {
             "status": "ingested",

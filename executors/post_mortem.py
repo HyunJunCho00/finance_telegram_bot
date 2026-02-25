@@ -9,8 +9,11 @@ from loguru import logger
 from config.database import db
 from agents.claude_client import claude_client
 from processors.light_rag import light_rag
+from pathlib import Path
 
-MEMORY_FILE_PATH = "data/episodic_memory.jsonl"
+# [FIX MEDIUM-16] Absolute path — works regardless of systemd WorkingDirectory
+_BASE_DIR = Path(__file__).parent.parent
+MEMORY_FILE_PATH = str(_BASE_DIR / "data" / "episodic_memory.jsonl")
 
 def initialize_memory_db():
     os.makedirs(os.path.dirname(MEMORY_FILE_PATH), exist_ok=True)

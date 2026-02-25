@@ -105,14 +105,14 @@ Deribit Data: {deribit_context}
 Please execute your Risk Management oversight and output the final, safe JSON."""
 
         try:
-            # We use Gemini 3.1 Pro for the CRO. It's perfectly capable of enforcing rules reliably.
-            # Using Judge (Opus) again would be too slow/expensive.
+            # [FIX MEDIUM-14] CRO uses GPT-5.2 via role="macro" routing.
+            # GPT-5.2 excels at rule enforcement and macro risk analysis.
             response = claude_client.generate_response(
                 system_prompt=self.SYSTEM_PROMPT,
                 user_message=user_message,
                 temperature=0.1,  # Very strict, less creative
                 max_tokens=600,
-                role="macro" # Recyling the macro rate limits for the risk module
+                role="macro"  # Routes to settings.MODEL_MACRO (gpt-5.2)
             )
             return self._parse_decision(response, draft_decision)
             

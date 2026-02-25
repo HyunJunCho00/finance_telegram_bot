@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 
 from google import genai
 from google.genai import types
-from anthropic import AnthropicVertex, Anthropic
+from anthropic import Anthropic
 from openai import OpenAI
 from loguru import logger
 
@@ -29,10 +29,10 @@ class AIClient:
             location=settings.VERTEX_REGION_GEMINI or "global",
         )
         
-        # Anthropic Client (Direct API if key exists, otherwise Vertex AI)
+        # Anthropic Client (Direct API only — NOT GCP Model Garden)
         self._claude_client = None
         
-        # OpenAI Client
+        # OpenAI Client (Direct API only — NOT GCP Model Garden)
         self._openai_client = None
 
         # Backward-compatible defaults
@@ -43,14 +43,10 @@ class AIClient:
     def claude_client(self):
         if self._claude_client is None:
             if settings.ANTHROPIC_API_KEY:
-                # Direct Anthropic API
                 self._claude_client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
             else:
-                # Fallback to GCP Vertex AI
-                self._claude_client = AnthropicVertex(
-                    region=settings.REGION, # usually us-central1 for claude
-                    project_id=settings.PROJECT_ID,
-                )
+                logger.warning("ANTHROPIC_API_KEY not set — Claude models will fall back to Gemini")
+                return None
         return self._claude_client
 
     @property
@@ -59,7 +55,9 @@ class AIClient:
             if settings.OPENAI_API_KEY:
                 self._openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
             else:
-                raise ValueError("OPENAI_API_KEY is not set.")
+                # [FIX SILENT-2] Don't crash — return None, let _generate_openai handle fallback
+                logger.warning("OPENAI_API_KEY not set — GPT models will fall back to Gemini")
+                return None
         return self._openai_client
 
     def _get_role_model_and_cap(self, role: str, use_premium: bool) -> Tuple[str, int]:
@@ -183,6 +181,18 @@ class AIClient:
         chart_image_b64: Optional[str] = None,
     ) -> str:
         try:
+            # Guard: if no API key, fall back to Gemini immediately
+            if self.claude_client is None:
+                logger.warning(f"Claude unavailable for {model_id}, falling back to Gemini")
+                return self._generate_gemini(
+                    model_id=self.default_model_id,
+                    system_prompt=system_prompt,
+                    user_message=user_message,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    chart_image_b64=chart_image_b64,
+                )
+
             content = []
 
             if chart_image_b64:
@@ -229,6 +239,18 @@ class AIClient:
         chart_image_b64: Optional[str] = None,
     ) -> str:
         try:
+            # [FIX SILENT-2] Guard: if no API key, fall back immediately
+            if self.openai_client is None:
+                logger.warning(f"OpenAI unavailable for {model_id}, falling back to Gemini")
+                return self._generate_gemini(
+                    model_id=self.default_model_id,
+                    system_prompt=system_prompt,
+                    user_message=user_message,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    chart_image_b64=chart_image_b64,
+                )
+
             messages = []
             
             if system_prompt:

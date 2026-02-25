@@ -72,9 +72,10 @@ Swarm reasoning controls & Data Trust Hierarchy:
     def __init__(self):
         pass
 
-    def get_previous_decision(self) -> Optional[Dict]:
+    def get_previous_decision(self, symbol: str = "BTCUSDT") -> Optional[Dict]:
+        """[FIX CRITICAL-6] symbol parameter added — was NameError (symbol not in scope)."""
         try:
-            latest_report = db.get_latest_report()
+            latest_report = db.get_latest_report(symbol=symbol)
             if latest_report and latest_report.get('final_decision'):
                 fd = latest_report['final_decision']
                 if isinstance(fd, str):
@@ -98,7 +99,7 @@ Swarm reasoning controls & Data Trust Hierarchy:
         symbol: str = "BTCUSDT"
     ) -> Dict:
         prompt = f"{self.SWING_PROMPT}\n\n{self.DEBATE_APPENDIX}"
-        previous_decision = self.get_previous_decision()
+        previous_decision = self.get_previous_decision(symbol=symbol)
 
         previous_context = "No previous decision available."
         if previous_decision:
@@ -167,12 +168,44 @@ Make your trading decision. Output as JSON."""
             return self._default_decision()
 
     def _parse_decision(self, response: str) -> Dict:
+        """Parse JSON from LLM response. Uses bracket-depth counting to find
+        the correct outermost JSON object, even if the LLM includes nested
+        JSON examples inside string values like 'reasoning'."""
         try:
+            # Strategy: find first '{', then count bracket depth to find matching '}'
             start_idx = response.find('{')
+            if start_idx == -1:
+                return self._default_decision()
+
+            depth = 0
+            in_string = False
+            escape_next = False
+            for i in range(start_idx, len(response)):
+                c = response[i]
+                if escape_next:
+                    escape_next = False
+                    continue
+                if c == '\\':
+                    escape_next = True
+                    continue
+                if c == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        json_str = response[start_idx:i + 1]
+                        return json.loads(json_str)
+
+            # Fallback: simple rfind (original behavior)
             end_idx = response.rfind('}') + 1
-            if start_idx != -1 and end_idx > start_idx:
-                json_str = response[start_idx:end_idx]
-                return json.loads(json_str)
+            if end_idx > start_idx:
+                return json.loads(response[start_idx:end_idx])
+
             return self._default_decision()
         except Exception as e:
             logger.error(f"Decision parsing error: {e}")

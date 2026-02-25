@@ -49,6 +49,11 @@ import numpy as np
 import pandas as pd
 import json
 
+# [FIX CRASH-2] Module-level cache to avoid 4x duplicate DB queries per cycle
+# Cleared at the start of each analysis in run_analysis()
+_df_cache: dict = {}        # {symbol: DataFrame}
+_market_data_cache: dict = {}  # {symbol: market_data_dict}
+
 try:
     from langgraph.graph import StateGraph, END
     LANGGRAPH_AVAILABLE = True
@@ -87,6 +92,7 @@ class AnalysisState(TypedDict):
     anomalies: list
     blackboard: Dict[str, dict]
     conviction_score: float
+    raw_funding: dict  # [FIX] Cached from node_funding_context for report reuse
 
     # Chart
     chart_image_b64: Optional[str]
@@ -112,6 +118,9 @@ def node_collect_data(state: AnalysisState) -> dict:
     if df.empty:
         return {"df_size": 0, "errors": state.get("errors", []) + [f"No market data for {symbol}"]}
 
+    # [FIX CRASH-2] Cache for reuse by node_triage, node_generate_chart, node_generate_report
+    _df_cache[symbol] = df
+
     # Load higher timeframe data from GCS for deeper indicator history
     df_4h, df_1d, df_1w = None, None, None
     try:
@@ -127,6 +136,9 @@ def node_collect_data(state: AnalysisState) -> dict:
 
     market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
     compact = math_engine.format_compact(market_data)
+
+    # [FIX RESOURCE-1] Cache market_data so node_generate_chart doesn't recompute
+    _market_data_cache[symbol] = market_data
 
     # V5: Fetch currently active orders for this symbol to inject into the PM context
     all_active = state_manager.get_active_orders()
@@ -200,10 +212,11 @@ def node_funding_context(state: AnalysisState) -> dict:
             funding_data['oi_okx'] = raw_funding.get('oi_okx', 0)
 
         funding_str = json.dumps(funding_data, default=str) if funding_data else "No funding data."
-        return {"funding_context": funding_str}
+        # [FIX] Store raw_funding for node_generate_report reuse (eliminates duplicate query)
+        return {"funding_context": funding_str, "raw_funding": raw_funding}
     except Exception as e:
         logger.error(f"Funding context error: {e}")
-        return {"funding_context": "No funding data."}
+        return {"funding_context": "No funding data.", "raw_funding": {}}
 
 
 def node_cvd_context(state: AnalysisState) -> dict:
@@ -435,7 +448,10 @@ def node_triage(state: AnalysisState) -> dict:
     
     # 1. Volume-Backed Breakout (Mathematical)
     try:
-        df = db.get_latest_market_data(symbol, limit=4320) # 3 days of 1m
+        # [FIX CRASH-2] Use cached DataFrame from node_collect_data
+        df = _df_cache.get(symbol)
+        if df is None:
+            df = db.get_latest_market_data(symbol, limit=4320)  # fallback if cache miss
         if not df.empty:
             df_1h = df.resample('1h', on='timestamp').agg({
                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
@@ -572,7 +588,10 @@ def node_generate_chart(state: AnalysisState) -> dict:
     mode = TradingMode(state["mode"])
     candle_limit = settings.candle_limit
 
-    df = db.get_latest_market_data(symbol, limit=candle_limit)
+    # [FIX CRASH-2] Use cached DataFrame from node_collect_data
+    df = _df_cache.get(symbol)
+    if df is None:
+        df = db.get_latest_market_data(symbol, limit=candle_limit)  # fallback
     if df.empty:
         return {"chart_image_b64": None, "chart_bytes": None}
 
@@ -589,7 +608,10 @@ def node_generate_chart(state: AnalysisState) -> dict:
     except Exception as e:
         logger.warning(f"GCS load for chart skipped: {e}")
 
-    market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
+    # [FIX RESOURCE-1] Use cached market_data from node_collect_data
+    market_data = _market_data_cache.get(symbol)
+    if market_data is None:
+        market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
 
     # Load liquidation data for chart markers
     liquidation_df = None
@@ -669,17 +691,25 @@ def node_generate_report(state: AnalysisState) -> dict:
     mode = TradingMode(state["mode"])
 
     candle_limit = settings.candle_limit
-    df = db.get_latest_market_data(symbol, limit=candle_limit)
-    market_data = math_engine.analyze_market(df, mode) if not df.empty else {}
+    # [FIX CRASH-2] Use cached DataFrame from node_collect_data
+    df = _df_cache.get(symbol)
+    if df is None:
+        df = db.get_latest_market_data(symbol, limit=candle_limit)  # fallback
+    # [FIX RESOURCE-1] Use cached market_data
+    market_data = _market_data_cache.get(symbol)
+    if market_data is None:
+        market_data = math_engine.analyze_market(df, mode) if not df.empty else {}
 
-    # Get raw funding for report
-    try:
-        response = db.client.table("funding_data")\
-            .select("*").eq("symbol", symbol)\
-            .order("timestamp", desc=True).limit(1).execute()
-        raw_funding = response.data[0] if response.data else {}
-    except Exception:
-        raw_funding = {}
+    # [FIX] Reuse raw_funding from node_funding_context (no duplicate Supabase query)
+    raw_funding = state.get("raw_funding", {})
+    if not raw_funding:
+        try:
+            response = db.client.table("funding_data")\
+                .select("*").eq("symbol", symbol)\
+                .order("timestamp", desc=True).limit(1).execute()
+            raw_funding = response.data[0] if response.data else {}
+        except Exception:
+            raw_funding = {}
 
     bb_str = json.dumps(state.get("blackboard", {}), indent=2)
     report = report_generator.generate_report(
@@ -693,12 +723,17 @@ def node_generate_report(state: AnalysisState) -> dict:
         mode=mode,
     )
     
-    # Fire and Forget Post-Mortem Logic
+    # [FIX CRITICAL-1] Pass actual last close price (was 0.0 → all episodic memory inverted)
+    # [FIX MEDIUM-19]  Include blackboard so post-mortem LLM has decision context
+    last_close = 0.0
+    if not df.empty:
+        last_close = float(df.iloc[-1]['close'])
     write_post_mortem({
         "symbol": symbol,
         "final_decision": state.get("final_decision", {}),
+        "blackboard": state.get("blackboard", {}),
         "bear_opinion": f"Anomalies: {state.get('anomalies', [])}"
-    }, current_price=0.0)  # Ideally pass actual last close price here
+    }, current_price=last_close)
 
     if report:
         chart_bytes = state.get("chart_bytes")
@@ -733,9 +768,12 @@ def _build_full_context(state: AnalysisState) -> str:
 # ── Conditional edge ──
 
 def route_triage(state: AnalysisState) -> str:
+    """[FIX CRITICAL-3] Always run Judge — SWING trading requires evaluation every cycle,
+    not only when anomalies are detected. Without this, positions are never re-evaluated
+    and new trend entries are missed in quiet markets."""
     anomalies = state.get("anomalies", [])
     if not anomalies:
-        return "generate_report"
+        return "generate_chart"  # → vlm_expert → judge_agent → risk_manager → execute_trade
     
     if "liquidation_cluster" in anomalies or "whale_cvd_divergence" in anomalies:
         return "liquidity_expert"
@@ -825,7 +863,7 @@ def build_analysis_graph():
         "microstructure_expert": "microstructure_expert",
         "macro_expert": "macro_expert",
         "generate_chart": "generate_chart",
-        "generate_report": "generate_report"
+        # [FIX SILENT-1] Removed dead "generate_report" — route_triage no longer returns it
     })
     
     graph.add_conditional_edges("liquidity_expert", route_swarm, {
@@ -879,6 +917,10 @@ class Orchestrator:
         mode = self.mode
         logger.info(f"Starting {'EMERGENCY' if is_emergency else 'SCHEDULED'} {mode.value.upper()} analysis for {symbol}")
 
+        # [FIX CRASH-2] Clear per-symbol cache at the start of each analysis
+        _df_cache.pop(symbol, None)
+        _market_data_cache.pop(symbol, None)
+
         if self.graph:
             return self._run_with_langgraph(symbol, mode, is_emergency)
         else:
@@ -908,6 +950,7 @@ class Orchestrator:
             "anomalies": [],
             "blackboard": {},
             "conviction_score": 0.0,
+            "raw_funding": {},
             "chart_image_b64": None,
             "chart_bytes": None,
             "final_decision": {},
@@ -930,12 +973,17 @@ class Orchestrator:
         }
 
         # Run each node sequentially
+        # [FIX CRITICAL-4] Replace undefined node_bull_agent/node_bear_agent/node_risk_agent
+        # with actual node functions defined in this module.
         for node_fn in [
             node_collect_data, node_perplexity_search, node_rag_ingest,
             node_funding_context, node_cvd_context, node_liquidation_context,
             node_rag_query, node_telegram_news, node_self_correction,
             node_microstructure_context, node_macro_context,
-            node_bull_agent, node_bear_agent, node_risk_agent,
+            node_deribit_context, node_fear_greed_context,
+            node_triage,
+            node_liquidity_expert, node_microstructure_expert,
+            node_macro_options_expert,
         ]:
             try:
                 update = node_fn(state)
@@ -956,6 +1004,18 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Judge error: {e}")
             state["final_decision"] = {"decision": "HOLD", "reasoning": str(e), "confidence": 0}
+
+        # [FIX CRASH-1] Risk Manager (CRO) — was completely missing from sequential fallback
+        try:
+            state.update(node_risk_manager(state))
+        except Exception as e:
+            logger.error(f"Risk Manager error (sequential): {e}")
+
+        # [FIX CRASH-1] Trade Execution — was missing, so Judge decisions were never executed
+        try:
+            state.update(node_execute_trade(state))
+        except Exception as e:
+            logger.error(f"Trade execution error (sequential): {e}")
 
         # Report
         try:

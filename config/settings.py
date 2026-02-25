@@ -18,9 +18,9 @@ class TradingMode(str, Enum):
 
 class Settings(BaseSettings):
     PROJECT_ID: str = ""
-    REGION: str = "us-central1"
-    VERTEX_REGION: str = ""
-    VERTEX_REGION_GEMINI: str = "global"
+    REGION: str = "asia-northeast3"          # VM 인프라 리전 (서울)
+    VERTEX_REGION: str = "global"            # 모델 호출 리전 (Gemini + Claude)
+    VERTEX_REGION_GEMINI: str = "global"     # Gemini 전용 (하위호환)
 
     SUPABASE_URL: str = ""
     SUPABASE_KEY: str = ""
@@ -125,10 +125,10 @@ class Settings(BaseSettings):
     MODEL_MACRO: str = "gpt-5.2"
     
     # 4. Supreme Logical Reasoning / Trade Execution
-    # claude-sonnet-4.6: The actual SOTA as of Feb 2026, featuring hybrid reasoning (extended thinking)
+    # claude-sonnet-4-6: The actual SOTA as of Feb 2026, featuring hybrid reasoning (extended thinking)
     # and sweeping coding/math benchmarks (e.g. 70.3% SWE-bench, 96.2% MATH 500).
-    MODEL_JUDGE: str = "claude-sonnet-4.6"
-    MODEL_SELF_CORRECTION: str = "claude-sonnet-4.6"
+    MODEL_JUDGE: str = "claude-sonnet-4-6"
+    MODEL_SELF_CORRECTION: str = "claude-sonnet-4-6"
 
     # Soft input caps (character-based) to improve token efficiency
     MAX_INPUT_CHARS_LIQUIDITY: int = 15000
