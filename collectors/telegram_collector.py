@@ -2,7 +2,7 @@ import os
 import stat
 import base64
 from datetime import datetime, timedelta, timezone
-from typing import List, Dict
+from typing import List, Dict, Optional
 from config.settings import settings
 from config.database import db
 from loguru import logger
@@ -161,18 +161,28 @@ class TelegramCollector:
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         try:
+            from telethon.errors import FloodWaitError
+            import asyncio
+
             async with self.client:
                 for channel_name, channel_username in self.channels.items():
                     try:
                         entity = await self.client.get_entity(channel_username)
+                        print(f"\n[{channel_name}] Starting fetch...", flush=True)
+                        count = 0
 
                         async for message in self.client.iter_messages(
                             entity,
-                            limit=None,  # 제한 없이 cutoff_time까지 전부 조회
-                            offset_date=datetime.now(timezone.utc)
+                            limit=None,
+                            offset_date=datetime.now(timezone.utc),
+                            wait_time=1,  # Proactive rate limiting: 1s between API calls
                         ):
                             if cutoff_time and message.date.replace(tzinfo=timezone.utc) < cutoff_time:
                                 break
+
+                            count += 1
+                            if count % 100 == 0:
+                                print(f"\r  [{channel_name}] Downloaded: {count:,} messages...", end="", flush=True)
 
                             if message.message:
                                 messages.append({
@@ -185,26 +195,67 @@ class TelegramCollector:
                                     'created_at': datetime.now(timezone.utc).isoformat()
                                 })
 
+                            # Save every 2000 messages to prevent OOM and save progress to GCS
+                            if len(messages) >= 2000:
+                                print(f"\r  [{channel_name}] Saving batch of 2000 to GCS + DB...", end="", flush=True)
+                                self.save_to_gcs(messages)
+                                self.save_to_database(messages)
+                                messages = []
+
+                    except FloodWaitError as e:
+                        wait = e.seconds + 5  # Buffer 5s on top of required wait
+                        print(f"\n  [{channel_name}] FloodWait: sleeping {wait}s as required by Telegram...", flush=True)
+                        await asyncio.sleep(wait)
+                        continue
                     except Exception as e:
                         logger.error(f"Error fetching from {channel_name}: {e}")
                         continue
 
-            # Upload session to Secret Manager after successful use (captures any auth updates)
+                    print(f"\r  [{channel_name}] Done. Total: {count:,} messages.          \n", end="", flush=True)
+
             upload_session_to_secret_manager()
         except Exception as e:
             logger.error(f"Telegram session error: {e}")
-            # Mark as failed so we don't retry session auth every cycle
             self._init_failed = True
             self._client = None
 
         return messages
+
+    def save_to_gcs(self, messages: List[Dict]) -> None:
+        """Save a batch of messages to GCS as monthly Parquet files.
+
+        Layout: gs://bucket/telegram/{channel}/{YYYY-MM}.parquet
+        Deduplication is done on (channel, message_id).
+        """
+        if not messages:
+            return
+        try:
+            from processors.gcs_parquet import gcs_parquet_store
+            if not gcs_parquet_store.enabled:
+                return
+
+            import pandas as pd
+            df = pd.DataFrame(messages)
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+            df['month'] = df['timestamp'].dt.strftime('%Y-%m')
+
+            for (channel, month), group in df.groupby(['channel', 'month']):
+                path = f"telegram/{channel}/{month}.parquet"
+                gcs_parquet_store._merge_upload_parquet(
+                    path,
+                    group.drop(columns=['month']),
+                    dedup_cols=['channel', 'message_id']
+                )
+            logger.info(f"GCS: saved {len(messages)} telegram messages")
+        except Exception as e:
+            logger.error(f"GCS telegram save error: {e}")
 
     def save_to_database(self, messages: List[Dict]) -> None:
         if messages:
             try:
                 for msg in messages:
                     db.insert_telegram_message(msg)
-                logger.info(f"Saved {len(messages)} telegram messages")
+                logger.info(f"Saved {len(messages)} telegram messages to DB")
             except Exception as e:
                 logger.error(f"Database save error: {e}")
 

@@ -307,6 +307,20 @@ class SecretManager:
 def get_settings() -> Settings:
     if os.getenv("USE_SECRET_MANAGER", "false").lower() == "true":
         project_id = os.getenv("PROJECT_ID", "")
+
+        # Auto-detect project ID from GCP metadata server if not set (VM 환경)
+        if not project_id:
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    "http://metadata.google.internal/computeMetadata/v1/project/project-id",
+                    headers={"Metadata-Flavor": "Google"}
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    project_id = resp.read().decode("utf-8").strip()
+            except Exception:
+                pass
+
         sm = SecretManager(project_id)
         secrets = sm.load_all_secrets()
 
