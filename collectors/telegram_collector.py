@@ -15,6 +15,9 @@ SESSION_PATH = os.path.join(_SESSION_DIR, 'trading_session')
 # Secret Manager secret ID for session file
 _SESSION_SECRET_ID = "TELEGRAM_SESSION_FILE"
 
+# GCS path for session backup (inside GCS_ARCHIVE_BUCKET)
+_GCS_SESSION_OBJECT = "telegram/session/trading_session.session"
+
 
 def _ensure_session_security():
     """Ensure session file exists with secure permissions (owner-only: 600).
@@ -22,10 +25,11 @@ def _ensure_session_security():
     """
     os.makedirs(_SESSION_DIR, exist_ok=True)
 
-    # ── Secret Manager Download (cold start) ──
+    # ── Session Download on cold start (Secret Manager → GCS fallback) ──
     session_file = SESSION_PATH + '.session'
     if not os.path.exists(session_file):
-        _download_session_from_secret_manager(session_file)
+        if not _download_session_from_secret_manager(session_file):
+            _download_session_from_gcs(session_file)
 
     # ── File permissions (Linux VM) ──
     for path in [session_file, SESSION_PATH + '.session-journal']:
@@ -40,12 +44,12 @@ def _ensure_session_security():
                 logger.warning(f"Could not set session file permissions: {e}")
 
 
-def _download_session_from_secret_manager(local_path: str):
-    """Download session file from Secret Manager (base64-encoded)."""
+def _download_session_from_secret_manager(local_path: str) -> bool:
+    """Download session file from Secret Manager (base64-encoded). Returns True on success."""
     project_id = settings.PROJECT_ID
     if not project_id or os.getenv("USE_SECRET_MANAGER", "false").lower() != "true":
-        logger.debug("Secret Manager not configured — using local-only session")
-        return
+        logger.debug("Secret Manager not configured — skipping SM download")
+        return False
 
     try:
         from google.cloud import secretmanager
@@ -63,31 +67,96 @@ def _download_session_from_secret_manager(local_path: str):
         with open(local_path, 'wb') as f:
             f.write(session_bytes)
         logger.info(f"✅ Session downloaded from Secret Manager ({_SESSION_SECRET_ID})")
+        return True
     except Exception as e:
         # Secret may not exist yet (first run) — this is expected
-        logger.info(f"Session not found in Secret Manager (will create after first auth): {e}")
+        logger.info(f"Session not found in Secret Manager (will try GCS fallback): {e}")
+        return False
+
+
+def _download_session_from_gcs(local_path: str) -> bool:
+    """Download session file from GCS bucket. Returns True on success."""
+    bucket_name = settings.GCS_ARCHIVE_BUCKET
+    if not bucket_name:
+        return False
+    try:
+        import zlib
+        from google.cloud import storage
+        client = storage.Client(project=settings.PROJECT_ID or None)
+        blob = client.bucket(bucket_name).blob(_GCS_SESSION_OBJECT)
+        if not blob.exists():
+            logger.info("Session not found in GCS (first run or bucket empty)")
+            return False
+        compressed = blob.download_as_bytes()
+        session_bytes = zlib.decompress(compressed)
+        with open(local_path, 'wb') as f:
+            f.write(session_bytes)
+        logger.info(f"✅ Session downloaded from GCS ({_GCS_SESSION_OBJECT}, {len(session_bytes):,} bytes)")
+        return True
+    except Exception as e:
+        logger.warning(f"Session GCS download failed: {e}")
+        return False
+
+
+def _upload_session_to_gcs(session_bytes: bytes) -> bool:
+    """Upload session file to GCS (no size limit, zlib-compressed raw bytes).
+    Returns True on success."""
+    bucket_name = settings.GCS_ARCHIVE_BUCKET
+    if not bucket_name:
+        return False
+    try:
+        import zlib
+        from google.cloud import storage
+        compressed = zlib.compress(session_bytes, level=9)
+        client = storage.Client(project=settings.PROJECT_ID or None)
+        blob = client.bucket(bucket_name).blob(_GCS_SESSION_OBJECT)
+        blob.upload_from_string(compressed, content_type="application/octet-stream")
+        logger.info(f"✅ Session uploaded to GCS ({_GCS_SESSION_OBJECT}, {len(session_bytes):,} bytes uncompressed)")
+        return True
+    except Exception as e:
+        logger.warning(f"Session GCS upload failed: {e}")
+        return False
 
 
 def upload_session_to_secret_manager():
-    """Upload session file to Secret Manager as a new version (base64-encoded).
+    """Upload session file to GCS (primary) and Secret Manager (best-effort).
     Call on shutdown or after successful Telegram auth."""
     project_id = settings.PROJECT_ID
-    if not project_id or os.getenv("USE_SECRET_MANAGER", "false").lower() != "true":
-        return
+    use_sm = os.getenv("USE_SECRET_MANAGER", "false").lower() == "true"
 
     session_file = SESSION_PATH + '.session'
     if not os.path.exists(session_file):
         return
 
+    with open(session_file, 'rb') as f:
+        session_bytes = f.read()
+
+    # ── Primary: GCS (no size limit) ──
+    gcs_ok = _upload_session_to_gcs(session_bytes)
+
+    # ── Delete local session files after successful GCS upload ──
+    # Session only needs to exist on disk while Telethon is running.
+    # After upload, wipe local copies so they don't persist on the VM.
+    if gcs_ok:
+        for path in [session_file, session_file + '-journal', session_file + '-wal', session_file + '-shm']:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                    logger.info(f"Local session file deleted (backed up to GCS): {path}")
+                except Exception as e:
+                    logger.warning(f"Could not delete local session file {path}: {e}")
+    else:
+        logger.warning("GCS upload failed — keeping local session file as fallback")
+
+    # ── Secondary: Secret Manager (best-effort, may fail if >64KB) ──
+    if not project_id or not use_sm:
+        return
     try:
+        import zlib
         from google.cloud import secretmanager
         client = secretmanager.SecretManagerServiceClient()
         parent = f"projects/{project_id}/secrets/{_SESSION_SECRET_ID}"
 
-        # Read, compress, and base64-encode to fit Secret Manager's 64KB payload limit
-        with open(session_file, 'rb') as f:
-            session_bytes = f.read()
-        import zlib
         compressed = zlib.compress(session_bytes, level=9)
         encoded = base64.b64encode(compressed)
 
@@ -102,13 +171,12 @@ def upload_session_to_secret_manager():
             })
             logger.info(f"Created secret: {_SESSION_SECRET_ID}")
 
-        # Add new version
         client.add_secret_version(
             request={"parent": parent, "payload": {"data": encoded}}
         )
-        logger.info(f"✅ Session uploaded to Secret Manager ({_SESSION_SECRET_ID}, {len(session_bytes)} bytes)")
+        logger.info(f"✅ Session uploaded to Secret Manager ({_SESSION_SECRET_ID})")
     except Exception as e:
-        logger.warning(f"Session upload to Secret Manager failed: {e}")
+        logger.warning(f"Session Secret Manager upload failed (non-critical, GCS backup exists): {e}")
 
 
 class TelegramCollector:
