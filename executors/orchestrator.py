@@ -182,16 +182,18 @@ def node_perplexity_search(state: AnalysisState) -> dict:
 
 def node_rag_ingest(state: AnalysisState) -> dict:
     """Ingest recent data into LightRAG:
-    1. Telegram messages (last 7 days, batch)
+    1. Telegram messages (Synthesized via Categorized Batching)
     2. Perplexity narrative (current analysis cycle, single doc)
     """
-    # ── 1. Telegram messages ──
+    from processors.telegram_batcher import telegram_batcher
+    
+    # ── 1. Batch Telegram synthesis (categorized by source) ──
     try:
-        recent_messages = db.get_telegram_messages_for_rag(days=7)
-        if recent_messages:
-            light_rag.ingest_batch(recent_messages)
+        # Use lookback relative to analysis interval (e.g., 4h)
+        lookback = settings.analysis_interval_hours
+        telegram_batcher.process_and_ingest(lookback_hours=lookback)
     except Exception as e:
-        logger.error(f"RAG Telegram ingestion error: {e}")
+        logger.error(f"RAG Telegram batching error: {e}")
 
     # ── 2. Perplexity narrative (fact-based, good for entity extraction) ──
     try:
