@@ -23,12 +23,19 @@ from config.settings import settings
 
 class AIClient:
     def __init__(self):
-        # Gemini (Vertex AI) Client
-        self._gemini_client = genai.Client(
-            vertexai=True,
-            project=settings.PROJECT_ID,
-            location=settings.VERTEX_REGION_GEMINI or "global",
-        )
+        # Gemini Client (Vertex AI or Direct API)
+        if settings.GEMINI_API_KEY:
+            self._gemini_client = genai.Client(
+                api_key=settings.GEMINI_API_KEY
+            )
+            logger.info("Gemini initialized with Direct API Key")
+        else:
+            self._gemini_client = genai.Client(
+                vertexai=True,
+                project=settings.PROJECT_ID,
+                location=settings.VERTEX_REGION_GEMINI or "global",
+            )
+            logger.info(f"Gemini initialized with Vertex AI (Project: {settings.PROJECT_ID})")
         
         # Anthropic Client (Direct API only — NOT GCP Model Garden)
         self._claude_client = None

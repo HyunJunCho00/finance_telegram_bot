@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     VOYAGE_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""
 
     BINANCE_API_KEY: str = ""
     BINANCE_API_SECRET: str = ""
@@ -277,6 +278,8 @@ class SecretManager:
             "SUPABASE_KEY",
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
+            "VOYAGE_API_KEY",
+            "GEMINI_API_KEY",
             "BINANCE_API_KEY",
             "BINANCE_API_SECRET",
             "UPBIT_ACCESS_KEY",
