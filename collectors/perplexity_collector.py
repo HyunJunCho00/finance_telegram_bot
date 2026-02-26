@@ -45,27 +45,34 @@ class PerplexityCollector:
 
         coin_name = "Bitcoin" if symbol.upper().startswith("BTC") else "Ethereum"
 
-        prompt = f"""Analyze the current {coin_name} ({symbol}) market situation in the last 24 hours.
+        from datetime import timedelta
+        now_utc = datetime.now(timezone.utc)
+        date_today = now_utc.strftime("%Y-%m-%d")
+        date_3d_ago = (now_utc - timedelta(days=3)).strftime("%Y-%m-%d")
+
+        prompt = f"""Today's date is {date_today} (UTC). Analyze the {coin_name} ({symbol}) market from {date_3d_ago} to {date_today}.
+
+Prioritize the most recent events (last 72 hours). Every factor must include its specific date.
 
 Provide your analysis in this EXACT JSON format (no markdown, pure JSON):
 {{
-  "summary": "3 sentences summarizing the most important events/news affecting {symbol} price in the last 24 hours",
+  "summary": "3 sentences summarizing the most important events/news affecting {symbol} price from {date_3d_ago} to {date_today}",
   "sentiment": "bullish" or "bearish" or "neutral",
-  "bullish_factors": ["factor1", "factor2", "factor3"],
-  "bearish_factors": ["factor1", "factor2", "factor3"],
-  "reasoning": "1-2 sentences explaining WHY the price is moving the way it is right now",
-  "key_events": ["event1 with date", "event2 with date"],
-  "macro_context": "brief macro/regulatory context if relevant"
+  "bullish_factors": ["YYYY-MM-DD: factor1", "YYYY-MM-DD: factor2", "YYYY-MM-DD: factor3"],
+  "bearish_factors": ["YYYY-MM-DD: factor1", "YYYY-MM-DD: factor2", "YYYY-MM-DD: factor3"],
+  "reasoning": "1-2 sentences explaining WHY the price is moving as of {date_today}",
+  "key_events": ["YYYY-MM-DD: event1", "YYYY-MM-DD: event2", "YYYY-MM-DD: event3"],
+  "macro_context": "macro/regulatory context relevant to {date_today}"
 }}
 
-Focus on:
-- Regulatory news (SEC, ETF approvals, legal cases)
-- Whale movements and exchange flows
-- Macro events (Fed rates, inflation data, geopolitical)
-- Protocol updates, forks, or technical milestones
-- Market structure (liquidations, funding rate shifts, OI changes)
+Focus on (date-anchored, most recent first):
+- Regulatory news (SEC, ETF approvals/rejections, legal cases)
+- Whale movements and large exchange inflows/outflows
+- Macro events (Fed decisions, CPI/PPI releases, geopolitical)
+- Protocol updates, exchange listings, or technical milestones
+- Market structure shifts (liquidations, funding rate flips, OI changes)
 
-Be factual and cite specific events. Do not speculate."""
+IMPORTANT: Do NOT report events before {date_3d_ago}. Be factual. Do not speculate or fabricate dates."""
 
         try:
             headers = {

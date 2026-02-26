@@ -181,13 +181,37 @@ def node_perplexity_search(state: AnalysisState) -> dict:
 
 
 def node_rag_ingest(state: AnalysisState) -> dict:
-    """Ingest recent telegram messages into LightRAG."""
+    """Ingest recent data into LightRAG:
+    1. Telegram messages (last 7 days, batch)
+    2. Perplexity narrative (current analysis cycle, single doc)
+    """
+    # ── 1. Telegram messages ──
     try:
         recent_messages = db.get_telegram_messages_for_rag(days=7)
         if recent_messages:
             light_rag.ingest_batch(recent_messages)
     except Exception as e:
-        logger.error(f"RAG ingestion error: {e}")
+        logger.error(f"RAG Telegram ingestion error: {e}")
+
+    # ── 2. Perplexity narrative (fact-based, good for entity extraction) ──
+    try:
+        narrative_text = state.get("narrative_text", "")
+        symbol = state.get("symbol", "")
+        if narrative_text and "Unavailable" not in narrative_text and len(narrative_text) > 50:
+            import hashlib
+            from datetime import datetime, timezone
+            ts = datetime.now(timezone.utc).isoformat()
+            doc_id = hashlib.md5(f"perplexity:{symbol}:{ts[:13]}".encode()).hexdigest()
+            light_rag.ingest_message(
+                text=narrative_text,
+                channel=f"perplexity_{symbol}",
+                timestamp=ts,
+                message_id=doc_id,
+            )
+            logger.info(f"RAG: Perplexity narrative ingested for {symbol}")
+    except Exception as e:
+        logger.error(f"RAG Perplexity ingestion error: {e}")
+
     return {}
 
 

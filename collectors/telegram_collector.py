@@ -226,7 +226,31 @@ class TelegramCollector:
                 logger.error(f"Telethon client init failed (will skip Telegram collection): {e}")
         return self._client
 
+    def _get_channel_max_message_id(self, channel_name: str) -> int:
+        """Query DB for the latest message_id for a channel. Returns 0 if none found."""
+        try:
+            res = (
+                db.client.table("telegram_messages")
+                .select("message_id")
+                .eq("channel", channel_name)
+                .order("message_id", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if res.data:
+                return res.data[0]["message_id"]
+        except Exception as e:
+            logger.warning(f"Could not fetch max message_id for {channel_name}: {e}")
+        return 0
+
     async def fetch_recent_messages(self, hours: Optional[int] = 4) -> List[Dict]:
+        """Fetch messages newer than what's already in DB (resume) or within hours window.
+
+        Resume logic (per channel):
+          - If DB has messages for this channel → fetch only message_id > max_id (Telethon min_id)
+          - If DB is empty for this channel → fall back to hours cutoff (or all history if hours=None)
+        This avoids re-downloading the full history on every run.
+        """
         if self.client is None:
             logger.warning("Telegram client unavailable — skipping message fetch")
             return []
@@ -244,21 +268,30 @@ class TelegramCollector:
                 for channel_name, channel_username in self.channels.items():
                     try:
                         entity = await self.client.get_entity(channel_username)
-                        print(f"\n[{channel_name}] Starting fetch...", flush=True)
+
+                        # ── Resume: find where we left off ──
+                        min_id = self._get_channel_max_message_id(channel_name)
+                        if min_id > 0:
+                            print(f"\n[{channel_name}] Resuming from message_id > {min_id:,}...", flush=True)
+                        else:
+                            print(f"\n[{channel_name}] Starting fetch (no prior data)...", flush=True)
+
                         count = 0
 
                         async for message in self.client.iter_messages(
                             entity,
                             limit=None,
                             offset_date=datetime.now(timezone.utc),
-                            wait_time=1,  # Proactive rate limiting: 1s between API calls
+                            min_id=min_id,   # Telethon stops when it hits this ID (exclusive)
+                            wait_time=1,     # Proactive rate limiting
                         ):
-                            if cutoff_time and message.date.replace(tzinfo=timezone.utc) < cutoff_time:
+                            # Secondary time-based cutoff (used when DB is empty + hours set)
+                            if min_id == 0 and cutoff_time and message.date.replace(tzinfo=timezone.utc) < cutoff_time:
                                 break
 
                             count += 1
                             if count % 100 == 0:
-                                print(f"\r  [{channel_name}] Downloaded: {count:,} messages...", end="", flush=True)
+                                print(f"\r  [{channel_name}] Downloaded: {count:,} new messages...", end="", flush=True)
 
                             if message.message:
                                 messages.append({
@@ -271,7 +304,7 @@ class TelegramCollector:
                                     'created_at': datetime.now(timezone.utc).isoformat()
                                 })
 
-                            # Save every 2000 messages to prevent OOM and save progress to GCS
+                            # Save every 2000 messages to prevent OOM
                             if len(messages) >= 2000:
                                 print(f"\r  [{channel_name}] Saving batch of 2000 to GCS + DB...", end="", flush=True)
                                 self.save_to_gcs(messages)
@@ -279,7 +312,7 @@ class TelegramCollector:
                                 messages = []
 
                     except FloodWaitError as e:
-                        wait = e.seconds + 5  # Buffer 5s on top of required wait
+                        wait = e.seconds + 5
                         print(f"\n  [{channel_name}] FloodWait: sleeping {wait}s as required by Telegram...", flush=True)
                         await asyncio.sleep(wait)
                         continue
@@ -287,7 +320,10 @@ class TelegramCollector:
                         logger.error(f"Error fetching from {channel_name}: {e}")
                         continue
 
-                    print(f"\r  [{channel_name}] Done. Total: {count:,} messages.          \n", end="", flush=True)
+                    if count == 0 and min_id > 0:
+                        print(f"\r  [{channel_name}] Already up to date (no new messages).          \n", end="", flush=True)
+                    else:
+                        print(f"\r  [{channel_name}] Done. New messages: {count:,}.          \n", end="", flush=True)
 
             upload_session_to_secret_manager()
         except Exception as e:

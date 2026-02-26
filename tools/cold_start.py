@@ -962,8 +962,8 @@ def run_cold_start(mode: str = "all", days: int = 210,
     # ── Telegram Messages ──
     if mode in ("all", "telegram"):
         loader = TelegramBulkLoader()
-        logger.info("[COLD START] Telegram: Fetching FULL history for all channels (0 days limit).")
-        count = loader.load(days=0)
+        logger.info("[COLD START] Telegram: Fetching only NEW messages (resume from DB max message_id per channel).")
+        count = loader.load(days=0)  # days=0 → hours=None → resume via min_id takes over
         results["telegram"] = {"messages": count}
 
         # Print channel statistics

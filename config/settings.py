@@ -291,6 +291,7 @@ class SecretManager:
             "MILVUS_URI",
             "MILVUS_TOKEN",
             "GCS_ARCHIVE_BUCKET",
+            "ENABLE_GCS_ARCHIVE",
             "DUNE_API_KEY",
         ]
 
