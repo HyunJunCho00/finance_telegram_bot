@@ -174,7 +174,7 @@ class TradingBot:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         logger.info("Telegram bot started (polling)")
-        app.run_polling(drop_pending_updates=True)
+        app.run_polling(drop_pending_updates=True, stop_signals=None)
 
 
 trading_bot = TradingBot()
