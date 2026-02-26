@@ -132,20 +132,21 @@ class FundingCollector:
 
     def fetch_long_short_ratio(self, symbol: str) -> Dict:
         try:
+            import requests
             binance_symbol = symbol.replace('/', '')
-            response = self.binance.fapiPublicGetGlobalLongShortAccountRatio({
-                'symbol': binance_symbol,
-                'period': '5m',
-                'limit': 1
-            })
-            if response and len(response) > 0:
+            url = "https://fapi.binance.com/futures/data/globalLongShortAccountRatio"
+            params = {'symbol': binance_symbol, 'period': '5m', 'limit': 1}
+            resp = requests.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+            if data and len(data) > 0:
                 return {
-                    'long_short_ratio': float(response[0].get('longShortRatio', 1.0)),
-                    'long_account': float(response[0].get('longAccount', 0.5)),
-                    'short_account': float(response[0].get('shortAccount', 0.5)),
+                    'long_short_ratio': float(data[0].get('longShortRatio', 1.0)),
+                    'long_account': float(data[0].get('longAccount', 0.5)),
+                    'short_account': float(data[0].get('shortAccount', 0.5)),
                 }
         except Exception as e:
-            logger.error(f"Long/short ratio fetch error for {symbol}: {e}")
+            logger.warning(f"Long/short ratio fetch error for {symbol}: {e}")
         return {}
 
     def fetch_basis_pct(self, symbol: str) -> float:

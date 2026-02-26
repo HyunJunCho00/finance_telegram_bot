@@ -170,6 +170,9 @@ class TradingBot:
         app.add_handler(CommandHandler("mode", self.cmd_mode))
         app.add_handler(CommandHandler("report", self.cmd_report))
 
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
         logger.info("Telegram bot started (polling)")
         app.run_polling(drop_pending_updates=True)
 
