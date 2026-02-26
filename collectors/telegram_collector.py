@@ -6,6 +6,7 @@ from typing import List, Dict, Optional
 from config.settings import settings
 from config.database import db
 from loguru import logger
+from utils.text_sanitizer import clean_telegram_text
 
 # 세션 파일 경로: data/ 디렉토리에 저장 (프로젝트 루트 노출 방지)
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -294,10 +295,14 @@ class TelegramCollector:
                                 print(f"\r  [{channel_name}] Downloaded: {count:,} new messages...", end="", flush=True)
 
                             if message.message:
+                                cleaned_text = clean_telegram_text(message.message)
+                                # Skip messages that are completely empty after sanitization
+                                if not cleaned_text:
+                                    continue
                                 messages.append({
                                     'channel': channel_name,
                                     'message_id': message.id,
-                                    'text': message.message[:5000],
+                                    'text': cleaned_text[:5000],
                                     'views': message.views or 0,
                                     'forwards': message.forwards or 0,
                                     'timestamp': message.date.isoformat(),

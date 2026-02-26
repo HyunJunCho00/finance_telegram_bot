@@ -111,6 +111,20 @@ def job_1hour_evaluation():
     except Exception as e:
         logger.error(f"1-hour evaluation job error: {e}")
 
+def job_1hour_telegram():
+    """Fetch and batch Telegram messages into LightRAG every 1 hour."""
+    try:
+        logger.info("Running 1-hour Telegram batching job")
+        # 1. Fetch raw messages directly via the collector
+        from collectors.telegram_collector import telegram_collector
+        telegram_collector.run(hours=1)
+        
+        # 2. Synthesize and ingest
+        from processors.telegram_batcher import telegram_batcher
+        telegram_batcher.process_and_ingest(lookback_hours=1)
+    except Exception as e:
+        logger.error(f"1-hour Telegram job error: {e}")
+
 
 def job_daily_cleanup():
     """Cleanup old data + archive to GCS Parquet."""
@@ -232,6 +246,15 @@ def main():
         job_daily_fear_greed,
         CronTrigger(hour=0, minute=15),
         id='job_daily_fear_greed',
+        max_instances=1
+    )
+
+    # 1-Hour Telegram Batching & Ingestion
+    scheduler.add_job(
+        job_1hour_telegram,
+        'interval',
+        hours=1,
+        id='job_1hour_telegram',
         max_instances=1
     )
 

@@ -92,29 +92,34 @@ Task: Extract the 'Narrative Shift'.
             if not content_list:
                 continue
 
-            # Limit total tokens by joining first 100 messages (Gemini 3.1 handles this easily)
-            full_text = "\n---\n".join(content_list[:200]) 
+            # Process in chunks of 150 to avoid exceeding Gemini context window safely
+            # and to ensure all messages are ingested even if volume is very high.
+            CHUNK_SIZE = 150
+            chunks = [content_list[i:i + CHUNK_SIZE] for i in range(0, len(content_list), CHUNK_SIZE)]
             
-            logger.info(f"Synthesizing {len(content_list)} messages for category {cat}...")
+            logger.info(f"Synthesizing {len(content_list)} messages for category {cat} in {len(chunks)} chunks...")
             
-            try:
-                summary = claude_client.generate_response(
-                    system_prompt=self.PROMPTS[cat],
-                    user_message=f"Messages from last {lookback_hours} hours:\n\n{full_text}",
-                    temperature=0.2,
-                    max_tokens=500,
-                    role="rag_extraction" 
-                )
+            for chunk_idx, chunk in enumerate(chunks):
+                full_text = "\n---\n".join(chunk) 
                 
-                if summary and len(summary) > 50:
-                    # 4. Ingest to LightRAG
-                    logger.info(f"Ingesting synthesized {cat} narrative to LightRAG.")
-                    light_rag.ingest_message(
-                        text=summary,
-                        channel=f"BATCHED_{cat}",
-                        timestamp=datetime.now(timezone.utc).isoformat()
+                try:
+                    summary = claude_client.generate_response(
+                        system_prompt=self.PROMPTS[cat],
+                        user_message=f"Messages from last {lookback_hours} hours (Part {chunk_idx+1}/{len(chunks)}):\n\n{full_text}",
+                        temperature=0.2,
+                        max_tokens=800, # Increased slightly to accommodate larger combined reports
+                        role="rag_extraction" 
                     )
-            except Exception as e:
-                logger.error(f"Failed to synthesize category {cat}: {e}")
+                    
+                    if summary and len(summary) > 50:
+                        # 4. Ingest to LightRAG
+                        logger.info(f"Ingesting synthesized {cat} narrative (Chunk {chunk_idx+1}) to LightRAG.")
+                        light_rag.ingest_message(
+                            text=summary,
+                            channel=f"BATCHED_{cat}",
+                            timestamp=datetime.now(timezone.utc).isoformat()
+                        )
+                except Exception as e:
+                    logger.error(f"Failed to synthesize category {cat} chunk {chunk_idx+1}: {e}")
 
 telegram_batcher = TelegramBatcher()

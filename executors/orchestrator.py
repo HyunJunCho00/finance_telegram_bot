@@ -5,12 +5,9 @@ Architecture:
   Each node is a processing step. Edges define the execution order.
 
 Graph:
-  collect_data -> perplexity_search -> rag_ingest -> technical_analysis
-  -> funding_context -> cvd_context -> rag_query -> self_correction
-  -> bull_agent -> bear_agent -> risk_agent -> should_add_chart?
-     -> (yes) generate_chart -> judge_agent
-     -> (no) judge_agent
-  -> generate_report -> notify
+  collect_data -> perplexity_search -> rag_ingest -> funding/cvd/liquidation/rag_query/macro/deribit -> triage
+  -> [liquidity_expert, microstructure_expert, macro_expert] 
+  -> generate_chart -> judge_agent -> risk_manager -> execute_trade -> generate_report
 
 Benefits over sequential:
   - Explicit state management (TypedDict)
@@ -19,7 +16,7 @@ Benefits over sequential:
   - Built-in retry support
 
 Cost optimization:
-  - Bull/Bear/Risk: Gemini Flash, TEXT ONLY, compact data format
+  - Experts (Liquidity, Microstructure, Macro): Gemini Flash, TEXT ONLY, compact data format
   - Judge: Claude Opus 4.6, gets chart image (512x512)
 """
 
@@ -188,12 +185,8 @@ def node_rag_ingest(state: AnalysisState) -> dict:
     from processors.telegram_batcher import telegram_batcher
     
     # ── 1. Batch Telegram synthesis (categorized by source) ──
-    try:
-        # Use lookback relative to analysis interval (e.g., 4h)
-        lookback = settings.analysis_interval_hours
-        telegram_batcher.process_and_ingest(lookback_hours=lookback)
-    except Exception as e:
-        logger.error(f"RAG Telegram batching error: {e}")
+    # Note: Telegram batching is now handled asynchronously every 1 hour via scheduler.py.
+    # We no longer block the 4-hour analysis cycle to fetch and summarize Telegram here.
 
     # ── 2. Perplexity narrative (fact-based, good for entity extraction) ──
     try:
