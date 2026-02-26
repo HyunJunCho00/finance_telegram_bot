@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from scipy.signal import argrelextrema
 from typing import Dict, Tuple, Optional, List
-import pandas_ta as ta
+import pandas_ta_classic as ta
 from loguru import logger
 from config.settings import TradingMode
 
