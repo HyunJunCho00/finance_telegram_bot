@@ -103,6 +103,10 @@ source venv/bin/activate
 pip install -q --upgrade pip
 pip install -q -r requirements.txt
 
+# ── Create app user (required by scheduler.service User=crypto_trader) ──
+useradd -m -s /bin/bash crypto_trader 2>/dev/null || true
+chown -R crypto_trader:crypto_trader "$APP_DIR"
+
 sed -i \
   -e "s|Environment=\"PROJECT_ID=.*\"|Environment=\"PROJECT_ID=PLACEHOLDER_PROJECT_ID\"|g" \
   -e "s|Environment=\"VERTEX_REGION=.*\"|Environment=\"VERTEX_REGION=PLACEHOLDER_VERTEX_REGION\"|g" \
