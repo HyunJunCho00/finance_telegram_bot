@@ -711,6 +711,7 @@ def node_execute_trade(state: AnalysisState) -> dict:
 
 def node_generate_report(state: AnalysisState) -> dict:
     """Generate and send report to Telegram."""
+    from executors.metrics_logger import metrics_logger
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
 
@@ -762,6 +763,15 @@ def node_generate_report(state: AnalysisState) -> dict:
     if report:
         chart_bytes = state.get("chart_bytes")
         report_generator.notify(report, chart_bytes=chart_bytes, mode=mode)
+        
+        # Log prediction for academic/quantitative evaluation
+        metrics_logger.log_prediction(
+            symbol=symbol,
+            mode=mode.value,
+            final_decision=state.get("final_decision", {}),
+            blackboard=state.get("blackboard", {}),
+            anomalies=state.get("anomalies", [])
+        )
 
     decision = state.get("final_decision", {}).get("decision", "N/A")
     logger.info(f"Analysis completed for {symbol}: {decision} ({mode.value})")

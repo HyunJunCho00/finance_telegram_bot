@@ -3,8 +3,7 @@ from loguru import logger
 from config.settings import settings
 from config.database import db
 from executors.post_mortem import write_post_mortem
-
-
+from executors.metrics_logger import metrics_logger
 class EvaluatorDaemon:
     """
     V6 Self-Healing Loop:
@@ -86,10 +85,35 @@ class EvaluatorDaemon:
                 logger.info(f"[{symbol}] Trade Closed: {outcome}. Triggering LLM Post-Mortem.")
                 self._evaluated_report_ids.add(report_id)
 
+                pnl_pct = 0.0
+                if direction == 'LONG':
+                    pnl_pct = ((current_price - entry) / entry) * 100
+                elif direction == 'SHORT':
+                    pnl_pct = ((entry - current_price) / entry) * 100
+
+                mistake_summary = ""
                 try:
-                    write_post_mortem(report, current_price)
+                    if "FAILURE" in outcome:
+                        post_mortem_result = write_post_mortem(report, current_price)
+                        if post_mortem_result and isinstance(post_mortem_result, dict):
+                            mistake_summary = post_mortem_result.get("mistake_summary", "")
+                    else:
+                        # Even if success, write post mortem if configured, else just skip
+                        pass
                 except Exception as e:
                     logger.error(f"Failed to generate post-mortem: {e}")
+
+                # Log resolution for academic/quantitative evaluation
+                try:
+                    metrics_logger.log_resolution(
+                        symbol=symbol,
+                        direction=direction,
+                        outcome=outcome,
+                        pnl_pct=round(pnl_pct, 2),
+                        mistake_summary=mistake_summary
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to log resolution metric: {e}")
 
 
 if __name__ == "__main__":

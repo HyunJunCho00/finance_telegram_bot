@@ -114,7 +114,6 @@ class FundingCollector:
         exchanges = [
             (self.binance, 'binance'),
             (self.bybit, 'bybit'),
-            (self.okx, 'okx'),
         ]
 
         for exchange, name in exchanges:
@@ -127,7 +126,7 @@ class FundingCollector:
             'open_interest_global': round(total_oi, 2),
             'open_interest_binance': oi_breakdown.get('oi_binance', 0),
             'open_interest_bybit': oi_breakdown.get('oi_bybit', 0),
-            'open_interest_okx': oi_breakdown.get('oi_okx', 0),
+            'open_interest_okx': 0, # zeroed out to maintain DB compatibility
         }
 
     def fetch_long_short_ratio(self, symbol: str) -> Dict:

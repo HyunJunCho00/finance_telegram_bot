@@ -33,14 +33,13 @@ from pathlib import Path
 _BASE_DIR = Path(__file__).parent.parent
 _IDS_CACHE_PATH = str(_BASE_DIR / "data" / "ingested_ids.json")
 
-# Gemini embedding (google-genai SDK)
+# Voyage AI embedding
 try:
-    from google import genai
-    from google.genai import types
+    import voyageai
     EMBEDDING_AVAILABLE = True
 except ImportError:
     EMBEDDING_AVAILABLE = False
-    logger.warning("google-genai embedding not available")
+    logger.warning("voyageai embedding not available")
 
 # Neo4j
 try:
@@ -708,30 +707,38 @@ Rules:
         if self._embed_client is None and EMBEDDING_AVAILABLE:
             try:
                 from config.settings import settings
-                self._embed_client = genai.Client(
-                    vertexai=True,
-                    project=settings.PROJECT_ID,
-                    location=settings.vertex_region,
-                )
+                if getattr(settings, 'VOYAGE_API_KEY', None):
+                    self._embed_client = voyageai.Client(api_key=settings.VOYAGE_API_KEY)
+                else:
+                    logger.warning("VOYAGE_API_KEY not set")
             except Exception as e:
                 logger.warning(f"Embedding client init failed: {e}")
         return self._embed_client
 
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
-        """Get embedding from Gemini text-embedding-005."""
+        """Get embedding from Voyage AI voyage-finance-2."""
         if self.embed_client is None:
             return None
-        try:
-            response = self.embed_client.models.embed_content(
-                model="text-embedding-005",
-                contents=[text[:512]],
-                config=types.EmbedContentConfig(task_type="RETRIEVAL_DOCUMENT"),
-            )
-            embeddings = getattr(response, "embeddings", None) or []
-            if embeddings and getattr(embeddings[0], "values", None):
-                return np.array(embeddings[0].values, dtype=np.float32)
-        except Exception as e:
-            logger.warning(f"Embedding error: {e}")
+        
+        import time
+        max_retries = 3
+        base_delay = 2.0
+        
+        for attempt in range(max_retries):
+            try:
+                result = self.embed_client.embed([text[:4000]], model="voyage-finance-2")
+                if result.embeddings and len(result.embeddings) > 0:
+                    return np.array(result.embeddings[0], dtype=np.float32)
+            except Exception as e:
+                err_str = str(e).lower()
+                if "429" in err_str or "rate" in err_str or "limit" in err_str:
+                    if attempt < max_retries - 1:
+                        sleep_time = base_delay * (2 ** attempt)
+                        logger.warning(f"Embedding error (429), retrying in {sleep_time}s...")
+                        time.sleep(sleep_time)
+                        continue
+                logger.warning(f"Embedding error: {e}")
+                return None
         return None
 
     def _extract_with_llm(self, text: str) -> Dict:
@@ -765,11 +772,15 @@ Rules:
             start = text_clean.find('{')
             end = text_clean.rfind('}') + 1
             if start >= 0 and end > start:
-                return json.loads(text_clean[start:end])
+                try:
+                    return json.loads(text_clean[start:end])
+                except json.JSONDecodeError as decode_err:
+                    logger.warning(f"LLM extraction JSONDecodeError: {decode_err} on string: {text_clean[start:end]}")
+                    return {"entities": [], "relationships": []}
 
             return {"entities": [], "relationships": []}
         except Exception as e:
-            logger.warning(f"LLM extraction error: {e}")
+            logger.warning(f"LLM extraction API error: {e}")
             return {"entities": [], "relationships": []}
 
     def _extract_with_regex_fallback(self, text: str) -> Dict:

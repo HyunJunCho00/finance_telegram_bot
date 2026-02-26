@@ -9,6 +9,7 @@ Key goals:
 
 import base64
 import mimetypes
+import time
 from typing import Dict, List, Optional, Tuple
 
 from google import genai
@@ -135,41 +136,52 @@ class AIClient:
         temperature: float,
         chart_image_b64: Optional[str] = None,
     ) -> str:
-        try:
-            parts = []
+        max_retries = 3
+        base_delay = 5.0
 
-            if chart_image_b64:
-                image_bytes = base64.b64decode(chart_image_b64)
-                mime = mimetypes.guess_type("chart.png")[0] or "image/png"
-                parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime))
+        for attempt in range(max_retries):
+            try:
+                parts = []
 
-            parts.append(types.Part.from_text(text=user_message))
+                if chart_image_b64:
+                    image_bytes = base64.b64decode(chart_image_b64)
+                    mime = mimetypes.guess_type("chart.png")[0] or "image/png"
+                    parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime))
 
-            config_kwargs = {
-                "system_instruction": system_prompt,
-                "max_output_tokens": max_tokens,
-                "temperature": temperature,
-            }
+                parts.append(types.Part.from_text(text=user_message))
 
-            # Inject ThinkingConfig for Gemini 3.0 models
-            if "gemini-3" in model_id.lower():
-                # Pro models get HIGH thinking for deep reasoning, Flash models get LOW for speed/cost
-                thinking_level = "HIGH" if "pro" in model_id.lower() else "LOW"
-                config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
-                # Thinking models tend to perform better with temperature=0.0 depending on the task, but we'll leave it as configured
+                config_kwargs = {
+                    "system_instruction": system_prompt,
+                    "max_output_tokens": max_tokens,
+                    "temperature": temperature,
+                }
 
-            config = types.GenerateContentConfig(**config_kwargs)
+                # Inject ThinkingConfig for Gemini 3.0 models
+                if "gemini-3" in model_id.lower():
+                    # Pro models get HIGH thinking for deep reasoning, Flash models get LOW for speed/cost
+                    thinking_level = "HIGH" if "pro" in model_id.lower() else "LOW"
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
+                    # Thinking models tend to perform better with temperature=0.0 depending on the task, but we'll leave it as configured
 
-            response = self._gemini_client.models.generate_content(
-                model=model_id,
-                contents=[types.Content(role="user", parts=parts)],
-                config=config,
-            )
-            return response.text or ""
+                config = types.GenerateContentConfig(**config_kwargs)
 
-        except Exception as e:
-            logger.error(f"Gemini API error ({model_id}): {e}")
-            return ""
+                response = self._gemini_client.models.generate_content(
+                    model=model_id,
+                    contents=[types.Content(role="user", parts=parts)],
+                    config=config,
+                )
+                return response.text or ""
+
+            except Exception as e:
+                err_str = str(e).lower()
+                if "429" in err_str or "resource" in err_str or "503" in err_str or "exhausted" in err_str:
+                    if attempt < max_retries - 1:
+                        sleep_time = base_delay * (2 ** attempt)
+                        logger.warning(f"Gemini API rate limit ({model_id}), retrying in {sleep_time}s...")
+                        time.sleep(sleep_time)
+                        continue
+                logger.error(f"Gemini API error ({model_id}): {e}")
+                return ""
 
     def _generate_claude(
         self,
