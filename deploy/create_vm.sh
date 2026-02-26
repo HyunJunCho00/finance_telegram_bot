@@ -2,114 +2,171 @@
 
 set -euo pipefail
 
+# ─── Config ────────────────────────────────────────────────────────────────
 PROJECT_ID="${PROJECT_ID:-}"
 if [[ -z "$PROJECT_ID" ]]; then
   PROJECT_ID="$(gcloud config get-value project 2>/dev/null || true)"
 fi
-
-if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" || "$PROJECT_ID" == "your-gcp-project-id" ]]; then
+if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" ]]; then
   echo "ERROR: PROJECT_ID is not set."
-  echo "Set it with: gcloud config set project <PROJECT_ID>"
-  echo "Or run with: PROJECT_ID=<PROJECT_ID> bash deploy/create_vm.sh"
+  echo "Run: gcloud config set project <PROJECT_ID>"
   exit 1
 fi
 
-INSTANCE_NAME="crypto-trading-vm"
-REGION="${REGION:-asia-northeast3}"
-ZONE="${ZONE:-${REGION}-a}"
-VERTEX_REGION="${VERTEX_REGION:-us-central1}"
-MACHINE_TYPE="e2-medium"
+INSTANCE_NAME="${INSTANCE_NAME:-crypto-trading-vm}"
+VERTEX_REGION="${VERTEX_REGION:-global}"
 BOOT_DISK_SIZE_GB="${BOOT_DISK_SIZE_GB:-50}"
-BOOT_DISK_TYPE="${BOOT_DISK_TYPE:-pd-balanced}"
+BOOT_DISK_TYPE="${BOOT_DISK_TYPE:-pd-standard}"
 IMAGE_FAMILY="ubuntu-2204-lts"
 IMAGE_PROJECT="ubuntu-os-cloud"
 SA_NAME="crypto-trading-sa"
 SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 REPO_URL="${REPO_URL:-https://github.com/HyunJunCho00/finance_telegram_bot.git}"
 
-if [[ -z "$REPO_URL" || "$REPO_URL" == *"<your-org>"* ]]; then
-  echo "ERROR: REPO_URL is not set to a real repository URL."
-  echo "Run with: REPO_URL=https://github.com/<org>/finance_telegram_bot.git bash deploy/create_vm.sh"
+# ─── Zone + Machine-type fallback list ────────────────────────────────────
+# Seoul (asia-northeast3) confirmed full — excluded.
+# Format: "zone:machine_type"
+CANDIDATES=(
+  "asia-southeast1-a:e2-medium"   # Singapore
+  "asia-southeast1-b:e2-medium"
+  "asia-southeast1-c:e2-medium"
+  "asia-east1-b:e2-medium"        # Taiwan
+  "asia-east1-a:e2-medium"
+  "asia-northeast1-b:e2-medium"   # Tokyo
+  "asia-northeast1-a:e2-medium"
+  "asia-northeast2-a:e2-medium"   # Osaka
+  "asia-southeast1-a:n1-standard-2"
+  "asia-east1-b:n1-standard-2"
+  "asia-northeast1-b:n1-standard-2"
+)
+
+# ─── Repo validation ───────────────────────────────────────────────────────
+if [[ "$REPO_URL" == *"<your-org>"* ]]; then
+  echo "ERROR: REPO_URL not set. Pass REPO_URL=https://github.com/org/repo.git"
   exit 1
 fi
 
-if gcloud compute instances describe "$INSTANCE_NAME" --project="$PROJECT_ID" --zone="$ZONE" >/dev/null 2>&1; then
-  echo "ERROR: Instance already exists: $INSTANCE_NAME ($ZONE)"
-  echo "Delete it first or set a different INSTANCE_NAME in the script."
-  exit 1
-fi
+# ─── Check if instance already exists in any candidate zone ───────────────
+for pair in "${CANDIDATES[@]}"; do
+  zone="${pair%%:*}"
+  if gcloud compute instances describe "$INSTANCE_NAME" \
+      --project="$PROJECT_ID" --zone="$zone" &>/dev/null; then
+    echo "ERROR: $INSTANCE_NAME already exists in $zone. Delete it first:"
+    echo "  gcloud compute instances delete $INSTANCE_NAME --zone=$zone --project=$PROJECT_ID"
+    exit 1
+  fi
+done
 
-if ! gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT_ID" >/dev/null 2>&1; then
+# ─── Service account setup ────────────────────────────────────────────────
+if ! gcloud iam service-accounts describe "$SA_EMAIL" \
+    --project="$PROJECT_ID" &>/dev/null; then
   echo "Creating service account: $SA_EMAIL"
   gcloud iam service-accounts create "$SA_NAME" \
     --project="$PROJECT_ID" \
     --display-name="Crypto Trading System Service Account"
 fi
 
-echo "Granting required IAM roles to service account..."
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/aiplatform.user" >/dev/null
+echo "Granting IAM roles to service account..."
+for role in roles/aiplatform.user roles/secretmanager.secretAccessor \
+            roles/storage.objectAdmin roles/logging.logWriter; do
+  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${SA_EMAIL}" \
+    --role="$role" >/dev/null
+done
 
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/secretmanager.secretAccessor" >/dev/null
+# ─── Startup script ───────────────────────────────────────────────────────
+STARTUP_SCRIPT='#!/bin/bash
+exec >> /var/log/startup.log 2>&1
+set -euo pipefail
+echo "=== Startup: $(date) ==="
 
-read -r -d '' STARTUP_SCRIPT <<'SCRIPT' || true
-#!/bin/bash
-apt-get update
-apt-get install -y software-properties-common git
-add-apt-repository -y ppa:deadsnakes/ppa
-apt-get update
-apt-get install -y python3.11 python3.11-venv python3.11-dev python3-pip
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq git python3.11 python3.11-venv python3.11-dev python3-pip
 
-cd /opt
-git clone "__REPO_URL__" /opt/crypto_trading_system
-cd /opt/crypto_trading_system
-python3.11 -m venv venv
+APP_DIR="/opt/app"
+if [[ -d "$APP_DIR/.git" ]]; then
+  echo "Repo exists — pulling latest..."
+  git -C "$APP_DIR" pull --ff-only
+else
+  echo "Cloning repo..."
+  git clone "PLACEHOLDER_REPO_URL" "$APP_DIR"
+fi
+
+cd "$APP_DIR"
+mkdir -p data
+
+if [[ ! -d venv ]]; then
+  python3.11 -m venv venv
+fi
 source venv/bin/activate
-pip install -r requirements.txt
+pip install -q --upgrade pip
+pip install -q -r requirements.txt
 
-useradd -m -s /bin/bash crypto_trader || true
-chown -R crypto_trader:crypto_trader /opt/crypto_trading_system
+sed -i \
+  -e "s|Environment=\"PROJECT_ID=.*\"|Environment=\"PROJECT_ID=PLACEHOLDER_PROJECT_ID\"|g" \
+  -e "s|Environment=\"VERTEX_REGION=.*\"|Environment=\"VERTEX_REGION=PLACEHOLDER_VERTEX_REGION\"|g" \
+  deploy/scheduler.service deploy/mcp_server.service
 
-sed -i 's|Environment="PROJECT_ID=.*"|Environment="PROJECT_ID=__PROJECT_ID__"|' deploy/scheduler.service deploy/mcp_server.service
-sed -i 's|Environment="VERTEX_REGION=.*"|Environment="VERTEX_REGION=__VERTEX_REGION__"|' deploy/scheduler.service deploy/mcp_server.service
 cp deploy/scheduler.service /etc/systemd/system/
 cp deploy/mcp_server.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable scheduler.service
-systemctl enable mcp_server.service
-systemctl start scheduler.service
-systemctl start mcp_server.service
-SCRIPT
+systemctl enable scheduler.service mcp_server.service
+systemctl start scheduler.service mcp_server.service
 
-STARTUP_SCRIPT="${STARTUP_SCRIPT//__REPO_URL__/$REPO_URL}"
-STARTUP_SCRIPT="${STARTUP_SCRIPT//__PROJECT_ID__/$PROJECT_ID}"
-STARTUP_SCRIPT="${STARTUP_SCRIPT//__VERTEX_REGION__/$VERTEX_REGION}"
+echo "=== Startup complete: $(date) ==="'
 
-echo "Creating GCP Compute Engine instance..."
-echo "  Project: $PROJECT_ID"
-echo "  Machine: $MACHINE_TYPE (~\$12/month)"
-echo "  Disk: ${BOOT_DISK_SIZE_GB}GB ${BOOT_DISK_TYPE}"
+STARTUP_SCRIPT="${STARTUP_SCRIPT//PLACEHOLDER_REPO_URL/$REPO_URL}"
+STARTUP_SCRIPT="${STARTUP_SCRIPT//PLACEHOLDER_PROJECT_ID/$PROJECT_ID}"
+STARTUP_SCRIPT="${STARTUP_SCRIPT//PLACEHOLDER_VERTEX_REGION/$VERTEX_REGION}"
 
-gcloud compute instances create "$INSTANCE_NAME" \
-  --project="$PROJECT_ID" \
-  --zone="$ZONE" \
-  --machine-type="$MACHINE_TYPE" \
-  --network-interface="network-tier=STANDARD,subnet=default" \
-  --maintenance-policy="MIGRATE" \
-  --service-account="$SA_EMAIL" \
-  --scopes="https://www.googleapis.com/auth/cloud-platform" \
-  --image-family="$IMAGE_FAMILY" \
-  --image-project="$IMAGE_PROJECT" \
-  --boot-disk-size="${BOOT_DISK_SIZE_GB}GB" \
-  --boot-disk-type="${BOOT_DISK_TYPE}" \
-  --boot-disk-device-name="$INSTANCE_NAME" \
-  --tags="crypto-trading" \
-  --metadata="startup-script=${STARTUP_SCRIPT}"
+# ─── Try each zone/machine combination until one succeeds ─────────────────
+ZONE_USED=""
+MACHINE_USED=""
+
+for pair in "${CANDIDATES[@]}"; do
+  zone="${pair%%:*}"
+  machine="${pair##*:}"
+  echo "Trying zone=$zone machine=$machine ..."
+  if gcloud compute instances create "$INSTANCE_NAME" \
+      --project="$PROJECT_ID" \
+      --zone="$zone" \
+      --machine-type="$machine" \
+      --network-interface="network-tier=STANDARD,subnet=default" \
+      --maintenance-policy="MIGRATE" \
+      --service-account="$SA_EMAIL" \
+      --scopes="https://www.googleapis.com/auth/cloud-platform" \
+      --image-family="$IMAGE_FAMILY" \
+      --image-project="$IMAGE_PROJECT" \
+      --boot-disk-size="${BOOT_DISK_SIZE_GB}GB" \
+      --boot-disk-type="$BOOT_DISK_TYPE" \
+      --boot-disk-device-name="$INSTANCE_NAME" \
+      --tags="crypto-trading" \
+      --metadata="USE_SECRET_MANAGER=true,ENABLE_GCS_ARCHIVE=true,startup-script=${STARTUP_SCRIPT}" \
+      2>/dev/null; then
+    ZONE_USED="$zone"
+    MACHINE_USED="$machine"
+    break
+  else
+    echo "  Unavailable, trying next..."
+  fi
+done
+
+if [[ -z "$ZONE_USED" ]]; then
+  echo ""
+  echo "ERROR: All zone/machine combinations exhausted. Try again later or add more candidates."
+  exit 1
+fi
 
 echo ""
-echo "Instance created successfully!"
-echo "SSH: gcloud compute ssh $INSTANCE_NAME --zone=$ZONE --project=$PROJECT_ID"
+echo "Instance created!"
+echo "  Name   : $INSTANCE_NAME"
+echo "  Zone   : $ZONE_USED"
+echo "  Machine: $MACHINE_USED"
+echo ""
+echo "SSH:"
+echo "  gcloud compute ssh $INSTANCE_NAME --zone=$ZONE_USED --project=$PROJECT_ID"
+echo ""
+echo "Watch startup log:"
+echo "  gcloud compute ssh $INSTANCE_NAME --zone=$ZONE_USED --project=$PROJECT_ID --command='tail -f /var/log/startup.log'"
 echo ""

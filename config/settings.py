@@ -68,7 +68,7 @@ class Settings(BaseSettings):
 
     # Dune API (on-chain/DEX macro signals)
     DUNE_API_KEY: str = ""
-    DUNE_ENABLED: bool = False
+    DUNE_ENABLED: bool = True
     # Cost guardrails for free-tier Dune credits (monthly 2500 credits)
     # Keep scheduler cadence unchanged, but throttle collector execution internally.
     DUNE_BUDGET_GUARD: bool = True
@@ -121,8 +121,9 @@ class Settings(BaseSettings):
     MODEL_VLM_GEOMETRIC: str = "gemini-3.1-pro-preview"
     
     # 3. World Knowledge / Macro Economy
-    # gpt-5.2: OpenAI's latest flagship (Dec 2025), unparalleled for macro text analysis and global intelligence
-    MODEL_MACRO: str = "gpt-5.2"
+    # gemini-3-flash-preview: fast, cheap, sufficient for macro text context
+    # (previously gpt-5.2 — removed OpenAI dependency to eliminate unexpected cost)
+    MODEL_MACRO: str = "gemini-3-flash-preview"
     
     # 4. Supreme Logical Reasoning / Trade Execution
     # claude-sonnet-4-6: The actual SOTA as of Feb 2026, featuring hybrid reasoning (extended thinking)
@@ -273,6 +274,8 @@ class SecretManager:
         secret_names = [
             "SUPABASE_URL",
             "SUPABASE_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
             "BINANCE_API_KEY",
             "BINANCE_API_SECRET",
             "UPBIT_ACCESS_KEY",

@@ -588,25 +588,61 @@ Rules:
         self._ingested_ids: Set[str] = self._load_ingested_ids()
 
     def _load_ingested_ids(self) -> Set[str]:
-        """Load ingested message IDs from disk."""
+        """Load ingested message IDs from disk. Falls back to GCS if local file missing (VM reset recovery)."""
+        # 1) Try local disk first (fast)
         try:
             if os.path.exists(_IDS_CACHE_PATH):
                 with open(_IDS_CACHE_PATH, 'r', encoding='utf-8') as f:
-                    return set(json.load(f))
+                    ids = set(json.load(f))
+                    logger.info(f"LightRAG: loaded {len(ids)} ingested IDs from disk")
+                    return ids
         except Exception as e:
-            logger.warning(f"Failed to load ingested IDs cache: {e}")
+            logger.warning(f"Failed to load ingested IDs from disk: {e}")
+
+        # 2) Fallback: restore from GCS to survive VM resets
+        try:
+            from config.settings import settings
+            if settings.GCS_ARCHIVE_BUCKET:
+                from google.cloud import storage
+                client = storage.Client()
+                bucket = client.bucket(settings.GCS_ARCHIVE_BUCKET)
+                blob = bucket.blob("lightrag/ingested_ids.json")
+                if blob.exists():
+                    data = json.loads(blob.download_as_text())
+                    ids = set(data)
+                    logger.info(f"LightRAG: restored {len(ids)} ingested IDs from GCS (VM reset recovery)")
+                    # Write back to local disk immediately
+                    os.makedirs(os.path.dirname(_IDS_CACHE_PATH), exist_ok=True)
+                    with open(_IDS_CACHE_PATH, 'w', encoding='utf-8') as f:
+                        json.dump(data, f)
+                    return ids
+        except Exception as e:
+            logger.warning(f"LightRAG: GCS ingested_ids restore failed: {e}")
+
+        logger.info("LightRAG: starting fresh (no ingested IDs found)")
         return set()
 
     def _save_ingested_ids(self):
-        """Persist ingested IDs to disk (keep latest 5000)."""
+        """Persist ingested IDs to disk AND GCS (keep latest 5000)."""
         try:
             os.makedirs(os.path.dirname(_IDS_CACHE_PATH), exist_ok=True)
             ids_list = list(self._ingested_ids)
-            # Keep only the latest 5000 to bound file size
             if len(ids_list) > 5000:
                 ids_list = ids_list[-5000:]
+            # 1) Save local
             with open(_IDS_CACHE_PATH, 'w', encoding='utf-8') as f:
                 json.dump(ids_list, f)
+            # 2) Backup to GCS
+            try:
+                from config.settings import settings
+                if settings.GCS_ARCHIVE_BUCKET:
+                    from google.cloud import storage
+                    client = storage.Client()
+                    bucket = client.bucket(settings.GCS_ARCHIVE_BUCKET)
+                    blob = bucket.blob("lightrag/ingested_ids.json")
+                    blob.upload_from_string(json.dumps(ids_list), content_type="application/json")
+            except Exception as gcs_e:
+                logger.warning(f"LightRAG: GCS ingested_ids backup failed (non-fatal): {gcs_e}")
         except Exception as e:
             logger.warning(f"Failed to save ingested IDs cache: {e}")
 
@@ -865,20 +901,56 @@ Rules:
             "relationships": len(relationships),
         }
 
+    # Cost guardrail: max new LLM extractions per ingest cycle
+    # Prevents cost explosion when VM restarts or backlog accumulates
+    INGEST_CAP_PER_CYCLE: int = 200
+
     def ingest_batch(self, messages: List[Dict]) -> int:
-        """Ingest a batch of telegram messages."""
+        """Ingest a batch of telegram messages with per-cycle cost cap.
+
+        Only processes messages that haven't been ingested yet (dedup via _ingested_ids).
+        Caps at INGEST_CAP_PER_CYCLE new LLM calls per cycle to prevent cost explosions.
+        """
         count = 0
+        skipped_dup = 0
+        skipped_cap = 0
+
         for msg in messages:
+            msg_id = str(msg.get("message_id", msg.get("id", "")))
+            text = msg.get("text", "")
+
+            # Fast-path dedup check before hitting LLM
+            doc_id = msg_id or __import__('hashlib').md5(
+                f"{msg.get('channel','')}:{text[:100]}:{msg.get('timestamp','')}".encode()
+            ).hexdigest()
+            if doc_id in self._ingested_ids:
+                skipped_dup += 1
+                continue
+
+            # Cost cap: stop processing after N new extractions per cycle
+            if count >= self.INGEST_CAP_PER_CYCLE:
+                skipped_cap += 1
+                continue
+
             result = self.ingest_message(
-                text=msg.get("text", ""),
+                text=text,
                 channel=msg.get("channel", ""),
                 timestamp=msg.get("timestamp", msg.get("created_at", "")),
-                message_id=str(msg.get("message_id", msg.get("id", ""))),
+                message_id=msg_id,
             )
             if result.get("status") == "ingested":
                 count += 1
+
+        self._save_ingested_ids()  # Always persist after batch
         stats = self.get_stats()
-        logger.info(f"LightRAG ingested {count}/{len(messages)} messages (stats: {stats})")
+        if skipped_cap > 0:
+            logger.warning(
+                f"LightRAG: ingest cap hit ({self.INGEST_CAP_PER_CYCLE}). "
+                f"Queued {skipped_cap} msgs for next cycle. "
+                f"Ingested={count}, Dup={skipped_dup}"
+            )
+        else:
+            logger.info(f"LightRAG ingested {count}/{len(messages)} (dup={skipped_dup}, stats={stats})")
         return count
 
     def query(self, query_text: str, mode: str = "hybrid", top_k: int = 10) -> Dict:
