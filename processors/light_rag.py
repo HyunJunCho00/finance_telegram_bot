@@ -662,7 +662,7 @@ Rules:
             return self._graph
         try:
             from config.settings import settings
-            neo4j_uri = getattr(settings, 'NEO4J_URI', '')
+            neo4j_uri = settings.neo4j_uri
             neo4j_password = getattr(settings, 'NEO4J_PASSWORD', '')
             if neo4j_uri and NEO4J_AVAILABLE:
                 self._graph = Neo4jGraph(

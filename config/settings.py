@@ -62,6 +62,7 @@ class Settings(BaseSettings):
 
     # Neo4j Aura Free (Knowledge Graph)
     NEO4J_URI: str = ""  # e.g. neo4j+s://xxxxxx.databases.neo4j.io
+    NEO4J_URL: str = ""  # Alias to support user's .env naming
     NEO4J_PASSWORD: str = ""
 
     # Zilliz Cloud Free (Milvus vector DB)
@@ -187,6 +188,11 @@ class Settings(BaseSettings):
     RETENTION_REPORTS_DAYS: int = 365  # AI 리포트 영구에 가깝게
     RETENTION_CVD_DAYS: int = 30
     RETENTION_GRAPH_DAYS: int = 0  # 0 = 영구 보존 (Neo4j Aura free: 200K nodes)
+
+    @property
+    def neo4j_uri(self) -> str:
+        """Resolve either NEO4J_URI or NEO4J_URL from .env"""
+        return self.NEO4J_URI or self.NEO4J_URL
 
     @property
     def vertex_region(self) -> str:
