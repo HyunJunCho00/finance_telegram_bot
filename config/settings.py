@@ -281,7 +281,7 @@ class SecretManager:
     def get_secret(self, secret_id: str, version: str = "latest") -> str:
         name = f"projects/{self.project_id}/secrets/{secret_id}/versions/{version}"
         response = self.client.access_secret_version(request={"name": name})
-        return response.payload.data.decode("UTF-8")
+        return response.payload.data.decode("UTF-8").strip()
 
     def load_all_secrets(self) -> dict:
         secrets = {}

@@ -15,9 +15,12 @@ def test_neo4j(settings):
     password = settings.NEO4J_PASSWORD
     user = "neo4j"
     
-    if not uri or not password:
-        print("[FAIL] Skip: NEO4J_URI or NEO4J_PASSWORD missing in Settings")
-        return False
+    # Debug info (masked)
+    if uri:
+        print(f"Target URI: {uri}")
+    if password:
+        masked_pwd = password[0] + "*" * (len(password)-2) + password[-1] if len(password) > 2 else "***"
+        print(f"Password Loaded (Masked): {masked_pwd} (Length: {len(password)})")
 
     # Attempt 1: Standard
     try:
