@@ -110,17 +110,31 @@ class Neo4jGraph:
                         e.description = $description,
                         e.mention_count = 1,
                         e.first_seen = $timestamp,
-                        e.last_seen = $timestamp
+                        e.last_seen = $timestamp,
+                        e.evidence_count = 1,
+                        e.evidence_list = [$source_id],
+                        e.status = 'PENDING'
                     ON MATCH SET
                         e.description = CASE
-                            WHEN size(e.description) < 500
-                            THEN e.description + ' | ' + $description
-                            ELSE $description
+                            WHEN size(e.description) < 500 AND NOT e.description CONTAINS $description THEN e.description + ' | ' + $description
+                            ELSE e.description
                         END,
                         e.mention_count = e.mention_count + 1,
-                        e.last_seen = $timestamp
+                        e.last_seen = $timestamp,
+                        e.evidence_count = CASE 
+                            WHEN NOT $source_id IN e.evidence_list THEN coalesce(e.evidence_count, 1) + 1 
+                            ELSE coalesce(e.evidence_count, 1) 
+                        END,
+                        e.evidence_list = CASE 
+                            WHEN NOT $source_id IN e.evidence_list THEN e.evidence_list + [$source_id] 
+                            ELSE e.evidence_list 
+                        END,
+                        e.status = CASE
+                            WHEN e.status = 'PENDING' AND NOT $source_id IN e.evidence_list AND coalesce(e.evidence_count, 1) >= 2 THEN 'CORROBORATED'
+                            ELSE coalesce(e.status, 'PENDING')
+                        END
                 """, name=name.lower(), type=entity_type, description=description[:300],
-                     timestamp=timestamp)
+                     timestamp=timestamp, source_id=source_id)
         except Exception as e:
             logger.error(f"Neo4j upsert_entity error: {e}")
 
@@ -141,17 +155,66 @@ class Neo4jGraph:
                         r.weight = $weight,
                         r.first_seen = $timestamp,
                         r.last_seen = $timestamp,
-                        r.count = 1
+                        r.count = 1,
+                        r.evidence_count = 1,
+                        r.evidence_list = [$source_id],
+                        r.status = 'PENDING'
                     ON MATCH SET
-                        r.description = $description,
+                        r.description = CASE
+                            WHEN size(r.description) < 300 AND NOT r.description CONTAINS $description THEN r.description + ' | ' + $description
+                            ELSE r.description
+                        END,
                         r.weight = r.weight + $weight,
                         r.last_seen = $timestamp,
-                        r.count = r.count + 1
+                        r.count = r.count + 1,
+                        r.evidence_count = CASE 
+                            WHEN NOT $source_id IN r.evidence_list THEN coalesce(r.evidence_count, 1) + 1 
+                            ELSE coalesce(r.evidence_count, 1) 
+                        END,
+                        r.evidence_list = CASE 
+                            WHEN NOT $source_id IN r.evidence_list THEN r.evidence_list + [$source_id] 
+                            ELSE r.evidence_list 
+                        END,
+                        r.status = CASE
+                            WHEN r.status = 'PENDING' AND NOT $source_id IN r.evidence_list AND coalesce(r.evidence_count, 1) >= 2 THEN 'CORROBORATED'
+                            ELSE coalesce(r.status, 'PENDING')
+                        END
                 """, source=source.lower(), target=target.lower(),
                      rel_type=rel_type, description=description[:200],
                      weight=weight, timestamp=timestamp)
         except Exception as e:
             logger.error(f"Neo4j upsert_relationship error: {e}")
+
+    def get_triangulation_candidates(self, limit: int = 10) -> List[Dict]:
+        """Fetch PENDING or CORROBORATED relationships to be verified by web search."""
+        if not self.driver:
+            return []
+        try:
+            with self.driver.session() as session:
+                result = session.run("""
+                    MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity)
+                    WHERE r.status IN ['PENDING', 'CORROBORATED']
+                    RETURN s.name AS source, t.name AS target, r.type AS rel_type, 
+                           r.description AS description, r.status AS status, r.evidence_count AS evidence_count
+                    ORDER BY r.evidence_count DESC, r.last_seen DESC
+                    LIMIT $limit
+                """, limit=limit)
+                return [dict(rec) for rec in result]
+        except Exception as e:
+            logger.error(f"Neo4j get_triangulation_candidates error: {e}")
+            return []
+
+    def update_relationship_status(self, source: str, target: str, rel_type: str, status: str, weight_boost: float = 0.0):
+        if not self.driver:
+            return
+        try:
+            with self.driver.session() as session:
+                session.run("""
+                    MATCH (s:Entity {name: $source})-[r:RELATES_TO {type: $rel_type}]->(t:Entity {name: $target})
+                    SET r.status = $status, r.weight = r.weight + $weight_boost
+                """, source=source, target=target, rel_type=rel_type, status=status, weight_boost=weight_boost)
+        except Exception as e:
+            logger.error(f"Neo4j update_relationship_status error: {e}")
 
     def get_local_context(self, entity: str, max_depth: int = 2, limit: int = 20) -> Dict:
         """Low-level retrieval: BFS from entity, up to max_depth hops."""
@@ -502,21 +565,66 @@ class InMemoryFallback:
                 del self.entity_meta[old_name]
                 self.edges.pop(old_name, None)
                 self.edge_counts.pop(old_name, None)
+        source_id = kwargs.get("source_id", "")
         if name not in self.entity_meta:
-            self.entity_meta[name] = {"type": entity_type, "desc": description, "count": 0, "first": ts}
+            self.entity_meta[name] = {"type": entity_type, "desc": description, "count": 0, "first": ts, "evidence_count": 0, "evidence_list": [], "status": "PENDING"}
         self.entity_meta[name]["count"] += 1
         self.entity_meta[name]["last"] = ts
+        if source_id and source_id not in self.entity_meta[name]["evidence_list"]:
+            self.entity_meta[name]["evidence_list"].append(source_id)
+            self.entity_meta[name]["evidence_count"] += 1
+        if self.entity_meta[name]["status"] == "PENDING" and self.entity_meta[name]["evidence_count"] >= 2:
+            self.entity_meta[name]["status"] = "CORROBORATED"
         self.edge_counts[name] += 1
 
     def upsert_relationship(self, source, target, rel_type, **kwargs):
         source, target = source.lower(), target.lower()
-        self.edges[source].append({
-            "target": target, "type": rel_type,
-            "desc": kwargs.get("description", ""),
-            "timestamp": kwargs.get("timestamp", ""),
-        })
+        ts = kwargs.get("timestamp", "")
+        source_id = kwargs.get("source_id", "")
+        
+        existing = next((e for e in self.edges[source] if e["target"] == target and e["type"] == rel_type), None)
+        if existing:
+            if source_id and source_id not in existing.get("evidence_list", []):
+                existing.setdefault("evidence_list", []).append(source_id)
+                existing["evidence_count"] = existing.get("evidence_count", 0) + 1
+            if existing.get("status", "PENDING") == "PENDING" and existing["evidence_count"] >= 2:
+                existing["status"] = "CORROBORATED"
+            existing["timestamp"] = ts
+        else:
+            self.edges[source].append({
+                "target": target, "type": rel_type,
+                "desc": kwargs.get("description", ""),
+                "timestamp": ts,
+                "evidence_count": 1,
+                "evidence_list": [source_id] if source_id else [],
+                "status": "PENDING"
+            })
         self.edge_counts[source] += 1
         self.edge_counts[target] += 1
+
+    def get_triangulation_candidates(self, limit: int = 10) -> List[Dict]:
+        candidates = []
+        for source, rels in self.edges.items():
+            for r in rels:
+                if r.get("status", "PENDING") in ["PENDING", "CORROBORATED"]:
+                    candidates.append({
+                        "source": source,
+                        "target": r["target"],
+                        "rel_type": r["type"],
+                        "description": r.get("desc", ""),
+                        "status": r.get("status", "PENDING"),
+                        "evidence_count": r.get("evidence_count", 1)
+                    })
+        candidates.sort(key=lambda x: (x["evidence_count"], x.get("timestamp", "")), reverse=True)
+        return candidates[:limit]
+
+    def update_relationship_status(self, source: str, target: str, rel_type: str, status: str, weight_boost: float = 0.0):
+        source, target = source.lower(), target.lower()
+        if source in self.edges:
+            for r in self.edges[source]:
+                if r["target"] == target and r["type"] == rel_type:
+                    r["status"] = status
+                    r["weight"] = r.get("weight", 1.0) + weight_boost
 
     def get_local_context(self, entity, max_depth=2, limit=20):
         entity = entity.lower()
@@ -899,20 +1007,26 @@ Rules:
         if doc_id in self._ingested_ids:
             return {"status": "duplicate_id", "doc_id": doc_id}
 
-        # Step 0: Semantic Deduplication using Vector Store
+        # Step 0: Semantic Bot Spam Check using Vector Store (Independence Check)
         embedding = self._get_embedding(text[:512])
         if embedding is not None:
-            # Search for highly similar past messages
+            # Search for highly similar past messages to detect verbatim spam
             similar_docs = []
             if isinstance(self.vector_store, InMemoryFallback):
                 similar_docs = self.vector_store.search_vectors(embedding, top_k=1)
             else:
                 similar_docs = self.vector_store.search(embedding, top_k=1)
                 
-            if similar_docs and similar_docs[0].get("score", 0) > 0.92:
-                logger.info(f"RAG Dedup: Skipping '{text[:50]}...' (Score: {similar_docs[0].get('score', 0):.2f})")
-                self._ingested_ids.add(doc_id)
-                return {"status": "duplicate_semantic", "doc_id": doc_id}
+            if similar_docs and similar_docs[0].get("score", 0) > 0.96:
+                past_doc = similar_docs[0]
+                past_channel = past_doc.get("channel", "")
+                if past_channel == channel:
+                    # Ignore exact duplicates from the same channel (Spam)
+                    logger.info(f"Truth Engine: Discarding exact forward from same channel '{text[:50]}...'")
+                    self._ingested_ids.add(doc_id)
+                    return {"status": "spam_same_channel", "doc_id": doc_id}
+                else:
+                    logger.info(f"Truth Engine: High similarity cross-channel message '{text[:50]}...'. Will extract triplets for corroboration.")
 
         # Step 1: LLM-based extraction (or regex fallback)
         ai = self._get_ai_client()
@@ -1027,40 +1141,70 @@ Rules:
             logger.info(f"LightRAG ingested {count}/{len(messages)} (dup={skipped_dup}, stats={stats})")
         return count
 
-    def query(self, query_text: str, mode: str = "hybrid", top_k: int = 10) -> Dict:
-        """Query the Graph RAG.
-
-        Modes (LightRAG 정석 Dual-level Retrieval):
-        - "local": entity neighbors, specific facts (Low-level)
-        - "global": community summaries, abstract topics (High-level)
-        - "hybrid": both combined (recommended)
-        """
-        # Extract entities from query
+    def query(self, query_text: str, top_k: int = 10) -> Dict:
+        """Query the Logical Truth Engine (Intent-Based)."""
+        ai = self._get_ai_client()
+        intent = "hybrid"
+        
+        # Intent Classification (Gemini Flash)
+        if ai:
+            prompt = f"Analyze this user query: '{query_text}'. Classify the intent strictly as one of: [FACT_CHECK, MARKET_OVERVIEW, NARRATIVE_SEARCH]. Output only the classification word."
+            try:
+                resp = ai.generate_response(
+                    system_prompt="You are an intent classifier for a financial truth engine. Output exactly one word.",
+                    user_message=prompt,
+                    temperature=0.1, max_tokens=20, role="rag_extraction"
+                )
+                classification = resp.strip().upper()
+                if "FACT" in classification: 
+                    intent = "local"
+                    top_k = 5  # Fact checks need precision, less noise
+                elif "OVERVIEW" in classification: 
+                    intent = "global"
+                else: 
+                    intent = "hybrid"
+            except Exception:
+                pass
+                
+        # Extract entities from query using LLM for precision
         query_entities = []
-        known_coins = {'btc', 'bitcoin', 'eth', 'ethereum', 'sol', 'xrp', 'bnb'}
-        known_orgs = {'sec', 'fed', 'binance', 'blackrock', 'grayscale'}
-        query_lower = query_text.lower()
-        for entity in known_coins | known_orgs:
-            if entity in query_lower:
-                query_entities.append(entity)
+        if ai and intent in ("local", "hybrid"):
+            entity_prompt = f"Extract the core financial entities (coins, exchanges, organizations) from this query: '{query_text}'. Return a comma-separated list of keywords. If none, return empty."
+            try:
+                resp = ai.generate_response(
+                    system_prompt="Extract keywords.", user_message=entity_prompt,
+                    temperature=0.1, max_tokens=50, role="rag_extraction"
+                )
+                query_entities = [e.strip().lower() for e in resp.split(",") if e.strip()]
+            except Exception:
+                pass
+                
+        # Fallback keyword matching
+        if not query_entities:
+            known_coins = {'btc', 'bitcoin', 'eth', 'ethereum', 'sol', 'xrp', 'bnb'}
+            known_orgs = {'sec', 'fed', 'binance', 'blackrock', 'grayscale'}
+            query_lower = query_text.lower()
+            for entity in known_coins | known_orgs:
+                if entity in query_lower:
+                    query_entities.append(entity)
 
         result = {
             "local_context": {},
             "global_context": {},
             "semantic_results": [],
             "entities_found": query_entities,
-            "mode": mode,
+            "intent": intent,
         }
 
-        # ── Local retrieval (Low-level: entity neighbors) ──
-        if mode in ("local", "hybrid"):
+        # ── Local retrieval (Low-level: exact facts) ──
+        if intent in ("local", "hybrid"):
             for entity in query_entities:
                 ctx = self.graph.get_local_context(entity, max_depth=2)
                 if ctx.get("neighbors") or ctx.get("paths"):
                     result["local_context"][entity] = ctx
 
         # ── Global retrieval (High-level: important entities + topics) ──
-        if mode in ("global", "hybrid"):
+        if intent in ("global", "hybrid"):
             result["global_context"] = self.graph.get_global_context(top_k=10)
 
         # ── Semantic search (vector similarity) ──
@@ -1077,39 +1221,45 @@ Rules:
 
         return result
 
-    def format_context_for_agents(self, query_result: Dict, max_length: int = 2000) -> str:
-        """Format Graph RAG query result as compact text for agent consumption."""
+    def format_context_for_agents(self, query_result: Dict, max_length: int = 2500) -> str:
+        """Format Logical Truth Engine query result as compact text for agent consumption."""
         lines = []
+        intent = query_result.get("intent", "hybrid")
+        lines.append(f"[QUERY INTENT: {intent.upper()}]")
 
         # Local context (specific facts about queried entities)
         local_ctx = query_result.get("local_context", {})
         if local_ctx:
-            lines.append("[KNOWLEDGE GRAPH - Local]")
+            lines.append("\n[EVIDENCE GRAPH - Local Facts]")
             for entity, ctx in local_ctx.items():
-                for n in ctx.get("neighbors", [])[:4]:
+                for n in ctx.get("neighbors", [])[:5]:
                     rel_type = n.get("rel_type", n.get("type", "?"))
                     target = n.get("name", n.get("target", "?"))
-                    lines.append(f"  ({entity}) --[{rel_type}]--> ({target})")
-                for p in ctx.get("paths", [])[:2]:
+                    # The graph queries need to return status if we want to show it, assuming they don't yet, we mark "EVIDENCE: X sources"
+                    weight = n.get("weight", 1)
+                    lines.append(f"  ({entity}) --[{rel_type}]--> ({target}) [Sources: {weight:.1f}]")
+                for p in ctx.get("paths", [])[:3]:
                     lines.append(
                         f"  ({entity}) -> ({p.get('via','?')}) --[{p.get('r2_type','?')}]--> "
-                        f"({p.get('target','?')}) [2-hop]"
+                        f"({p.get('target','?')}) [2-hop Inference]"
                     )
 
         # Global context (market-wide important entities)
         global_ctx = query_result.get("global_context", {})
         important = global_ctx.get("important_entities", [])
         if important:
+            lines.append("\n[MARKET THEMES - Key Entities]")
             ent_str = ", ".join([f"{e['name']}({e.get('mentions',0)})" for e in important[:5]])
-            lines.append(f"[KEY ENTITIES] {ent_str}")
+            lines.append(f"  {ent_str}")
 
         recent_rels = global_ctx.get("recent_relationships", [])
         if recent_rels:
-            lines.append("[RECENT EVENTS]")
+            lines.append("\n[ACTIVE NARRATIVES - Recent Graph Events]")
             for r in recent_rels[:5]:
+                weight = r.get("weight", 1)
                 lines.append(
-                    f"  ({r['source']}) --[{r['rel_type']}]--> ({r['target']}): "
-                    f"{r.get('description', '')[:80]}"
+                    f"  ({r['source']}) --[{r['rel_type']}]--> ({r['target']}) [Sources: {weight:.1f}]: "
+                    f"{r.get('description', '')[:100]}"
                 )
 
         # Semantic search results (relevant news)
@@ -1221,6 +1371,59 @@ Rules:
                 
         except Exception as e:
             logger.error(f"LightRAG Restoration error: {e}")
+
+    def run_triangulation_worker(self, limit: int = 5):
+        """Cross-Domain Triangulation: Verifies CORROBORATED claims via Web Search (Perplexity)."""
+        logger.info("Truth Engine: Starting Triangulation Worker...")
+        try:
+            from collectors.perplexity_collector import perplexity_collector
+        except ImportError:
+            logger.warning("Truth Engine: Perplexity collector not available for triangulation.")
+            return
+
+        candidates = []
+        if hasattr(self.graph, 'get_triangulation_candidates'):
+            candidates = self.graph.get_triangulation_candidates(limit=limit)
+
+        verified_count = 0
+        for cand in candidates:
+            # We only triangulate claims that have multiple sources (CORROBORATED)
+            if cand.get("status") != "CORROBORATED":
+                continue
+                
+            source = cand["source"]
+            target = cand["target"]
+            rel_type = cand["rel_type"]
+            desc = cand["description"]
+            
+            logger.info(f"Triangulating claim: ({source}) --[{rel_type}]--> ({target})")
+            
+            # Use Perplexity targeted search to verify
+            query_entity = f"{source} and {target}"
+            context = f"Claim: {source} {rel_type} {target}. Description: {desc}. Is there recent news confirming this?"
+            
+            try:
+                result = perplexity_collector.search_targeted(
+                    entity=query_entity,
+                    entity_type="narrative",
+                    context=context
+                )
+                
+                # If Perplexity finds key facts corroborating the entity context
+                if result.get("status") == "ok" and len(result.get("key_facts", [])) > 0:
+                    logger.info(f"Truth Engine: Triangulation SUCCEEDED for ({source})-({target}). Moving to PROBABLE.")
+                    if hasattr(self.graph, "update_relationship_status"):
+                        self.graph.update_relationship_status(
+                            source=source, target=target, rel_type=rel_type,
+                            status="PROBABLE", weight_boost=2.0
+                        )
+                    verified_count += 1
+                else:
+                    logger.info(f"Truth Engine: Triangulation FAILED for ({source})-({target}). Keeping as CORROBORATED.")
+            except Exception as e:
+                logger.error(f"Truth Engine: Triangulation search error: {e}")
+                
+        logger.info(f"Truth Engine: Triangulation cycle complete. Verified: {verified_count}/{len(candidates)}")
 
 
 # Singleton instance
