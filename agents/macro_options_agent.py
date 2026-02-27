@@ -9,6 +9,7 @@ class MacroOptionsAgent:
 Your job is to read institutional hedging and systemic regime changes.
 
 You will be given:
+- Current Trading Mode (SWING or POSITION)
 - Deribit Context (DVOL, PCR, IV Term Structure, 25d Skew)
 - Macro Context (DGS10, DXY, Nasdaq, etc.)
 
@@ -21,8 +22,8 @@ Schema:
   "rationale": "short explanation of institutional positioning"
 }"""
 
-    def analyze(self, deribit_context: str, macro_context: str) -> dict:
-        user_message = f"Deribit Context:\n{deribit_context}\n\nMacro Context:\n{macro_context}\n\nAnalyze and return JSON."
+    def analyze(self, deribit_context: str, macro_context: str, mode: str = "SWING") -> dict:
+        user_message = f"Trading Mode: {mode}\n\nDeribit Context:\n{deribit_context}\n\nMacro Context:\n{macro_context}\n\nAnalyze and return JSON."
         try:
             response = claude_client.generate_response(
                 system_prompt=self.SYSTEM_PROMPT,

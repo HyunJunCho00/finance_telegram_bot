@@ -168,13 +168,15 @@ class Settings(BaseSettings):
     CHART_LOW_RES: bool = True  # default True for cost savings
     CHART_IMAGE_WIDTH: int = 1200
     CHART_IMAGE_HEIGHT: int = 800
-    CHART_IMAGE_DPI: int = 100
+    CHART_IMAGE_DPI: int = 120
 
     # ===== Candle Limits per Mode (1m candles needed from DB) =====
     # SWING: 14400 (10 days) → for 1h/4h + needs 1d from GCS
     # POSITION: 10080 (7 days) → for 4h + needs 1d/1w from GCS
-    SWING_CANDLE_LIMIT: int = 14400
-    POSITION_CANDLE_LIMIT: int = 10080
+    # SWING: 10000 (approx 1 year of 1h)
+    # POSITION: 60000 (approx 6-7 years of 1h)
+    SWING_CANDLE_LIMIT: int = 10000 
+    POSITION_CANDLE_LIMIT: int = 60000
 
     # ===== Analysis Intervals per Mode =====
     # SWING: every 4 hours
@@ -276,8 +278,8 @@ class Settings(BaseSettings):
         """How far back to look for supplementary data (funding, CVD, liquidations)."""
         mode = self.trading_mode
         if mode == TradingMode.POSITION:
-            return 168  # 7 days
-        return 24
+            return 44000  # ~5 years for macro cycle context (1W scale)
+        return 8760   # 1 year for SWING (1D scale)
 
 
 class SecretManager:

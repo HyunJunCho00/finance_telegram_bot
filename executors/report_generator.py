@@ -48,136 +48,89 @@ class ReportGenerator:
             logger.error(f"Report generation error: {e}")
             return {}
 
+        except Exception as e:
+            logger.error(f"Error formatting advanced indicators: {e}")
+
     def format_telegram_message(self, report: Dict, mode: TradingMode = TradingMode.SWING) -> str:
+        """Premium formatted Telegram message with rich layout and emojis."""
         decision = json.loads(report['final_decision']) if isinstance(report['final_decision'], str) else report['final_decision']
         market_data = json.loads(report['market_data']) if isinstance(report['market_data'], str) else report['market_data']
 
         d = decision.get('decision', 'N/A')
-        icon = {'LONG': '\U0001F7E2', 'SHORT': '\U0001F534', 'HOLD': '\U0001F7E1'}.get(d, '\u2B55')
-        mode_icon_map = {
-            TradingMode.SWING: '\U0001F4C8',
-            TradingMode.POSITION: '\U0001F3D4\uFE0F',
-        }
-        mode_label_map = {
-            TradingMode.SWING: 'SWING',
-            TradingMode.POSITION: 'POSITION',
-        }
-        mode_icon = mode_icon_map.get(mode, '\u2B55')
-        mode_label = mode_label_map.get(mode, mode.value.upper())
-
-        key_factors = decision.get('key_factors', [])
-        factors_text = '\n'.join([f'  \u2022 {f}' for f in key_factors[:5]]) if key_factors else '  N/A'
-
-        # Get relevant timeframe data based on mode
-        if mode == TradingMode.POSITION:
-            tf_primary = market_data.get('timeframes', {}).get('1d', {})
-            tf_secondary = market_data.get('timeframes', {}).get('1w', {})
-            tf_labels = ('1D', '1W')
+        confidence = decision.get('confidence', 0)
+        
+        # Color coding for decision
+        if d == 'LONG':
+            header_icon = "🟢"
+            status_text = "✨ BULLISH SETUP DETECTED"
+        elif d == 'SHORT':
+            header_icon = "🔴"
+            status_text = "📉 BEARISH SETUP DETECTED"
         else:
-            tf_primary = market_data.get('timeframes', {}).get('4h', {})
-            tf_secondary = market_data.get('timeframes', {}).get('1d', {})
-            tf_labels = ('4H', '1D')
+            header_icon = "🟡"
+            status_text = "⚖️ NEUTRAL / MONITORING"
 
-        # Fibonacci info (swing/position)
-        fib_text = ""
-        fib = market_data.get('fibonacci', {}).get('4h')
-        if fib and mode in (TradingMode.SWING, TradingMode.POSITION):
-            fib_text = f"\n<b>Fibonacci ({fib.get('trend', '?')}):</b>\n  38.2%: {fib.get('fib_382', '?')} | 50%: {fib.get('fib_500', '?')} | 61.8%: {fib.get('fib_618', '?')}\n  Nearest: {fib.get('nearest_fib', '?')}"
+        mode_label = "SWING" if mode == TradingMode.SWING else "POSITION"
+        mode_icon = "📈" if mode == TradingMode.SWING else "🏔️"
+        
+        # Summary block (High level)
+        summary_lines = [
+            f"{header_icon} <b>{mode_label} REPORT | {report['symbol']}</b> {mode_icon}",
+            f"<code>{report['timestamp'][:16].replace('T', ' ')} UTC</code>",
+            "",
+            f"🎯 <b>DECISION: {d}</b>",
+            f"📊 <b>Confidence: {confidence}%</b> | <b>Alloc: {decision.get('allocation_pct', 0)}%</b>",
+            f"⏲️ <b>Exp. Hold: {decision.get('hold_duration', 'N/A')}</b>",
+            "",
+        ]
 
-        hold_duration = decision.get('hold_duration', 'N/A')
+        # Targets block
+        def fmt_price(val):
+            if val is None or val == 0 or val == '0': return '---'
+            try: return f"{float(val):,.2f}"
+            except: return str(val)
 
-        # CRO Risk Note
-        veto_flag = "🚨 <b>CRO VETO APPLIED!</b>\n" if decision.get('cro_veto_applied') else ""
-        cro_note = f"\n{veto_flag}<b>CRO Risk Note:</b>\n{decision.get('risk_manager_note', 'No overlay applied.')}\n" if 'risk_manager_note' in decision else ""
+        summary_lines += [
+            "🏁 <b>TRADING TARGETS</b>",
+            f"  • Entry: <code>{fmt_price(decision.get('entry_price'))}</code>",
+            f"  • Stop : <code>{fmt_price(decision.get('stop_loss'))}</code>",
+            f"  • TP   : <code>{fmt_price(decision.get('take_profit'))}</code>",
+            "",
+        ]
 
-        # Execution Receipt
+        # Execution Status
         receipt_text = ""
         receipt = decision.get("execution_receipt")
         if receipt and receipt.get("success"):
-            strat = receipt.get('strategy_applied', 'UNKNOWN')
-            notional = receipt.get('total_notional', 0)
-            
-            # Formulate receipts block
-            orders = "\n".join([
-                f"    - [{r.get('exchange', '?')}] {r.get('side')} ${r.get('notional', 0):.0f} | ID: {r.get('order_id', '?')[:8]} | {r.get('note', '')}" 
-                for r in receipt.get('receipts', [])
-            ])
-            
-            # Formulate Active Pending Orders block from the State
-            active_list = report.get('active_orders', [])
-            active_str = ""
-            if active_list:
-                active_str = "\n<b>⏳ ACTIVE INTENTS (V5):</b>\n" + "\n".join([
-                    f"    - {o.get('execution_style')} | {o.get('side', o.get('direction', ''))} | Rem: ${o.get('remaining_amount', 0):.0f}"
-                    for o in active_list
-                ]) + "\n"
-                
-            mode_prefix = "[PAPER]" if settings.PAPER_TRADING_MODE else "[LIVE]"
-            receipt_text = f"<b>{mode_prefix} EXECUTION DESK ({strat})</b>\n  Total Notional: ${notional:.0f}\n{orders}\n{active_str}"
+            orders_count = len(receipt.get('receipts', []))
+            receipt_text = f"✅ <b>EXECUTION ACTIVE</b> ({orders_count} orders)\n"
         elif recipe := decision.get("execution_receipt"):
-            receipt_text = f"<b>🚨 EXECUTION FAILED:</b> {recipe.get('error', recipe.get('note', 'Unknown'))}\n"
+            if recipe.get("note") == "No valid trade direction":
+                receipt_text = "⏸️ <b>NO TRADE TRIGGERED</b> (Directionless)\n"
+            else:
+                receipt_text = f"🚨 <b>EXECUTION ERROR:</b> {recipe.get('error', 'Check Logs')}\n"
+        
+        if receipt_text:
+            summary_lines.append(receipt_text)
 
-        # ── Advanced Structural Indicators ──
-        struct_text = ""
-        try:
-            # 1. Market Structure (Primary TF)
-            ms = market_data.get('market_structure', {}).get(tf_labels[0].lower(), {})
-            if isinstance(ms, dict) and ms.get('structure'):
-                ms_status = f"{ms.get('structure').upper()}"
-                if ms.get('msb'):
-                    ms_status += f" (MSB: {ms['msb']['type']})"
-                elif ms.get('choch'):
-                    ms_status += f" (CHoCH: {ms['choch']['type']})"
-                struct_text += f"<b>Market Struct:</b> {ms_status}\n"
+        # Key Factors (Bulleted)
+        key_factors = decision.get('key_factors', [])
+        if key_factors:
+            summary_lines.append("🔍 <b>KEY RATIONALE</b>")
+            for f in key_factors[:5]:
+                summary_lines.append(f"  ▫️ {f}")
+            summary_lines.append("")
 
-            # 2. Fair Value Gaps (FVG)
-            fvg_list = market_data.get('fvg', {}).get(tf_labels[0].lower(), [])
-            unfilled_fvg = [f for f in fvg_list if isinstance(f, dict) and not f.get('filled')]
-            if unfilled_fvg:
-                # Get the most recent/relevant FVG
-                f = unfilled_fvg[0]
-                struct_text += f"<b>Unfilled FVG:</b> {f['type'].title()} {f['gap_low']} ~ {f['gap_high']}\n"
+        # Post-Mortem / Reasoning (Cleaned)
+        reasoning = decision.get('reasoning', 'N/A')
+        # Truncate reasoning but keep it substantial
+        if len(reasoning) > 800:
+            reasoning = reasoning[:800] + "..."
+            
+        summary_lines.append("📝 <b>PM ANALYSIS</b>")
+        summary_lines.append(f"<i>{reasoning}</i>")
 
-            # 3. Confluence Zones
-            cz_list = market_data.get('confluence_zones', [])
-            if cz_list:
-                z = cz_list[0]
-                struct_text += f"<b>Confluence:</b> Strong cluster @ {z['price']} (strength: {z['strength']})\n"
-                
-        except Exception as e:
-            logger.error(f"Error formatting advanced indicators: {e}")
-
-        # Logic to handle 0 values as N/A for cleaner reports
-        def fmt_price(val):
-            if val is None or val == 0 or val == '0':
-                return 'N/A'
-            return val
-
-        message = f"""{icon} <b>{mode_label} REPORT</b> {mode_icon}
-
-<b>Symbol:</b> {report['symbol']}
-<b>Time:</b> {report['timestamp'][:19]} UTC
-
-<b>DECISION: {d}</b>
-<b>Allocation:</b> {decision.get('allocation_pct', 0)}%
-<b>Leverage:</b> {decision.get('leverage', 1)}x
-<b>Confidence:</b> {decision.get('confidence', 0)}%
-<b>Hold:</b> {hold_duration}
-
-<b>Entry:</b> {fmt_price(decision.get('entry_price'))}
-<b>Stop Loss:</b> {fmt_price(decision.get('stop_loss'))}
-<b>Take Profit:</b> {fmt_price(decision.get('take_profit'))}
-
-{receipt_text}
-<b>Key Factors (PM):</b>
-{factors_text}
-{cro_note}
-{struct_text}{fib_text}
-
-<b>PM Reasoning:</b>
-{decision.get('reasoning', 'N/A')[:3000]}"""
-
-        return message
+        return "\n".join(summary_lines)
 
     @api_retry(max_attempts=3, delay_seconds=10)
     async def send_telegram_notification(self, report: Dict, chart_bytes: Optional[bytes] = None,
@@ -187,21 +140,19 @@ class ReportGenerator:
             message = self.format_telegram_message(report, mode)
 
             if chart_bytes:
+                logger.info(f"Sending Telegram photo for {report['symbol']} ({len(chart_bytes)} bytes)")
                 photo = BytesIO(chart_bytes)
                 photo.name = f"{report['symbol']}_chart.png"
-                caption = message[:1024]
-                await bot.send_photo(
-                    chat_id=self.chat_id,
-                    photo=photo,
-                    caption=caption,
-                    parse_mode='HTML'
-                )
-                if len(message) > 1024:
-                    await bot.send_message(
-                        chat_id=self.chat_id,
-                        text=message,
-                        parse_mode='HTML'
-                    )
+                
+                # If message is short, send as caption. Otherwise send separately.
+                if len(message) <= 1024:
+                    await bot.send_photo(chat_id=self.chat_id, photo=photo, caption=message, parse_mode='HTML')
+                else:
+                    # Send photo first with a brief header
+                    header = f"<b>📈 {report['symbol']} Chart</b>"
+                    await bot.send_photo(chat_id=self.chat_id, photo=photo, caption=header, parse_mode='HTML')
+                    # Follow up with full report message
+                    await bot.send_message(chat_id=self.chat_id, text=message, parse_mode='HTML')
             else:
                 await bot.send_message(
                     chat_id=self.chat_id,

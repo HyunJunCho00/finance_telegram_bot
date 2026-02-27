@@ -12,7 +12,7 @@ class JudgeAgent:
     ONLY agent that receives chart image (SWING mode, cost optimization).
     AI decides everything - we just deliver data."""
 
-    SWING_PROMPT = """You are a senior crypto portfolio manager making SWING/POSITION trading decisions.
+    BASE_PROMPT = """You are a senior crypto portfolio manager making {mode_upper} trading decisions.
 
 You receive ALL available data:
 1. Multi-timeframe indicators (1h, 4h, 1d) with Fibonacci levels
@@ -22,22 +22,11 @@ You receive ALL available data:
 5. LightRAG relationship context (connected events and entities)
 6. Expert Agent analyses from the Blackboard (Liquidity, Microstructure, Macro/Options)
 7. Your previous decision (maintain consistency unless data clearly changed)
-8. Chart image (if provided) - Uses 6-year history for indicators but zoomed into mode-specific windows (SWING: 3-6m, POSITION: 1-2y) for visual clarity.
+8. Chart image (if provided) - Uses full history for indicators to prevent distortion. Visual window zooms: SWING (~6 months for trend clarity), POSITION (~5 years to capture previous ATHs and major historical resistance).
 
 YOUR JOB: Make a FINAL trading decision using YOUR OWN judgment.
 
-Professional swing trading principles you should consider:
-- Top-down analysis: 1d determines bias, 4h identifies setup, 1h confirms entry
-- Fibonacci 38.2%/50%/61.8% are key retracement entry zones
-- Extreme funding rates are contrarian signals (high positive = potential top)
-- OI-price divergence warns of fragile moves (rising OI + flat price = danger)
-- Volume profile POC acts as price magnet
-- CVD divergence: rising CVD + flat price = accumulation; falling CVD + rising price = distribution
-- Global OI: sum across 3 exchanges eliminates single-exchange noise
-- Market narrative from Perplexity provides the "WHY" behind moves
-- Position sizing: 10-25% of Kelly criterion (conservative)
-- Leverage: 1-3x maximum for swing trades
-- Hold period: days to weeks
+{mode_specific_rules}
 
 Output your decision as JSON:
 {
@@ -56,6 +45,29 @@ Output your decision as JSON:
 You have FULL AUTONOMY. If the market is unclear, HOLD is always valid.
 CRITICAL V5 RULE: You will be given a list of ACTIVE_ORDERS (e.g. pending DCA chunks). If the market paradigm shifts against your active orders, you MUST output "decision": "CANCEL_AND_CLOSE". If you just want to add to an existing order, you can output LONG/SHORT again.
 Be aware of your previous decision for consistency."""
+
+    SWING_RULES = """Professional SWING trading principles you should consider:
+- Top-down analysis: 1d determines bias, 4h identifies setup, 1h confirms entry
+- Fibonacci 38.2%/50%/61.8% are key retracement entry zones
+- Extreme funding rates are contrarian signals (high positive = potential top)
+- OI-price divergence warns of fragile moves (rising OI + flat price = danger)
+- Volume profile POC acts as price magnet
+- CVD divergence: rising CVD + flat price = accumulation; falling CVD + rising price = distribution
+- Global OI: sum across 3 exchanges eliminates single-exchange noise
+- Market narrative from Perplexity provides the "WHY" behind moves
+- Position sizing: 10-25% of Kelly criterion (conservative)
+- Leverage: 1-3x maximum for swing trades
+- Hold period: days to weeks"""
+
+    POSITION_RULES = """Professional POSITION trading principles you should consider:
+- Top-down analysis: 1w determines macro bias, 1d identifies structural shifts
+- Macro cycles and previous All-Time Highs (ATH) act as absolute boundaries
+- Fundamental shifts and narrative multi-month trends are more important than daily orderbook noise
+- Extreme negative funding over long periods = generational bottom; Extreme positive over months = late cycle
+- DVOL (Deribit Volatility Index) spikes indicate capitulation/bottoms
+- Position sizing: 5-15% of Kelly criterion (highly conservative, room for deep drawdowns)
+- Leverage: 1x (Spot) or maximum 1.5x. Liquidation must be nearly impossible.
+- Hold period: months to years"""
 
     DEBATE_APPENDIX = """
 Swarm reasoning controls & Data Trust Hierarchy:
@@ -97,8 +109,10 @@ Swarm reasoning controls & Data Trust Hierarchy:
         active_orders: list = [],
         open_positions: str = "",
         symbol: str = "BTCUSDT"
-    ) -> Dict:
-        prompt = f"{self.SWING_PROMPT}\n\n{self.DEBATE_APPENDIX}"
+        mode_str = mode.value.upper()
+        mode_rules = self.POSITION_RULES if mode == TradingMode.POSITION else self.SWING_RULES
+        
+        prompt = f"{self.BASE_PROMPT.format(mode_upper=mode_str, mode_specific_rules=mode_rules)}\n\n{self.DEBATE_APPENDIX}"
         previous_decision = self.get_previous_decision(symbol=symbol)
 
         previous_context = "No previous decision available."

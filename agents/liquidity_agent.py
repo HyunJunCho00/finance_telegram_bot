@@ -9,6 +9,7 @@ class LiquidityAgent:
 Your sole job is to identify "Liquidity Sweeps" and "Orderflow Inconsistencies".
 
 You will be given:
+- Current Trading Mode (SWING or POSITION)
 - CVD Context (Whale accumulations vs Retail volume)
 - Liquidation Context (Density of stop-losses/liquidations near current price)
 
@@ -21,8 +22,8 @@ Schema:
   "rationale": "short explanation of the liquidity setup"
 }"""
 
-    def analyze(self, cvd_context: str, liquidation_context: str) -> dict:
-        user_message = f"CVD Context:\n{cvd_context}\n\nLiquidation Context:\n{liquidation_context}\n\nAnalyze and return JSON."
+    def analyze(self, cvd_context: str, liquidation_context: str, mode: str = "SWING") -> dict:
+        user_message = f"Trading Mode: {mode}\n\nCVD Context:\n{cvd_context}\n\nLiquidation Context:\n{liquidation_context}\n\nAnalyze and return JSON."
         try:
             response = claude_client.generate_response(
                 system_prompt=self.SYSTEM_PROMPT,

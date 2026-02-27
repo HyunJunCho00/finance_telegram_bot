@@ -122,6 +122,10 @@ def job_1hour_telegram():
         # 2. Synthesize and ingest
         from processors.telegram_batcher import telegram_batcher
         telegram_batcher.process_and_ingest(lookback_hours=1)
+        
+        # 3. Truth Engine: Triangulate corroborated claims via Perplexity (Web)
+        # Process 10 candidates per hour to manage API costs
+        light_rag.run_triangulation_worker(limit=10)
     except Exception as e:
         logger.error(f"1-hour Telegram job error: {e}")
 

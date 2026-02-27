@@ -17,8 +17,7 @@ What's NOT drawn (sent as text instead):
   - OI, Funding, CVD values → text
   - All numeric indicators → text
 
-Three modes:
-  - DAY_TRADING: 15m candles, last ~8 hours
+Two modes:
   - SWING: 4h candles, last ~10 days
   - POSITION: 1d candles, last ~90 days
 """
@@ -47,37 +46,42 @@ class ChartGenerator:
 
     def generate_chart(self, df: pd.DataFrame, analysis: Dict, symbol: str,
                        mode: TradingMode = TradingMode.SWING,
-                       liquidation_df: Optional[pd.DataFrame] = None) -> Optional[bytes]:
+                       liquidation_df: Optional[pd.DataFrame] = None,
+                       cvd_df: Optional[pd.DataFrame] = None,
+                       funding_df: Optional[pd.DataFrame] = None) -> Optional[bytes]:
         """Generate structure chart for any mode."""
         config = self._get_mode_config(mode)
-        return self._generate_structure_chart(df, analysis, symbol, config, liquidation_df)
+        return self._generate_structure_chart(df, analysis, symbol, config, 
+                                              liquidation_df, cvd_df, funding_df)
 
     def _get_mode_config(self, mode: TradingMode) -> Dict:
         """Per-mode chart configuration."""
         if mode == TradingMode.POSITION:
             return {
-                'resample_rule': '1D',
-                'tail_candles': 90,   # ~3 months
-                'min_candles': 15,
-                'title_suffix': '1D POSITION',
-                'fib_tf': '1d',
-                'structure_tfs': ['1d'],
-                'swing_tf': '1d',
+                'resample_rule': '1W',
+                'tail_candles': 260,   # ~5 years (Includes previous ATH for macro resistance levels)
+                'min_candles': 20,
+                'title_suffix': '1W POSITION (Macro Cycle)',
+                'fib_tf': '1w',
+                'structure_tfs': ['1w'],
+                'swing_tf': '1w',
             }
         else:  # SWING (default)
             return {
-                'resample_rule': '4h',
-                'tail_candles': 60,   # ~10 days
-                'min_candles': 10,
-                'title_suffix': '4H SWING',
-                'fib_tf': '4h',
-                'structure_tfs': ['1h', '4h'],
-                'swing_tf': '4h',
+                'resample_rule': '1D',
+                'tail_candles': 180,   # ~6 months (Maximized visual clarity for VLM to spot recent HH/HL structure and FVGs)
+                'min_candles': 30,
+                'title_suffix': '1D SWING',
+                'fib_tf': '1d',
+                'structure_tfs': ['4h', '1d'],
+                'swing_tf': '1d',
             }
 
     def _generate_structure_chart(self, df: pd.DataFrame, analysis: Dict,
                                    symbol: str, config: Dict,
-                                   liquidation_df: Optional[pd.DataFrame] = None) -> Optional[bytes]:
+                                   liquidation_df: Optional[pd.DataFrame] = None,
+                                   cvd_df: Optional[pd.DataFrame] = None,
+                                   funding_df: Optional[pd.DataFrame] = None) -> Optional[bytes]:
         """Core chart generation — candlesticks + structure overlays only."""
         try:
             # Prepare OHLCV
@@ -96,38 +100,123 @@ class ChartGenerator:
                 return None
 
             # 2. Calculate Indicators on FULL history
-            # Add EMA200 to full_resampled before slicing
-            import pandas_ta as ta
+            import pandas_ta_classic as ta
             full_resampled['ema200'] = ta.ema(full_resampled['close'], length=min(200, len(full_resampled)-1))
 
             # 3. Slice for VISUAL window
             chart_df = full_resampled.tail(config['tail_candles']).copy()
             chart_df.index.name = 'Date'
 
-            # Style — clean, minimal
+            # 4. Integrate CVD if provided
+            apds = []
+            if cvd_df is not None and not cvd_df.empty:
+                cvd = cvd_df.copy()
+                cvd['timestamp'] = pd.to_datetime(cvd['timestamp'], utc=True).dt.floor('min')
+                cvd = cvd.set_index('timestamp')
+                # Resample CVD to match OHLCV rule
+                cvd_resampled = cvd.resample(config['resample_rule']).sum().fillna(0)
+                # Calculate Cumulative Delta for visual trend
+                cvd_resampled['cvd_acc'] = (cvd_resampled.get('whale_buy_vol', 0) - cvd_resampled.get('whale_sell_vol', 0)).cumsum()
+                # Calculate individual bar delta
+                cvd_resampled['delta'] = cvd_resampled.get('whale_buy_vol', 0) - cvd_resampled.get('whale_sell_vol', 0)
+                
+                # Align with chart_df index
+                cvd_aligned = cvd_resampled.reindex(chart_df.index).ffill().fillna(0)
+                
+                # Panel 2: (Price 0, Vol 1, CVD Panel 2)
+                # 1. Cumulative CVD line
+                apds.append(mpf.make_addplot(cvd_aligned['cvd_acc'], panel=2, 
+                                           color='#8E44AD', width=1.5, 
+                                           ylabel='CVD', secondary_y=False))
+                # 2. Individual Delta bars (Green for Buy > Sell, Red for Sell > Buy)
+                colors = ['#27AE60' if d >= 0 else '#C0392B' for d in cvd_aligned['delta']]
+                apds.append(mpf.make_addplot(cvd_aligned['delta'], panel=2, 
+                                           type='bar', color=colors, alpha=0.3, 
+                                           secondary_y=True))
+
+            # 5. Integrate OI and Funding if provided
+            if funding_df is not None and not funding_df.empty:
+                fnd = funding_df.copy()
+                fnd['timestamp'] = pd.to_datetime(fnd['timestamp'], utc=True).dt.floor('min')
+                fnd = fnd.set_index('timestamp')
+                # Resample (OI is mean or last, Funding is mean)
+                fnd_resampled = fnd.resample(config['resample_rule']).agg({
+                    'open_interest': 'last',
+                    'funding_rate': 'mean'
+                }).ffill().fillna(0)
+                
+                fnd_aligned = fnd_resampled.reindex(chart_df.index).ffill().fillna(0)
+                
+                # Panel 3: Open Interest
+                apds.append(mpf.make_addplot(fnd_aligned['open_interest'], panel=3,
+                                           color='#2980B9', width=1.2,
+                                           ylabel='OI', secondary_y=False))
+                
+                # Funding Heat-tape (Calculated as a bar chart at the bottom of Panel 0)
+                # We'll use a specific color mapping for funding
+                # Green = Positive (Longs pay), Red = Negative (Shorts pay)
+                f_colors = ['#27AE60' if r > 0.0001 else '#C0392B' if r < -0.0001 else '#BDC3C7' 
+                           for r in fnd_aligned['funding_rate']]
+                # We plot this as a tiny bar at the bottom of the main panel or a new panel
+                # Let's put it in Panel 4 as a "Heat Tape"
+                apds.append(mpf.make_addplot(fnd_aligned['funding_rate'], panel=4,
+                                           type='bar', color=f_colors, alpha=0.8,
+                                           ylabel='Fnd', secondary_y=False))
+
+            # Upbit-style Professional Light Theme
             mc = mpf.make_marketcolors(
-                up='#4CAF50', down='#F44336',
+                up='#E74C3C', down='#3498DB',  # Red Up, Blue Down
                 edge='inherit', wick='inherit',
-                volume={'up': '#81C784', 'down': '#E57373'}
+                volume={'up': '#E74C3C44', 'down': '#3498DB44'}
             )
             style = mpf.make_mpf_style(
-                marketcolors=mc, gridstyle='-', gridcolor='#E0E0E0',
-                facecolor='white', figcolor='white'
+                marketcolors=mc, 
+                gridstyle='-', gridcolor='#F2F2F2', 
+                facecolor='white', figcolor='white',
+                edgecolor='#EEEEEE'
             )
 
-            # Plot — candlesticks + volume only
+            # Professional Font Config — Legibility Boost
+            plt.rcParams['font.size'] = 10
+            plt.rcParams['axes.titlesize'] = 12
+            plt.rcParams['axes.labelsize'] = 10
+            plt.rcParams['xtick.labelsize'] = 9
+            plt.rcParams['ytick.labelsize'] = 9
+            plt.rcParams['text.color'] = '#333333'
+            plt.rcParams['axes.labelcolor'] = '#333333'
+            plt.rcParams['xtick.color'] = '#666666'
+            plt.rcParams['ytick.color'] = '#666666'
+
+            # Plot — Adaptive panel layout (Price 0, Vol 1, CVD 2, OI 3, Funding 4)
+            num_panels = 2 # Basic: Price + Vol
+            if cvd_df is not None: num_panels += 1
+            if funding_df is not None: num_panels += 2 # OI Panel + Funding Tape Panel
+            
+            p_ratios = [5, 1.2] # Price, Vol
+            if cvd_df is not None: p_ratios.append(1.8)
+            if funding_df is not None: 
+                p_ratios.append(1.5) # OI
+                p_ratios.append(0.6) # Funding Tape (Thin)
+
             fig, axes = mpf.plot(
                 chart_df, type='candle', style=style, volume=True,
-                title=f'\n{symbol} {config["title_suffix"]}',
-                figsize=(self.width / self.dpi, self.height / self.dpi),
-                returnfig=True,
-                panel_ratios=(5, 1),
+                addplot=apds,
+                title='',  # We will draw a custom title
+                ylabel='Price',
+                figsize=(15, 12 if num_panels > 3 else 10),
+                panel_ratios=tuple(p_ratios),
+                tight_layout=False,  # We'll use subplots_adjust for margins
+                returnfig=True
             )
-
+            
+            # ── Layout Optimization ──
+            fig.subplots_adjust(top=0.92, right=0.92, left=0.08, bottom=0.08)
             price_ax = axes[0]
-            current_price = analysis.get('current_price', '?')
-            price_ax.set_title(f'{symbol} | {current_price} | {config["title_suffix"]}',
-                              fontsize=10, loc='left')
+            
+            # ── Enhanced Title & Metadata ──
+            price_ax.text(0.01, 1.05, f"{symbol} | {df['close'].iloc[-1]:.2f}",
+                         transform=price_ax.transAxes, fontsize=14, fontweight='bold', 
+                         color='#2C3E50', ha='left')
 
             # ── Overlay 1: Pivot Points (turning points) ──
             self._draw_pivot_points(price_ax, chart_df)
@@ -170,9 +259,13 @@ class ChartGenerator:
             if liquidation_df is not None and not liquidation_df.empty:
                 self._draw_liquidation_markers(price_ax, chart_df, liquidation_df)
 
-            # Save
+            # ── Overlay 9: Fair Value Gaps (FVG) ──
+            self._draw_fair_value_gaps(price_ax, chart_df)
+
+            # Save with high-quality settings
             buf = BytesIO()
-            fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight', facecolor='white')
+            fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight', 
+                        facecolor='white', edgecolor='#CCCCCC')
             plt.close(fig)
             buf.seek(0)
             return buf.getvalue()
@@ -193,15 +286,17 @@ class ChartGenerator:
             if ema is None or ema.isna().all():
                 return
                 
-            ax.plot(chart_df.index, ema.values,
-                    color='#FF9800', linewidth=1.5,
-                    linestyle='-', alpha=0.85, zorder=4)
+            # Use integer indices for x-axis to align with mpf candles
+            x_range = np.arange(len(chart_df))
+            ax.plot(x_range, ema.values,
+                    color='#7F8C8D', linewidth=0.8,
+                    linestyle='--', alpha=0.6, zorder=4)
             
             last_val = ema.dropna().iloc[-1] if not ema.dropna().empty else None
             if last_val:
-                ax.text(chart_df.index[-1], float(last_val),
-                        ' EMA200 (6Y Context)', color='#FF9800',
-                        fontsize=7, va='center', ha='left', fontweight='bold')
+                ax.text(x_range[-1], float(last_val),
+                        ' EMA200', color='#7F8C8D',
+                        fontsize=6, va='center', ha='left', alpha=0.7)
         except Exception as e:
             logger.debug(f"EMA200 draw error: {e}")
 
@@ -225,10 +320,10 @@ class ChartGenerator:
                     prev = high[max_idx[i - 1]]
                     label = 'HH' if high[idx] > prev else 'LH'
                 ax.annotate(label,
-                            xy=(chart_df.index[idx], high[idx]),
-                            xytext=(0, 7), textcoords='offset points',
-                            fontsize=6, color='#C62828', ha='center',
-                            va='bottom', fontweight='bold',
+                            xy=(idx, high[idx]),
+                            xytext=(0, 6), textcoords='offset points',
+                            fontsize=7, color='#E74C3C', ha='center',
+                            va='bottom', fontweight='bold', alpha=0.8,
                             annotation_clip=True)
 
             # Label swing lows: HL or LL
@@ -239,10 +334,10 @@ class ChartGenerator:
                     prev = low[min_idx[i - 1]]
                     label = 'HL' if low[idx] > prev else 'LL'
                 ax.annotate(label,
-                            xy=(chart_df.index[idx], low[idx]),
-                            xytext=(0, -7), textcoords='offset points',
-                            fontsize=6, color='#1565C0', ha='center',
-                            va='top', fontweight='bold',
+                            xy=(idx, low[idx]),
+                            xytext=(0, -6), textcoords='offset points',
+                            fontsize=7, color='#3498DB', ha='center',
+                            va='top', fontweight='bold', alpha=0.8,
                             annotation_clip=True)
         except Exception as e:
             logger.debug(f"Market structure labels error: {e}")
@@ -272,38 +367,39 @@ class ChartGenerator:
             threshold = float(np.percentile(vol_at_price, 70))
 
             # Inset axes on right side: [x0, y0, width, height] in axes fraction
-            ax_vp = ax.inset_axes([0.86, 0.0, 0.14, 1.0])
+            ax_vp = ax.inset_axes([0.88, 0.0, 0.12, 1.0])
             ax_vp.set_xlim(0, 1)
             ax_vp.set_ylim(price_min, price_max)
             ax_vp.set_facecolor('none')
             for spine in ax_vp.spines.values():
                 spine.set_visible(False)
-            ax_vp.tick_params(left=False, bottom=False,
-                              labelleft=False, labelbottom=False)
+            ax_vp.tick_params(left=False, bottom=False, labelleft=False, labelbottom=False)
 
-            bar_h = (price_bins[1] - price_bins[0]) * 0.85
+            bar_h = (price_bins[1] - price_bins[0]) * 0.9
             for i in range(bins):
                 center = (price_bins[i] + price_bins[i + 1]) / 2.0
                 if i == poc_idx:
-                    color, alpha = '#FF5722', 0.85   # POC: red-orange
+                    color, alpha = '#E67E22', 0.6   # POC: Stronger Orange
                 elif vol_at_price[i] >= threshold:
-                    color, alpha = '#FFA726', 0.65   # HVN: orange
+                    color, alpha = '#BDC3C7', 0.3   # HVN: Stronger Grey
                 else:
-                    color, alpha = '#90A4AE', 0.30   # Normal: grey
+                    color, alpha = '#BDC3C7', 0.15  # Normal: Subtle Grey
                 ax_vp.barh(center, vol_norm[i], height=bar_h,
-                           color=color, alpha=alpha)
+                           color=color, alpha=alpha, edgecolor='none')
 
             # POC label
             poc_center = (price_bins[poc_idx] + price_bins[poc_idx + 1]) / 2.0
             ax_vp.text(min(vol_norm[poc_idx] + 0.05, 0.95), poc_center,
-                       'POC', fontsize=6, color='#FF5722',
-                       va='center', ha='left', fontweight='bold')
+                       'POC', fontsize=7, color='#E67E22',
+                       va='center', ha='left', alpha=0.8, fontweight='bold')
         except Exception as e:
             logger.debug(f"Volume profile histogram error: {e}")
 
     def _draw_pivot_points(self, ax, chart_df: pd.DataFrame):
         """Draw turning point markers on pivot highs/lows."""
         try:
+            high = chart_df['high'].astype(float).values
+            low = chart_df['low'].astype(float).values
             close = chart_df['close'].astype(float).values
             if len(close) < 15:
                 return
@@ -313,11 +409,11 @@ class ChartGenerator:
             maxs = argrelextrema(close, np.greater, order=order)[0]
 
             if len(mins):
-                ax.scatter(chart_df.index[mins], close[mins],
-                          marker='^', color='#2E7D32', s=25, alpha=0.85, zorder=5)
+                ax.scatter(mins, low[mins] * 0.998,
+                          marker='x', color='#3498DB', s=15, alpha=0.5, zorder=5)
             if len(maxs):
-                ax.scatter(chart_df.index[maxs], close[maxs],
-                          marker='v', color='#C62828', s=25, alpha=0.85, zorder=5)
+                ax.scatter(maxs, high[maxs] * 1.002,
+                          marker='x', color='#E74C3C', s=15, alpha=0.5, zorder=5)
         except Exception as e:
             logger.debug(f"Pivot points draw error: {e}")
 
@@ -336,8 +432,27 @@ class ChartGenerator:
             x = np.arange(n)
             intercept = float(current_value) - float(slope) * (n - 1)
             y = float(slope) * x + intercept
-            ax.plot(chart_df.index, y, color=color, linewidth=1.2,
-                    linestyle='-.', alpha=0.9, zorder=3)
+            
+            # Semantic labeling for VLM: TREND prefix for diagonal lines
+            kind = "SUP" if "support" in value_key else "RES"
+            label_text = f"TREND {kind}"
+            line_color = '#27AE60' if kind == "SUP" else '#C0392B'
+            
+            # Trendlines must be very visible for VLM
+            ax.plot(x, y, color=line_color, linewidth=2.0,
+                    linestyle='-', alpha=0.9, zorder=10)
+            
+            # Add label at both ends if visible, with margin to avoid cutoff
+            y_max = chart_df['high'].max()
+            if 0 <= y[0] <= y_max * 1.2:
+                ax.text(0.5, y[0], f' {label_text}', color=line_color, 
+                        fontsize=7, fontweight='bold', va='bottom', ha='left',
+                        bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=1))
+            
+            if 0 <= y[-1] <= y_max * 1.2:
+                 ax.text(n-1.5, y[-1], f' {label_text}', color=line_color, 
+                        fontsize=7, fontweight='bold', va='bottom', ha='right',
+                        bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=1))
         except Exception:
             return
 
@@ -347,35 +462,54 @@ class ChartGenerator:
             return
 
         fib_styles = {
-            'fib_236': ('#90CAF9', 0.5, '23.6%'),
-            'fib_382': ('#64B5F6', 0.7, '38.2%'),
-            'fib_500': ('#42A5F5', 0.8, '50%'),
-            'fib_618': ('#1E88E5', 0.9, '61.8%'),
-            'fib_786': ('#1565C0', 0.7, '78.6%'),
+            'fib_236': ('#95A5A6', 0.3, 'FIB 23.6%'),
+            'fib_382': ('#95A5A6', 0.4, 'FIB 38.2%'),
+            'fib_500': ('#34495E', 0.5, 'FIB 50%'),
+            'fib_618': ('#95A5A6', 0.4, 'FIB 61.8%'),
+            'fib_786': ('#95A5A6', 0.3, 'FIB 78.6%'),
         }
 
+        n = len(chart_df)
         for key, (color, alpha, label) in fib_styles.items():
             val = fib.get(key)
             if isinstance(val, (int, float)):
-                ax.axhline(val, color=color, linestyle='--', linewidth=0.9,
-                           alpha=alpha, zorder=2)
-                ax.text(chart_df.index[-1], val, f' {label}',
-                        color=color, fontsize=7, va='center', ha='left')
+                # Dotted -> Dashed for better VLM visibility
+                ax.axhline(val, color=color, linestyle='--', linewidth=0.8,
+                           alpha=alpha + 0.3, zorder=2)
+                # Move text slightly left of the edge to ensure it's on-canvas
+                ax.text(n - 0.5, val, f' {label}',
+                        color=color, fontsize=7, va='center', ha='left', 
+                        alpha=0.9, fontweight='bold')
 
     def _draw_swing_levels(self, ax, chart_df: pd.DataFrame, swing: Optional[Dict]):
-        """Draw horizontal lines at swing highs/lows (liquidity pools)."""
+        """Draw horizontal lines and shaded zones at swing highs/lows (liquidity pools)."""
         if not swing:
             return
 
+        n = len(chart_df)
         for high in swing.get('swing_highs', []):
             if isinstance(high, (int, float)):
-                ax.axhline(high, color='#FF5722', linestyle=':', linewidth=0.7,
-                           alpha=0.6, zorder=2)
+                # Draw main line
+                ax.axhline(high, color='#C0392B', linestyle='-', linewidth=0.8,
+                           alpha=0.4, zorder=2)
+                # Draw subtle shaded zone for "Liquidity Pool" (+/- 0.3% range)
+                ax.axhspan(high * 0.997, high * 1.003, color='#C0392B', 
+                           alpha=0.08, zorder=1)
+                # Add label
+                ax.text(0, high, " SWING RES", color='#C0392B', 
+                        fontsize=6, fontweight='bold', va='bottom', alpha=0.9)
 
         for low in swing.get('swing_lows', []):
             if isinstance(low, (int, float)):
-                ax.axhline(low, color='#00BCD4', linestyle=':', linewidth=0.7,
-                           alpha=0.6, zorder=2)
+                # Draw main line
+                ax.axhline(low, color='#27AE60', linestyle='-', linewidth=0.8,
+                           alpha=0.4, zorder=2)
+                # Draw subtle shaded zone for "Liquidity Pool" (+/- 0.3% range)
+                ax.axhspan(low * 0.997, low * 1.003, color='#27AE60', 
+                           alpha=0.08, zorder=1)
+                # Add label
+                ax.text(0, low, " SWING SUP", color='#27AE60', 
+                        fontsize=6, fontweight='bold', va='top', alpha=0.9)
 
     def _draw_liquidation_markers(self, ax, chart_df: pd.DataFrame,
                                    liq_df: pd.DataFrame):
@@ -406,16 +540,130 @@ class ChartGenerator:
                 else:
                     color = '#2196F3'  # Blue (shorts got rekt)
 
-                # Find nearest chart timestamp
+                # Find nearest chart index (integer offset 0 to N-1)
                 nearest_idx = chart_df.index.get_indexer([row['timestamp']], method='nearest')[0]
                 if 0 <= nearest_idx < len(chart_df):
                     price = chart_df.iloc[nearest_idx]['close']
-                    ax.scatter(chart_df.index[nearest_idx], price,
+                    ax.scatter(nearest_idx, price,
                               marker='o', color=color, s=size, alpha=0.7,
                               edgecolors='black', linewidth=0.5, zorder=6)
 
         except Exception as e:
             logger.debug(f"Liquidation markers draw error: {e}")
+
+    def _draw_fair_value_gaps(self, ax, chart_df: pd.DataFrame):
+        """Identify and draw Fair Value Gaps (FVG) as shaded boxes.
+        Bullish FVG: Low[n+1] > High[n-1]
+        Bearish FVG: High[n+1] < Low[n-1]
+        """
+        try:
+            high = chart_df['high'].astype(float).values
+            low = chart_df['low'].astype(float).values
+            n = len(chart_df)
+            if n < 3:
+                return
+
+            bull_gaps = []
+            bear_gaps = []
+            
+            for i in range(1, n - 1):
+                # Bullish FVG
+                if low[i + 1] > high[i - 1]:
+                    bull_gaps.append({'idx': i, 'top': low[i + 1], 'bottom': high[i - 1]})
+                # Bearish FVG
+                elif high[i + 1] < low[i - 1]:
+                    bear_gaps.append({'idx': i, 'top': low[i - 1], 'bottom': high[i + 1]})
+
+            # ── Merge and Draw Bullish Gaps ──
+            if bull_gaps:
+                merged = []
+                if bull_gaps:
+                    curr = bull_gaps[0].copy()
+                    curr['start'] = curr['idx']
+                    curr['end'] = curr['idx']
+                    for g in bull_gaps[1:]:
+                        if g['idx'] <= curr['end'] + 1: # Consecutive
+                            curr['end'] = g['idx']
+                            curr['top'] = max(curr['top'], g['top'])
+                            curr['bottom'] = min(curr['bottom'], g['bottom'])
+                        else:
+                            merged.append(curr)
+                            curr = g.copy()
+                            curr['start'] = curr['idx']
+                            curr['end'] = curr['idx']
+                    merged.append(curr)
+
+                vap_safe_idx = n * 0.82 # More aggressive 18% safety buffer for VAP/POC
+                
+                for m in merged:
+                    # Clip x_range to stay out of VAP zone
+                    x_start = m['start'] - 0.5
+                    x_end = min(m['end'] + 1.5, vap_safe_idx)
+                    
+                    if x_end <= x_start:
+                        continue # Box completely obscured by VAP
+                        
+                    x_range = [x_start, x_end]
+                    ax.fill_between(x_range, m['bottom'], m['top'], color='#27AE60', 
+                                    alpha=0.4, zorder=1, edgecolor='none')
+                    
+                    # Smart Label Pivoting: If close to right edge, push text to the left
+                    is_near_edge = x_end > (n * 0.75)
+                    if is_near_edge:
+                        txt_x = x_start + 0.5
+                        ha = 'left'
+                    else:
+                        txt_x = (x_start + x_end) / 2
+                        ha = 'center'
+
+                    ax.text(txt_x, (m['top'] + m['bottom']) / 2, 
+                            "FVG", color='#27AE60', fontsize=9, alpha=0.9, 
+                            ha=ha, va='center', fontweight='bold')
+
+            # ── Merge and Draw Bearish Gaps ──
+            if bear_gaps:
+                merged = []
+                curr = bear_gaps[0].copy()
+                curr['start'] = curr['idx']
+                curr['end'] = curr['idx']
+                for g in bear_gaps[1:]:
+                    if g['idx'] <= curr['end'] + 1:
+                        curr['end'] = g['idx']
+                        curr['top'] = max(curr['top'], g['top'])
+                        curr['bottom'] = min(curr['bottom'], g['bottom'])
+                    else:
+                        merged.append(curr)
+                        curr = g.copy()
+                        curr['start'] = curr['idx']
+                        curr['end'] = curr['idx']
+                merged.append(curr)
+
+                vap_safe_idx = n * 0.82
+                for m in merged:
+                    x_start = m['start'] - 0.5
+                    x_end = min(m['end'] + 1.5, vap_safe_idx)
+                    
+                    if x_end <= x_start:
+                        continue
+                        
+                    x_range = [x_start, x_end]
+                    ax.fill_between(x_range, m['bottom'], m['top'], color='#C0392B', 
+                                    alpha=0.4, zorder=1, edgecolor='none')
+                    
+                    is_near_edge = x_end > (n * 0.75)
+                    if is_near_edge:
+                        txt_x = x_start + 0.5
+                        ha = 'left'
+                    else:
+                        txt_x = (x_start + x_end) / 2
+                        ha = 'center'
+
+                    ax.text(txt_x, (m['top'] + m['bottom']) / 2, 
+                            "FVG", color='#C0392B', fontsize=9, alpha=0.9, 
+                            ha=ha, va='center', fontweight='bold')
+
+        except Exception as e:
+            logger.debug(f"FVG draw error: {e}")
 
     # ─────────────── Utility Methods ───────────────
 

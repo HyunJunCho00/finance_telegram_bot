@@ -9,6 +9,7 @@ class VLMGeometricAgent:
 Your job is to look at the provided chart (which contains price action, geometric lines, and a liquidation heatmap).
 
 Identify where the retail traders are placing their stop losses (traps) and where the visual geometric confluences are.
+Keep the Current Trading Mode (SWING or POSITION) in mind. A geometric confluence on a POSITION chart is much stronger and takes longer to play out than on a SWING chart.
 
 Output strictly JSON with no markdown formatting.
 Schema:
@@ -19,11 +20,11 @@ Schema:
   "rationale": "short explanation of the visual setup"
 }"""
 
-    def analyze(self, chart_image_b64: str) -> dict:
+    def analyze(self, chart_image_b64: str, mode: str = "SWING") -> dict:
         if not chart_image_b64:
             return {"anomaly": "none", "confidence": 0, "visual_target": 0, "rationale": "No chart provided"}
 
-        user_message = "Analyze this geometric and heatmap chart. Return JSON."
+        user_message = f"Trading Mode: {mode}\nAnalyze this geometric and heatmap chart. Return JSON."
         try:
             # Using the VLM designated model
             response = claude_client.generate_response(

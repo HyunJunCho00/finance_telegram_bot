@@ -9,6 +9,7 @@ class MicrostructureAgent:
 Your job is to identify fake walls (spoofing) and real momentum before price moves.
 
 You will be given:
+- Current Trading Mode (SWING or POSITION)
 - Microstructure Context (Spread, orderbook imbalance, 100k slippage)
 
 Output strictly JSON with no markdown formatting.
@@ -20,8 +21,8 @@ Schema:
   "rationale": "short explanation of orderbook pressure"
 }"""
 
-    def analyze(self, microstructure_context: str) -> dict:
-        user_message = f"Microstructure Context:\n{microstructure_context}\n\nAnalyze and return JSON."
+    def analyze(self, microstructure_context: str, mode: str = "SWING") -> dict:
+        user_message = f"Trading Mode: {mode}\n\nMicrostructure Context:\n{microstructure_context}\n\nAnalyze and return JSON."
         try:
             response = claude_client.generate_response(
                 system_prompt=self.SYSTEM_PROMPT,

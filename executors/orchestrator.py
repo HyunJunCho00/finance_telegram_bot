@@ -565,7 +565,8 @@ def node_liquidity_expert(state: AnalysisState) -> dict:
     
     result = liquidity_agent.analyze(
         state.get("cvd_context", ""),
-        state.get("liquidation_context", "")
+        state.get("liquidation_context", ""),
+        mode=state.get("mode", "SWING").upper()
     )
     bb["liquidity"] = result
     return {"blackboard": bb, "budget": state["budget"] - 20, "turn_count": state.get("turn_count", 0) + 1}
@@ -575,7 +576,10 @@ def node_microstructure_expert(state: AnalysisState) -> dict:
     bb = state.get("blackboard", {})
     if state.get("budget", 0) <= 0: return {}
     
-    result = microstructure_agent.analyze(state.get("microstructure_context", ""))
+    result = microstructure_agent.analyze(
+        state.get("microstructure_context", ""),
+        mode=state.get("mode", "SWING").upper()
+    )
     bb["microstructure"] = result
     return {"blackboard": bb, "budget": state["budget"] - 15, "turn_count": state.get("turn_count", 0) + 1}
 
@@ -586,7 +590,8 @@ def node_macro_options_expert(state: AnalysisState) -> dict:
     
     result = macro_options_agent.analyze(
         state.get("deribit_context", ""),
-        state.get("macro_context", "")
+        state.get("macro_context", ""),
+        mode=state.get("mode", "SWING").upper()
     )
     bb["macro"] = result
     return {"blackboard": bb, "budget": state["budget"] - 15, "turn_count": state.get("turn_count", 0) + 1}
@@ -597,7 +602,10 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
     if state.get("budget", 0) <= 0: return {}
     
     # Needs chart image generated previously
-    result = vlm_geometric_agent.analyze(state.get("chart_image_b64", ""))
+    result = vlm_geometric_agent.analyze(
+        state.get("chart_image_b64", ""),
+        mode=state.get("mode", "SWING").upper()
+    )
     bb["vlm_geometry"] = result
     return {"blackboard": bb, "budget": state["budget"] - 25, "turn_count": state.get("turn_count", 0) + 1}
 
@@ -634,6 +642,15 @@ def node_generate_chart(state: AnalysisState) -> dict:
     if market_data is None:
         market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
 
+    # Load CVD (Volume Delta) data for chart sync
+    cvd_df = None
+    try:
+        # Fetch 1m CVD data matching the candle lookback
+        cvd_limit = settings.data_lookback_hours * 60
+        cvd_df = db.get_cvd_data(symbol, limit=cvd_limit)
+    except Exception as e:
+        logger.warning(f"CVD data load for chart skipped: {e}")
+
     # Load liquidation data for chart markers
     liquidation_df = None
     try:
@@ -642,14 +659,29 @@ def node_generate_chart(state: AnalysisState) -> dict:
     except Exception:
         pass
 
+    # Load funding/OI data for chart sync
+    funding_df = None
+    try:
+        # Fetch funding data (includes OI, LSR) matching the lookback
+        funding_limit = settings.data_lookback_hours * 60
+        funding_df = db.get_funding_history(symbol, limit=funding_limit)
+    except Exception as e:
+        logger.warning(f"Funding/OI data load for chart skipped: {e}")
+
     chart_bytes = chart_generator.generate_chart(df, market_data, symbol, mode,
-                                                  liquidation_df=liquidation_df)
+                                                  liquidation_df=liquidation_df,
+                                                  cvd_df=cvd_df,
+                                                  funding_df=funding_df)
+
+    if not chart_bytes:
+        logger.warning(f"Chart generation FAILED for {symbol} ({mode.value})")
+        return {"chart_image_b64": None, "chart_bytes": None}
 
     chart_image_b64 = None
     if chart_bytes:
         chart_bytes_for_vlm = chart_generator.resize_for_low_res(chart_bytes)
         chart_image_b64 = chart_generator.chart_to_base64(chart_bytes_for_vlm)
-        logger.info(f"Chart for Judge ({mode.value}): {len(chart_bytes_for_vlm)} bytes (low-res)")
+        logger.info(f"Generated chart for {symbol}: {len(chart_bytes)} bytes. VLM B64 size: {len(chart_image_b64)}")
 
     return {"chart_image_b64": chart_image_b64, "chart_bytes": chart_bytes}
 
@@ -759,6 +791,10 @@ def node_generate_report(state: AnalysisState) -> dict:
 
     if report:
         chart_bytes = state.get("chart_bytes")
+        if chart_bytes:
+            logger.info(f"Passing {len(chart_bytes)} bytes of chart data to notify.")
+        else:
+            logger.warning("No chart data found in state at generate_report node.")
         report_generator.notify(report, chart_bytes=chart_bytes, mode=mode)
         
         # Log prediction for academic/quantitative evaluation
