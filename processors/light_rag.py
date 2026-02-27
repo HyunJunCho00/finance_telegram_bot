@@ -268,40 +268,102 @@ class Neo4jGraph:
             logger.error(f"Neo4j global context error: {e}")
             return {"important_entities": [], "recent_relationships": []}
 
-    def cleanup_old(self, days: int = 90):
-        """Remove entities/relationships older than N days."""
+    def export_all(self) -> Dict:
+        """Extract all entities and relationships for GCS archival."""
         if not self.driver:
-            return
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+            return {"entities": [], "relationships": []}
         try:
             with self.driver.session() as session:
-                # Delete old relationships
+                # 1. Export Entities
+                res_ent = session.run("MATCH (e:Entity) RETURN e")
+                entities = [dict(record["e"]) for record in res_ent]
+
+                # 2. Export Relationships
+                res_rel = session.run("""
+                    MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity)
+                    RETURN s.name AS source, t.name AS target, properties(r) AS props, type(r) AS type
+                """)
+                relationships = []
+                for record in res_rel:
+                    rel = record["props"]
+                    rel.update({"source": record["source"], "target": record["target"], "type": record["type"]})
+                    relationships.append(rel)
+
+                return {
+                    "entities": entities,
+                    "relationships": relationships,
+                    "timestamp": datetime.now().isoformat()
+                }
+        except Exception as e:
+            logger.error(f"Neo4j export error: {e}")
+            return {"entities": [], "relationships": []}
+
+    def import_data(self, entities: List[Dict], relationships: List[Dict]):
+        """Bulk import entities and relationships (Restore from GCS)."""
+        if not self.driver:
+            return
+        try:
+            with self.driver.session() as session:
+                # Import Entities
                 session.run("""
+                    UNWIND $entities AS ent
+                    MERGE (e:Entity {name: ent.name})
+                    SET e += ent
+                """, entities=entities)
+
+                # Import Relationships
+                session.run("""
+                    UNWIND $rels AS rel
+                    MATCH (s:Entity {name: rel.source})
+                    MATCH (t:Entity {name: rel.target})
+                    MERGE (s)-[r:RELATES_TO {type: rel.type}]->(t)
+                    SET r += rel
+                """, rels=relationships)
+                logger.info(f"Neo4j: Imported {len(entities)} entities, {len(relationships)} relationships")
+        except Exception as e:
+            logger.error(f"Neo4j import error: {e}")
+
+    def cleanup_old(self, days: int = 90):
+        """Delete data older than X days, while preserving important relationships."""
+        if not self.driver:
+            return
+        try:
+            cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+            with self.driver.session() as session:
+                # 1. Delete old relationships (keep high weight ones)
+                res_rel = session.run("""
                     MATCH ()-[r:RELATES_TO]->()
-                    WHERE r.last_seen < $cutoff
+                    WHERE r.last_seen < $cutoff AND r.weight < 5
                     DELETE r
+                    RETURN count(r) AS deleted_count
                 """, cutoff=cutoff)
-                # Delete orphan entities
-                session.run("""
+                rel_deleted = res_rel.single()["deleted_count"]
+
+                # 2. Delete orphaned entities
+                res_ent = session.run("""
                     MATCH (e:Entity)
-                    WHERE e.last_seen < $cutoff
-                      AND NOT (e)--()
+                    WHERE NOT (e)-[:RELATES_TO]-()
                     DELETE e
-                """, cutoff=cutoff)
-            logger.info("Neo4j cleanup completed")
+                    RETURN count(e) AS deleted_count
+                """)
+                ent_deleted = res_ent.single()["deleted_count"]
+
+                logger.info(f"Neo4j Cleanup: Deleted {rel_deleted} relationships and {ent_deleted} entities")
         except Exception as e:
             logger.error(f"Neo4j cleanup error: {e}")
 
     def get_stats(self) -> Dict:
+        """Return graph node and relationship counts."""
         if not self.driver:
             return {"nodes": 0, "relationships": 0, "connected": False}
         try:
             with self.driver.session() as session:
-                nodes = session.run("MATCH (n) RETURN count(n) AS c").single()["c"]
-                rels = session.run("MATCH ()-[r]->() RETURN count(r) AS c").single()["c"]
+                nodes = session.run("MATCH (n:Entity) RETURN count(n) AS c").single()["c"]
+                rels = session.run("MATCH ()-[r:RELATES_TO]->() RETURN count(r) AS c").single()["c"]
                 return {"nodes": nodes, "relationships": rels, "connected": True}
         except Exception:
             return {"nodes": 0, "relationships": 0, "connected": False}
+
 
 
 class MilvusVectorStore:
@@ -1073,14 +1135,92 @@ Rules:
             "ingested_docs": len(self._ingested_ids),
         }
 
-    def cleanup_old(self, days: int = 90):
-        """Remove old data from all backends."""
+    def export_knowledge_graph(self) -> Dict:
+        """Export all entities and relationships from Neo4j to a serializable dict."""
+        if hasattr(self.graph, 'export_all'):
+            return self.graph.export_all()
+        logger.warning("Graph backend does not support export_all")
+        return {"entities": [], "relationships": [], "timestamp": datetime.now().isoformat()}
+
+    def archive_to_gcs(self) -> bool:
+        """Export the current graph and upload as a JSON backup to GCS."""
         try:
+            from config.settings import settings
+            if not settings.ENABLE_GCS_ARCHIVE or not settings.GCS_ARCHIVE_BUCKET:
+                logger.debug("GCS Archive disabled or bucket not configured")
+                return False
+
+            knowledge = self.export_knowledge_graph()
+            if not knowledge.get("entities") and not knowledge.get("relationships"):
+                return False
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"rag_archive_{timestamp}.json"
+            local_path = os.path.join(self.WORKING_DIR, filename)
+
+            with open(local_path, 'w', encoding='utf-8') as f:
+                json.dump(knowledge, f, ensure_ascii=False, indent=2)
+
+            # Upload to GCS
+            from google.cloud import storage
+            client = storage.Client()
+            bucket = client.bucket(settings.GCS_ARCHIVE_BUCKET)
+            blob = bucket.blob(f"rag_archive/{filename}")
+            blob.upload_from_filename(local_path)
+
+            logger.info(f"LightRAG: Archived knowledge to GCS: {filename}")
+            
+            # Cleanup local temp file
+            os.remove(local_path)
+            return True
+        except Exception as e:
+            logger.error(f"LightRAG Archival error: {e}")
+            return False
+
+    def cleanup_old(self, days: int = 90):
+        """Archive to GCS first, then remove old data from Neo4j."""
+        try:
+            # 1. Backup everything to GCS first
+            self.archive_to_gcs()
+
+            # 2. Trigger graph-specific cleanup
             if hasattr(self.graph, 'cleanup_old'):
                 self.graph.cleanup_old(days=days)
-            logger.info("LightRAG cleanup completed")
+            
+            # 3. Vector store cleanup (optional, usually handled by deletion of nodes if integrated)
+            # Currently Milvus in this setup mirrors the graph.
+            
+            logger.info(f"LightRAG: Completed cleanup (Retention: {days} days)")
         except Exception as e:
             logger.error(f"LightRAG cleanup error: {e}")
+
+    def restore_from_gcs(self, gcs_path: str):
+        """Restore knowledge from a GCS archive file."""
+        try:
+            from google.cloud import storage
+            from config.settings import settings
+            
+            client = storage.Client()
+            bucket = client.bucket(settings.GCS_ARCHIVE_BUCKET)
+            blob = bucket.blob(gcs_path)
+            
+            content = blob.download_as_text()
+            data = json.loads(content)
+            
+            entities = data.get("entities", [])
+            relationships = data.get("relationships", [])
+            
+            logger.info(f"LightRAG: Restoring {len(entities)} entities and {len(relationships)} relationships...")
+            
+            # Simple restore: use existing ingest logic or direct graph commands
+            if hasattr(self.graph, 'import_data'):
+                self.graph.import_data(entities, relationships)
+                logger.info("LightRAG: Restoration successful")
+            else:
+                logger.warning("Graph backend does not support import_data")
+                
+        except Exception as e:
+            logger.error(f"LightRAG Restoration error: {e}")
 
 
 # Singleton instance
