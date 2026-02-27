@@ -123,11 +123,12 @@ def node_collect_data(state: AnalysisState) -> dict:
     try:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
+            # Provide VLM with more context (18 months for broad macro trends)
             if mode == TradingMode.SWING:
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=18)
             elif mode == TradingMode.POSITION:
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
-                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=60)
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=24)
+                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
     except Exception as e:
         logger.warning(f"GCS load skipped: {e}")
 
@@ -619,11 +620,12 @@ def node_generate_chart(state: AnalysisState) -> dict:
     try:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
+            # Provide VLM with more context (18 months for broad macro trends)
             if mode == TradingMode.SWING:
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=18)
             elif mode == TradingMode.POSITION:
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=8)
-                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=60)
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=24)
+                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
     except Exception as e:
         logger.warning(f"GCS load for chart skipped: {e}")
 

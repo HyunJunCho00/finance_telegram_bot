@@ -1,10 +1,14 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from google.cloud import secretmanager
 from functools import lru_cache
 from typing import List
 from enum import Enum
 import os
 import json
+from dotenv import load_dotenv
+
+# Ensure .env is loaded into environment variables early
+load_dotenv()
 
 
 class TradingMode(str, Enum):
@@ -17,6 +21,13 @@ class TradingMode(str, Enum):
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="allow"
+    )
+
     PROJECT_ID: str = ""
     REGION: str = "asia-northeast3"          # VM 인프라 리전 (서울)
     VERTEX_REGION: str = "global"            # 모델 호출 리전 (Gemini + Claude)
@@ -157,9 +168,9 @@ class Settings(BaseSettings):
     CHART_IMAGE_DPI: int = 100
 
     # ===== Candle Limits per Mode (1m candles needed from DB) =====
-    # SWING: 4320 (3 days) → for 1h/4h + needs 1d from GCS
+    # SWING: 14400 (10 days) → for 1h/4h + needs 1d from GCS
     # POSITION: 10080 (7 days) → for 4h + needs 1d/1w from GCS
-    SWING_CANDLE_LIMIT: int = 4320
+    SWING_CANDLE_LIMIT: int = 14400
     POSITION_CANDLE_LIMIT: int = 10080
 
     # ===== Analysis Intervals per Mode =====
@@ -176,11 +187,6 @@ class Settings(BaseSettings):
     RETENTION_REPORTS_DAYS: int = 365  # AI 리포트 영구에 가깝게
     RETENTION_CVD_DAYS: int = 30
     RETENTION_GRAPH_DAYS: int = 0  # 0 = 영구 보존 (Neo4j Aura free: 200K nodes)
-
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
-        extra = "allow"
 
     @property
     def vertex_region(self) -> str:

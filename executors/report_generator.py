@@ -117,6 +117,36 @@ class ReportGenerator:
         elif recipe := decision.get("execution_receipt"):
             receipt_text = f"<b>🚨 EXECUTION FAILED:</b> {recipe.get('error', recipe.get('note', 'Unknown'))}\n"
 
+        # ── Advanced Structural Indicators ──
+        struct_text = ""
+        try:
+            # 1. Market Structure (Primary TF)
+            ms = market_data.get('market_structure', {}).get(tf_labels[0].lower(), {})
+            if isinstance(ms, dict) and ms.get('structure'):
+                ms_status = f"{ms.get('structure').upper()}"
+                if ms.get('msb'):
+                    ms_status += f" (MSB: {ms['msb']['type']})"
+                elif ms.get('choch'):
+                    ms_status += f" (CHoCH: {ms['choch']['type']})"
+                struct_text += f"<b>Market Struct:</b> {ms_status}\n"
+
+            # 2. Fair Value Gaps (FVG)
+            fvg_list = market_data.get('fvg', {}).get(tf_labels[0].lower(), [])
+            unfilled_fvg = [f for f in fvg_list if isinstance(f, dict) and not f.get('filled')]
+            if unfilled_fvg:
+                # Get the most recent/relevant FVG
+                f = unfilled_fvg[0]
+                struct_text += f"<b>Unfilled FVG:</b> {f['type'].title()} {f['gap_low']} ~ {f['gap_high']}\n"
+
+            # 3. Confluence Zones
+            cz_list = market_data.get('confluence_zones', [])
+            if cz_list:
+                z = cz_list[0]
+                struct_text += f"<b>Confluence:</b> Strong cluster @ {z['price']} (strength: {z['strength']})\n"
+                
+        except Exception as e:
+            logger.error(f"Error formatting advanced indicators: {e}")
+
         message = f"""{icon} <b>{mode_label} REPORT</b> {mode_icon}
 
 <b>Symbol:</b> {report['symbol']}
@@ -136,8 +166,7 @@ class ReportGenerator:
 <b>Key Factors (PM):</b>
 {factors_text}
 {cro_note}
-<b>{tf_labels[0]}:</b> RSI={tf_primary.get('rsi', '?')} MACD={tf_primary.get('macd_histogram', '?')} ADX={tf_primary.get('adx', '?')}
-<b>{tf_labels[1]}:</b> RSI={tf_secondary.get('rsi', '?')} MACD={tf_secondary.get('macd_histogram', '?')} ADX={tf_secondary.get('adx', '?')}{fib_text}
+{struct_text}{fib_text}
 
 <b>PM Reasoning:</b>
 {decision.get('reasoning', 'N/A')[:700]}"""
