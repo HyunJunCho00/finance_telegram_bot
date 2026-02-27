@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     # Neo4j Aura Free (Knowledge Graph)
     NEO4J_URI: str = ""  # e.g. neo4j+s://xxxxxx.databases.neo4j.io
     NEO4J_URL: str = ""  # Alias to support user's .env naming
+    NEO4J_USER: str = "neo4j"
+    NEO4J_USERNAME: str = ""  # Alias to support user's credential file
     NEO4J_PASSWORD: str = ""
 
     # Zilliz Cloud Free (Milvus vector DB)
@@ -195,6 +197,11 @@ class Settings(BaseSettings):
         return self.NEO4J_URI or self.NEO4J_URL
 
     @property
+    def neo4j_user(self) -> str:
+        """Resolve either NEO4J_USER or NEO4J_USERNAME"""
+        return self.NEO4J_USERNAME or self.NEO4J_USER
+
+    @property
     def vertex_region(self) -> str:
         """Vertex AI region. Falls back to REGION for backward compatibility."""
         return self.VERTEX_REGION or self.REGION
@@ -306,6 +313,8 @@ class SecretManager:
             "PERPLEXITY_API_KEY",
             "FRED_API_KEY",
             "NEO4J_URI",
+            "NEO4J_USER",
+            "NEO4J_USERNAME",
             "NEO4J_PASSWORD",
             "MILVUS_URI",
             "MILVUS_TOKEN",

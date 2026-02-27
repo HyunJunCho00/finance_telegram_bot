@@ -12,12 +12,13 @@ import voyageai
 def test_neo4j(settings):
     print("\n--- 1. Testing Neo4j Connection ---")
     uri = settings.neo4j_uri
+    user = settings.neo4j_user
     password = settings.NEO4J_PASSWORD
-    user = "neo4j"
     
-    # Debug info (masked)
     if uri:
         print(f"Target URI: {uri}")
+    if user:
+        print(f"Username Loaded: {user}")
     if password:
         masked_pwd = password[0] + "*" * (len(password)-2) + password[-1] if len(password) > 2 else "***"
         print(f"Password Loaded (Masked): {masked_pwd} (Length: {len(password)})")

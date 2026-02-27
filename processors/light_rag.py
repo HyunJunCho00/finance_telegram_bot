@@ -663,10 +663,11 @@ Rules:
         try:
             from config.settings import settings
             neo4j_uri = settings.neo4j_uri
+            neo4j_user = settings.neo4j_user
             neo4j_password = getattr(settings, 'NEO4J_PASSWORD', '')
             if neo4j_uri and NEO4J_AVAILABLE:
                 self._graph = Neo4jGraph(
-                    uri=neo4j_uri, user="neo4j", password=neo4j_password
+                    uri=neo4j_uri, user=neo4j_user, password=neo4j_password
                 )
                 if self._graph.driver:
                     return self._graph
