@@ -20,6 +20,24 @@ class MathEngine:
     def __init__(self):
         self.order = 5
 
+    def merge_history(self, df_main: pd.DataFrame, df_history: Optional[pd.DataFrame]) -> pd.DataFrame:
+        """Merge recent Supabase data with historical GCS data seamlessly."""
+        if df_history is None or df_history.empty:
+            return df_main
+        
+        # Ensure UTC and datetime
+        df_main = df_main.copy()
+        df_main['timestamp'] = pd.to_datetime(df_main['timestamp'], utc=True)
+        
+        df_history = df_history.copy()
+        df_history['timestamp'] = pd.to_datetime(df_history['timestamp'], utc=True)
+        
+        # Combine
+        combined = pd.concat([df_history, df_main], ignore_index=True)
+        # Sort and deduplicate (keep latest data if overlap exists)
+        combined = combined.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
+        return combined.reset_index(drop=True)
+
     # ─────────────── Resampling ───────────────
 
     def resample_to_timeframe(self, df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
@@ -814,11 +832,9 @@ class MathEngine:
             '4h': self.resample_to_timeframe(df_1m, '4h'),
         }
 
-        # Use GCS 1d data if available, else resample
-        if df_1d is not None and len(df_1d) >= 10:
-            timeframes['1d'] = df_1d
-        else:
-            timeframes['1d'] = self.resample_to_timeframe(df_1m, '1d')
+        # Merge GCS 1d data with resampled 1m data for a unified continuum
+        df_resampled_1d = self.resample_to_timeframe(df_1m, '1d')
+        timeframes['1d'] = self.merge_history(df_resampled_1d, df_1d)
 
         for tf_name, tf_df in timeframes.items():
             if len(tf_df) >= 5:
@@ -898,16 +914,12 @@ class MathEngine:
             '4h': self.resample_to_timeframe(df_1m, '4h'),
         }
 
-        # Use GCS data for 1d and 1w (much deeper history needed)
-        if df_1d is not None and len(df_1d) >= 10:
-            timeframes['1d'] = df_1d
-        else:
-            timeframes['1d'] = self.resample_to_timeframe(df_1m, '1d')
+        # Merge GCS data with resampled 1m data for a unified continuum
+        df_resampled_1d = self.resample_to_timeframe(df_1m, '1d')
+        timeframes['1d'] = self.merge_history(df_resampled_1d, df_1d)
 
-        if df_1w is not None and len(df_1w) >= 5:
-            timeframes['1w'] = df_1w
-        else:
-            timeframes['1w'] = self.resample_to_timeframe(df_1m, '1w')
+        df_resampled_1w = self.resample_to_timeframe(df_1m, '1w')
+        timeframes['1w'] = self.merge_history(df_resampled_1w, df_1w)
 
         for tf_name, tf_df in timeframes.items():
             if len(tf_df) >= 5:

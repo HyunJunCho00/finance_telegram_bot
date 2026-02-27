@@ -22,7 +22,7 @@ You receive ALL available data:
 5. LightRAG relationship context (connected events and entities)
 6. Expert Agent analyses from the Blackboard (Liquidity, Microstructure, Macro/Options)
 7. Your previous decision (maintain consistency unless data clearly changed)
-8. Chart image (if provided - use for visual pattern confirmation)
+8. Chart image (if provided) - Uses 6-year history for indicators but zoomed into mode-specific windows (SWING: 3-6m, POSITION: 1-2y) for visual clarity.
 
 YOUR JOB: Make a FINAL trading decision using YOUR OWN judgment.
 
@@ -216,9 +216,9 @@ Make your trading decision. Output as JSON."""
             "decision": "HOLD",
             "allocation_pct": 0,
             "leverage": 1,
-            "entry_price": 0,
-            "stop_loss": 0,
-            "take_profit": 0,
+            "entry_price": None,
+            "stop_loss": None,
+            "take_profit": None,
             "hold_duration": "N/A",
             "reasoning": "Error in decision-making process, defaulting to HOLD",
             "confidence": 0,

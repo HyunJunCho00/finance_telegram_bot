@@ -161,8 +161,8 @@ def _build_analysis_trigger(mode: TradingMode):
         # Once daily at 00:00 UTC = 09:00 KST (Upbit new day)
         return CronTrigger(hour=0, minute=0)
     else:
-        # SWING: every 4 hours
-        return CronTrigger(hour='*/4', minute=0)
+        # SWING: every 8 hours (00:00, 08:00, 16:00 UTC) to save costs
+        return CronTrigger(hour='0,8,16', minute=0)
 
 
 def main():

@@ -147,6 +147,12 @@ class ReportGenerator:
         except Exception as e:
             logger.error(f"Error formatting advanced indicators: {e}")
 
+        # Logic to handle 0 values as N/A for cleaner reports
+        def fmt_price(val):
+            if val is None or val == 0 or val == '0':
+                return 'N/A'
+            return val
+
         message = f"""{icon} <b>{mode_label} REPORT</b> {mode_icon}
 
 <b>Symbol:</b> {report['symbol']}
@@ -158,9 +164,9 @@ class ReportGenerator:
 <b>Confidence:</b> {decision.get('confidence', 0)}%
 <b>Hold:</b> {hold_duration}
 
-<b>Entry:</b> {decision.get('entry_price', 'N/A')}
-<b>Stop Loss:</b> {decision.get('stop_loss', 'N/A')}
-<b>Take Profit:</b> {decision.get('take_profit', 'N/A')}
+<b>Entry:</b> {fmt_price(decision.get('entry_price'))}
+<b>Stop Loss:</b> {fmt_price(decision.get('stop_loss'))}
+<b>Take Profit:</b> {fmt_price(decision.get('take_profit'))}
 
 {receipt_text}
 <b>Key Factors (PM):</b>
@@ -169,7 +175,7 @@ class ReportGenerator:
 {struct_text}{fib_text}
 
 <b>PM Reasoning:</b>
-{decision.get('reasoning', 'N/A')[:700]}"""
+{decision.get('reasoning', 'N/A')[:3000]}"""
 
         return message
 

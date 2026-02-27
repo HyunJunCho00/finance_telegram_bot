@@ -137,6 +137,20 @@ class PriceCollector:
         last_ms = self._latest_db_timestamp_ms(db_symbol, 'binance')
 
         if last_ms is None:
+            # [FIX] If DB is empty, check GCS for the last available archived candle
+            try:
+                from processors.gcs_parquet import gcs_parquet_store
+                if gcs_parquet_store.enabled:
+                    # Look back 1 month for GCS archive to find a 'seed' for backfill
+                    gcs_df = gcs_parquet_store.load_ohlcv("1m", db_symbol, months_back=1)
+                    if not gcs_df.empty:
+                        last_ms = int(gcs_df.iloc[-1]['timestamp'].timestamp() * 1000)
+                        logger.info(f"DB empty for {symbol}, seeding from GCS @ {gcs_df.iloc[-1]['timestamp']}")
+            except Exception as e:
+                logger.warning(f"GCS seed lookup failed for {symbol}: {e}")
+
+        if last_ms is None:
+            # Final fallback: just get the last 2 candles
             df = self.fetch_binance_ohlcv_with_cvd(symbol, timeframe='1m', limit=2)
             return df.to_dict('records') if not df.empty else []
 
@@ -170,6 +184,18 @@ class PriceCollector:
         """Backfill gap from latest DB candle to now, using 1m pagination."""
         db_symbol = symbol.replace('/', '')
         last_ms = self._latest_db_timestamp_ms(db_symbol, 'upbit')
+
+        if last_ms is None:
+            # [FIX] If DB is empty, check GCS for seed
+            try:
+                from processors.gcs_parquet import gcs_parquet_store
+                if gcs_parquet_store.enabled:
+                    gcs_df = gcs_parquet_store.load_ohlcv("1m", db_symbol, months_back=1)
+                    if not gcs_df.empty:
+                        last_ms = int(gcs_df.iloc[-1]['timestamp'].timestamp() * 1000)
+                        logger.info(f"DB empty for {symbol} (Upbit), seeding from GCS @ {gcs_df.iloc[-1]['timestamp']}")
+            except Exception as e:
+                logger.debug(f"GCS seed lookup failed for {symbol}: {e}")
 
         if last_ms is None:
             df = self.fetch_upbit_ohlcv(symbol, timeframe='1m', limit=2)

@@ -87,13 +87,21 @@ class ChartGenerator:
             for col in ['open', 'high', 'low', 'close', 'volume']:
                 tmp[col] = tmp[col].astype(float)
 
-            chart_df = tmp.resample(config['resample_rule']).agg({
+            # 1. Prepare FULL resampled DF for calculations
+            full_resampled = tmp.resample(config['resample_rule']).agg({
                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-            }).dropna().tail(config['tail_candles'])
+            }).dropna()
 
-            if len(chart_df) < config['min_candles']:
+            if len(full_resampled) < config['min_candles']:
                 return None
 
+            # 2. Calculate Indicators on FULL history
+            # Add EMA200 to full_resampled before slicing
+            import pandas_ta as ta
+            full_resampled['ema200'] = ta.ema(full_resampled['close'], length=min(200, len(full_resampled)-1))
+
+            # 3. Slice for VISUAL window
+            chart_df = full_resampled.tail(config['tail_candles']).copy()
             chart_df.index.name = 'Date'
 
             # Style — clean, minimal
@@ -107,13 +115,13 @@ class ChartGenerator:
                 facecolor='white', figcolor='white'
             )
 
-            # Plot — candlesticks + volume only (NO indicator subplots)
+            # Plot — candlesticks + volume only
             fig, axes = mpf.plot(
                 chart_df, type='candle', style=style, volume=True,
                 title=f'\n{symbol} {config["title_suffix"]}',
                 figsize=(self.width / self.dpi, self.height / self.dpi),
                 returnfig=True,
-                panel_ratios=(5, 1),  # Large price panel, small volume
+                panel_ratios=(5, 1),
             )
 
             price_ax = axes[0]
@@ -176,25 +184,24 @@ class ChartGenerator:
     # ─────────────── Overlay Drawing Methods ───────────────
 
     def _draw_ema200(self, ax, chart_df: pd.DataFrame):
-        """Draw EMA200 line. Falls back to EMA of available length if < 200 candles."""
+        """Draw EMA200 line. Uses pre-calculated high-precision EMA from full history."""
         try:
-            import pandas_ta as ta
-            close = chart_df['close'].astype(float)
-            length = min(200, len(close) - 1)
-            if length < 10:
+            if 'ema200' not in chart_df.columns:
                 return
-            ema = ta.ema(close, length=length)
+            
+            ema = chart_df['ema200']
             if ema is None or ema.isna().all():
                 return
-            label = f'EMA{length}'
+                
             ax.plot(chart_df.index, ema.values,
                     color='#FF9800', linewidth=1.5,
                     linestyle='-', alpha=0.85, zorder=4)
+            
             last_val = ema.dropna().iloc[-1] if not ema.dropna().empty else None
             if last_val:
                 ax.text(chart_df.index[-1], float(last_val),
-                        f' {label}', color='#FF9800',
-                        fontsize=7, va='center', ha='left')
+                        ' EMA200 (6Y Context)', color='#FF9800',
+                        fontsize=7, va='center', ha='left', fontweight='bold')
         except Exception as e:
             logger.debug(f"EMA200 draw error: {e}")
 
