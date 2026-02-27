@@ -109,6 +109,7 @@ Swarm reasoning controls & Data Trust Hierarchy:
         active_orders: list = [],
         open_positions: str = "",
         symbol: str = "BTCUSDT"
+    ) -> Dict:
         mode_str = mode.value.upper()
         mode_rules = self.POSITION_RULES if mode == TradingMode.POSITION else self.SWING_RULES
         
