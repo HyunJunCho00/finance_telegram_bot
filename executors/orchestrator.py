@@ -648,8 +648,17 @@ def node_generate_chart(state: AnalysisState) -> dict:
         # Fetch 1m CVD data matching the candle lookback
         cvd_limit = settings.data_lookback_hours * 60
         cvd_df = db.get_cvd_data(symbol, limit=cvd_limit)
+        
+        # [NEW] Merge with GCS historical CVD for long-term charts
+        from processors.gcs_parquet import gcs_parquet_store
+        if gcs_parquet_store.enabled:
+            m_back = 6 if mode == TradingMode.SWING else 12
+            hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
+            if not hist_cvd.empty:
+                hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'], utc=True)
+                cvd_df = pd.concat([hist_cvd, cvd_df]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
     except Exception as e:
-        logger.warning(f"CVD data load for chart skipped: {e}")
+        logger.warning(f"CVD data load for chart skipped/merged: {e}")
 
     # Load liquidation data for chart markers
     liquidation_df = None
@@ -665,8 +674,17 @@ def node_generate_chart(state: AnalysisState) -> dict:
         # Fetch funding data (includes OI, LSR) matching the lookback
         funding_limit = settings.data_lookback_hours * 60
         funding_df = db.get_funding_history(symbol, limit=funding_limit)
+        
+        # [NEW] Merge with GCS historical funding for long-term charts
+        from processors.gcs_parquet import gcs_parquet_store
+        if gcs_parquet_store.enabled:
+            m_back = 6 if mode == TradingMode.SWING else 12
+            hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
+            if not hist_fnd.empty:
+                hist_fnd['timestamp'] = pd.to_datetime(hist_fnd['timestamp'], utc=True)
+                funding_df = pd.concat([hist_fnd, funding_df]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
     except Exception as e:
-        logger.warning(f"Funding/OI data load for chart skipped: {e}")
+        logger.warning(f"Funding/OI data load for chart skipped/merged: {e}")
 
     chart_bytes = chart_generator.generate_chart(df, market_data, symbol, mode,
                                                   liquidation_df=liquidation_df,
