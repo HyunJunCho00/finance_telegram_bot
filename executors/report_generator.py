@@ -121,18 +121,32 @@ class ReportGenerator:
                 summary_lines.append(f"  ▫️ {f}")
             summary_lines.append("")
 
-        # Post-Mortem / Reasoning (Cleaned)
+        # Post-Mortem / Reasoning (Structured or Flat)
         reasoning = decision.get('reasoning', 'N/A')
-        # Truncate reasoning safely to avoid breaking HTML limits
-        if len(reasoning) > 600:
-            reasoning = reasoning[:600] + "..."
-            
-        summary_lines.append("📝 <b>PM ANALYSIS</b>")
         
-        # NOTE: Telegram HTML parsing breaks if there are unescaped < or > characters in the string.
-        # We must replace them.
-        safe_reasoning = str(reasoning).replace('<', '&lt;').replace('>', '&gt;')
-        summary_lines.append(f"<i>{safe_reasoning}</i>")
+        summary_lines.append("📝 <b>DECISION RATIONALE</b>")
+        
+        if isinstance(reasoning, dict):
+            # Format structured reasoning
+            mapping = {
+                "technical": "📏 TA",
+                "derivatives": "⛓️ DERIV",
+                "experts": "🧠 EXP",
+                "narrative": "🌐 NARR",
+                "final_logic": "💡 FIN"
+            }
+            for key, emoji in mapping.items():
+                val = reasoning.get(key)
+                if val:
+                    # Escape HTML for each part
+                    safe_val = str(val).replace('<', '&lt;').replace('>', '&gt;')
+                    summary_lines.append(f"<b>{emoji}:</b> <i>{safe_val}</i>")
+        else:
+            # Fallback for flat string reasoning
+            safe_reasoning = str(reasoning).replace('<', '&lt;').replace('>', '&gt;')
+            if len(safe_reasoning) > 600:
+                safe_reasoning = safe_reasoning[:600] + "..."
+            summary_lines.append(f"<i>{safe_reasoning}</i>")
 
         return "\n".join(summary_lines)
 

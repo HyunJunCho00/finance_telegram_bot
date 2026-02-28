@@ -37,9 +37,15 @@ Output your decision as JSON:
   "stop_loss": float,
   "take_profit": float,
   "hold_duration": "hours/days/weeks estimate",
-  "reasoning": "CONCISE reasoning (max 3-4 sentences)",
+  "reasoning": {{
+    "technical": "MTF indicators, Structure, Fibonacci levels",
+    "derivatives": "Funding, Global OI, CVD context",
+    "experts": "Blackboard expert summaries (Liq, Micro, Macro)",
+    "narrative": "Perplexity narrative and RAG events",
+    "final_logic": "Concluding synthesis"
+  }},
   "confidence": 0-100,
-  "key_factors": ["factor1", "factor2", ...]
+  "key_factors": ["short bullet 1", "short bullet 2", ...]
 }}
 
 You have FULL AUTONOMY. If the market is unclear, HOLD is always valid.
