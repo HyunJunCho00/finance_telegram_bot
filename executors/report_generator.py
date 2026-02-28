@@ -123,12 +123,16 @@ class ReportGenerator:
 
         # Post-Mortem / Reasoning (Cleaned)
         reasoning = decision.get('reasoning', 'N/A')
-        # Truncate reasoning but keep it substantial
-        if len(reasoning) > 800:
-            reasoning = reasoning[:800] + "..."
+        # Truncate reasoning safely to avoid breaking HTML limits
+        if len(reasoning) > 600:
+            reasoning = reasoning[:600] + "..."
             
         summary_lines.append("📝 <b>PM ANALYSIS</b>")
-        summary_lines.append(f"<i>{reasoning}</i>")
+        
+        # NOTE: Telegram HTML parsing breaks if there are unescaped < or > characters in the string.
+        # We must replace them.
+        safe_reasoning = str(reasoning).replace('<', '&lt;').replace('>', '&gt;')
+        summary_lines.append(f"<i>{safe_reasoning}</i>")
 
         return "\n".join(summary_lines)
 

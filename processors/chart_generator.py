@@ -96,7 +96,8 @@ class ChartGenerator:
                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
             }).dropna()
 
-            if len(full_resampled) < config['min_candles']:
+            if len(full_resampled) < min(config['min_candles'], 5):
+                logger.warning(f"Not enough candles: {len(full_resampled)} < {config['min_candles']}")
                 return None
 
             # 2. Calculate Indicators on FULL history
