@@ -329,7 +329,7 @@ def node_rag_query(state: AnalysisState) -> dict:
     symbol = state["symbol"]
     try:
         coin_name = "Bitcoin BTC" if "BTC" in symbol else "Ethereum ETH"
-        result = light_rag.query(coin_name, mode="hybrid")
+        result = light_rag.query(coin_name)
         rag_text = light_rag.format_context_for_agents(result, max_length=1500)
         return {"rag_context": rag_text}
     except Exception as e:
@@ -1029,7 +1029,8 @@ class Orchestrator:
             result = self.graph.invoke(initial_state)
             return result.get("final_decision", {})
         except Exception as e:
-            logger.error(f"LangGraph execution error: {e}")
+            import traceback
+            logger.error(f"LangGraph execution error: {e}\n{traceback.format_exc()}")
             return {"decision": "HOLD", "reasoning": f"LangGraph error: {e}", "confidence": 0}
 
     def _run_sequential(self, symbol: str, mode: TradingMode, is_emergency: bool) -> Dict:

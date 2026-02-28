@@ -436,8 +436,8 @@ class MilvusVectorStore:
     Free tier: 1M vectors, 2 collections.
     """
 
-    COLLECTION_NAME = "crypto_news"
-    DIMENSION = 768  # text-embedding-005 dimension
+    COLLECTION_NAME = "crypto_news_1024"
+    DIMENSION = 1024  # voyage-3 dimension
 
     def __init__(self, uri: str = "", token: str = ""):
         self._client = None
@@ -450,7 +450,18 @@ class MilvusVectorStore:
             try:
                 self._client = MilvusClient(uri=self._uri, token=self._token)
                 self._ensure_collection()
-                logger.info("Milvus connected")
+                # Ensure load works even if index was somehow missing
+                try:
+                    self._client.load_collection(self.COLLECTION_NAME)
+                except Exception:
+                    # If load fails due to missing index, try to create it
+                    self._client.create_index(
+                        collection_name=self.COLLECTION_NAME,
+                        field_name="vector",
+                        index_params={"metric_type": "COSINE", "index_type": "AUTOINDEX"},
+                    )
+                    self._client.load_collection(self.COLLECTION_NAME)
+                logger.info("Milvus connected and collection loaded")
             except Exception as e:
                 logger.error(f"Milvus connection failed: {e}")
                 self._client = None
@@ -1141,7 +1152,7 @@ Rules:
             logger.info(f"LightRAG ingested {count}/{len(messages)} (dup={skipped_dup}, stats={stats})")
         return count
 
-    def query(self, query_text: str, top_k: int = 10) -> Dict:
+    def query(self, query_text: str, top_k: int = 10, **kwargs) -> Dict:
         """Query the Logical Truth Engine (Intent-Based)."""
         ai = self._get_ai_client()
         intent = "hybrid"

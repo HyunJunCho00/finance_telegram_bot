@@ -1,4 +1,4 @@
-import pandas as pd
+﻿import pandas as pd
 import numpy as np
 from scipy.signal import argrelextrema
 from typing import Dict, Tuple, Optional, List

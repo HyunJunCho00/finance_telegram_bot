@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Environment and Secrets
 .env
 !.env.example
 .env.local
@@ -9,25 +10,35 @@ __pycache__/
 *.session-journal
 telegram_session
 telegram_session-journal
+credentials.json
+service-account-key.json
 
+# Data and Logs
 *.log
 logs/
-
+data/
+tmp/
 *.sqlite
 *.db
+*.parquet
+dune_data_*.json
+charts/
 
+# Editor and System
 .vscode/
 .idea/
 *.swp
 *.swo
-
-venv/
-ENV/
-
 .DS_Store
 Thumbs.db
+.claude*
 
-*.parquet
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# Data Archives/Backups
 coin_1m/
 coin_1m_bin/
 coin_1m_bin_kst/
@@ -35,23 +46,15 @@ coin_1m_up/
 merged_coin/
 binance_data/
 oi_funding/
-
+old_backup
 *.zip
 *.tar.gz
 
+# Tests and Temporary Scripts
+test*
+AI_test.py
+ARCHITECTURE_V8_FINAL.md
+setup_telegram_session.py
 .pytest_cache/
 .coverage
 htmlcov/
-
-credentials.json
-service-account-key.json
-charts/
-.claude*
-old_backup
-*.json
-test.py
-test1.py
-ARCHITECTURE_V8_FINAL.md
-AI_test.py
-test.py
-test1.py

@@ -128,9 +128,9 @@ class Settings(BaseSettings):
     # ===== Role-based model routing (2026 SOTA tuning) =====
     # 1. High-frequency / Big Data (Lowest cost, largest context API)
     # Using gemini-3-flash-preview (Thinking Level: LOW)
-    MODEL_LIQUIDITY: str = "gemini-3.1-flash"
-    MODEL_MICROSTRUCTURE: str = "gemini-3.1-flash"
-    MODEL_RAG_EXTRACTION: str = "gemini-3.1-flash"
+    MODEL_LIQUIDITY: str = "gemini-3-flash-preview"
+    MODEL_MICROSTRUCTURE: str = "gemini-3-flash-preview"
+    MODEL_RAG_EXTRACTION: str = "gemini-3-flash-preview"
     
     # 2. Vision / Multimodal Geometry
     # Using gemini-3.1-pro-preview (Thinking Level: HIGH)
@@ -139,7 +139,7 @@ class Settings(BaseSettings):
     # 3. World Knowledge / Macro Economy
     # gemini-3-flash-preview: fast, cheap, sufficient for macro text context
     # (previously gpt-5.2 — removed OpenAI dependency to eliminate unexpected cost)
-    MODEL_MACRO: str = "gemini-3.1-flash"
+    MODEL_MACRO: str = "gemini-3-flash-preview"
     
     # 4. Supreme Logical Reasoning / Trade Execution
     # claude-sonnet-4-6: The actual SOTA as of Feb 2026, featuring hybrid reasoning (extended thinking)
