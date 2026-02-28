@@ -61,6 +61,12 @@ class PaperExchangeEngine:
             )
             self._conn.commit()
 
+    def get_open_positions(self) -> List[Dict]:
+        """Return all currently open mock positions."""
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT * FROM paper_positions WHERE is_open = 1")
+        return [dict(row) for row in cursor.fetchall()]
+
     def simulate_execution(
         self,
         exchange: str,

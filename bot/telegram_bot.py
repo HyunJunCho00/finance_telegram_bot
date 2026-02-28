@@ -51,8 +51,42 @@ class TradingBot:
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             mode = settings.trading_mode.value.upper()
-            lines = [f"Mode: {mode}\n"]
+            is_paper = settings.PAPER_TRADING_MODE
 
+            lines = [
+                f"🛡️ <b>Trading Status</b>",
+                f"Mode: <code>{mode}</code>",
+                f"Type: <code>{'PAPER' if is_paper else 'LIVE'}</code>",
+                ""
+            ]
+
+            # 1. Active Mock Positions (If applicable)
+            if is_paper:
+                from executors.paper_exchange import paper_engine
+                positions = paper_engine.get_open_positions()
+                
+                lines.append("📌 <b>Active Positions</b>")
+                if not positions:
+                    lines.append("<i>- No open positions</i>")
+                else:
+                    for pos in positions:
+                        # Calculate unrealized PnL briefly if possible (needs current price)
+                        # For now, show entry and target
+                        lines.append(
+                            f"• <b>{pos['exchange'].upper()}</b> | {pos['symbol']}: {pos['side']} "
+                            f"(Entry: {pos['entry_price']:.2f}, Lev: {pos['leverage']}x)"
+                        )
+                
+                # Wallet Balances
+                lines.append("\n💰 <b>Mock Balances</b>")
+                for ex in ['binance', 'upbit']:
+                    bal = paper_engine.get_wallet_balance(ex)
+                    unit = 'USD' if ex == 'binance' else 'KRW'
+                    lines.append(f"• {ex.upper()}: {bal:,.2f} {unit}")
+                lines.append("")
+
+            # 2. Strategy Analysis (Latest Reports)
+            lines.append("🤖 <b>Latest Strategy</b>")
             for symbol in settings.trading_symbols:
                 report = db.get_latest_report(symbol=symbol)
                 if report:
@@ -62,19 +96,16 @@ class TradingBot:
 
                     decision = fd.get('decision', 'N/A') if fd else 'N/A'
                     confidence = fd.get('confidence', 0) if fd else 0
-                    hold = fd.get('hold_duration', 'N/A') if fd else 'N/A'
-                    ts = report.get('timestamp', 'N/A')[:19]
+                    ts = report.get('timestamp', 'N/A')[:16].replace('T', ' ')
 
                     lines.append(
-                        f"{symbol}:\n"
-                        f"  Decision: {decision} ({confidence}%)\n"
-                        f"  Hold: {hold}\n"
-                        f"  Time: {ts}\n"
+                        f"• {symbol}: <b>{decision}</b> ({confidence}%) "
+                        f"<pre>{ts}</pre>"
                     )
                 else:
-                    lines.append(f"{symbol}: No report yet\n")
+                    lines.append(f"• {symbol}: No report yet")
 
-            await update.message.reply_text('\n'.join(lines))
+            await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
         except Exception as e:
             logger.error(f"Status command error: {e}")
             await update.message.reply_text(f"Error: {e}")
