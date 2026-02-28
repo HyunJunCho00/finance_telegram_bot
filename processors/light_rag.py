@@ -181,7 +181,7 @@ class Neo4jGraph:
                         END
                 """, source=source.lower(), target=target.lower(),
                      rel_type=rel_type, description=description[:200],
-                     weight=weight, timestamp=timestamp)
+                     weight=weight, timestamp=timestamp, source_id=source_id)
         except Exception as e:
             logger.error(f"Neo4j upsert_relationship error: {e}")
 

@@ -263,10 +263,10 @@ class MathEngine:
             if 'timestamp' in df.columns:
                 df = df.set_index('timestamp')
             
-        close = df['close'].astype(float)
-        high = df['high'].astype(float)
-        low = df['low'].astype(float)
-        volume = df['volume'].astype(float)
+        close = df['close'].astype('float64')
+        high = df['high'].astype('float64')
+        low = df['low'].astype('float64')
+        volume = df['volume'].astype('float64')
         r = {}
 
         try:
