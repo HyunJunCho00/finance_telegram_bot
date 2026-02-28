@@ -150,6 +150,128 @@ class MathEngine:
 
         return {'bullish_divergence': bullish, 'bearish_divergence': bearish}
 
+    def detect_macro_divergences(self, df: pd.DataFrame, cvd_df: Optional[pd.DataFrame] = None) -> Dict:
+        """Detect long-term divergence between Price and CVD/OI (Smart Money Footprint)."""
+        if cvd_df is None or cvd_df.empty or len(df) < 50:
+            return {'macro_bull_div': False, 'macro_bear_div': False}
+            
+        try:
+            # Prepare aligned data
+            df = df.copy()
+            cvd = cvd_df.copy()
+            cvd['timestamp'] = pd.to_datetime(cvd['timestamp'], utc=True)
+            cvd = cvd.set_index('timestamp')
+            
+            # Resample CVD to match DF timeframe
+            resample_rule = '1D' if (df['timestamp'].diff().median() >= pd.Timedelta(days=1)) else '4h'
+            cvd_resampled = cvd.resample(resample_rule).sum().fillna(0)
+            cvd_acc = (cvd_resampled.get('whale_buy_vol', 0) - cvd_resampled.get('whale_sell_vol', 0)).cumsum()
+            
+            # Align
+            df = df.set_index('timestamp')
+            combined = pd.concat([df['close'], cvd_acc.rename('cvd')], axis=1).ffill().dropna()
+            
+            if len(combined) < 30:
+                return {'macro_bull_div': False, 'macro_bear_div': False}
+                
+            # Find macro pivots (order=10 for macro)
+            close = combined['close'].values
+            cvd_vals = combined['cvd'].values
+            min_idx = argrelextrema(close, np.less, order=10)[0]
+            max_idx = argrelextrema(close, np.greater, order=10)[0]
+            
+            bull_div = False
+            bear_div = False
+            
+            if len(min_idx) >= 2:
+                # Lower Low in Price, Higher Low in CVD
+                if close[min_idx[-1]] < close[min_idx[-2]] and cvd_vals[min_idx[-1]] > cvd_vals[min_idx[-2]]:
+                    bull_div = True
+            
+            if len(max_idx) >= 2:
+                # Higher High in Price, Lower High in CVD
+                if close[max_idx[-1]] > close[max_idx[-2]] and cvd_vals[max_idx[-1]] < cvd_vals[max_idx[-2]]:
+                    bear_div = True
+                    
+            return {'macro_bull_div': bull_div, 'macro_bear_div': bear_div}
+        except Exception as e:
+            logger.error(f"Macro divergence error: {e}")
+            return {'macro_bull_div': False, 'macro_bear_div': False}
+
+    # ─────────────── Order Blocks ───────────────
+
+    def calculate_macro_order_blocks(self, df: pd.DataFrame, count: int = 3) -> List[Dict]:
+        """Identify Institutional Order Blocks (OB).
+        Bullish OB: The last bearish candle before a strong bullish break of structure.
+        Bearish OB: The last bullish candle before a strong bearish break of structure.
+        """
+        try:
+            if len(df) < 20: return []
+            
+            obs = []
+            # Simplified OB detection: Look for 'Engulfing' style breakouts from local pivots
+            # Bullish Breakout: Close crosses above a recent pivot high
+            _, max_pivots = self.find_pivot_points(df, order=5)
+            
+            for i in range(2, len(df) - 1):
+                # Potential Bullish OB: Candle i-1 was Red, Candle i is Green and strong
+                if df.iloc[i]['close'] > df.iloc[i]['open'] and df.iloc[i-1]['close'] < df.iloc[i-1]['open']:
+                    # Strong breakout condition: current close > previous high AND move is > 1.5%
+                    move_size = (df.iloc[i]['close'] - df.iloc[i]['open']) / df.iloc[i]['open']
+                    if move_size > 0.015:
+                        obs.append({
+                            'type': 'BULLISH',
+                            'top': float(df.iloc[i-1]['high']),
+                            'bottom': float(df.iloc[i-1]['low']),
+                            'timestamp': df.iloc[i-1]['timestamp'],
+                            'strength': move_size
+                        })
+                
+                # Potential Bearish OB
+                if df.iloc[i]['close'] < df.iloc[i]['open'] and df.iloc[i-1]['close'] > df.iloc[i-1]['open']:
+                    move_size = (df.iloc[i]['open'] - df.iloc[i]['close']) / df.iloc[i]['open']
+                    if move_size > 0.015:
+                        obs.append({
+                            'type': 'BEARISH',
+                            'top': float(df.iloc[i-1]['high']),
+                            'bottom': float(df.iloc[i-1]['low']),
+                            'timestamp': df.iloc[i-1]['timestamp'],
+                            'strength': move_size
+                        })
+            
+            # Filter for most recent and strongest
+            obs = sorted(obs, key=lambda x: x['timestamp'], reverse=True)
+            return obs[:count*2] # Return a few of each
+        except Exception as e:
+            logger.error(f"Order Block calculation error: {e}")
+            return []
+
+    # ─────────────── Anchored VWAP ───────────────
+
+    def calculate_anchored_vwap(self, df: pd.DataFrame, anchor_idx: int) -> Optional[pd.Series]:
+        """Calculate VWAP starting from a specific anchor index."""
+        try:
+            if anchor_idx < 0 or anchor_idx >= len(df):
+                return None
+                
+            subset = df.iloc[anchor_idx:].copy()
+            # typical price * volume
+            tp = (subset['high'] + subset['low'] + subset['close']) / 3
+            pv = tp * subset['volume']
+            
+            cum_pv = pv.cumsum()
+            cum_vol = subset['volume'].cumsum()
+            
+            avwap = cum_pv / cum_vol
+            
+            # Reindex to full length with NaNs before anchor
+            full_series = pd.Series(index=df.index, dtype=float)
+            full_series.iloc[anchor_idx:] = avwap.values
+            return full_series
+        except Exception as e:
+            logger.error(f"Anchored VWAP error: {e}")
+            return None
+
     # ─────────────── Fibonacci Levels ───────────────
 
     def calculate_fibonacci_levels(self, df: pd.DataFrame) -> Optional[Dict]:
@@ -864,12 +986,25 @@ class MathEngine:
                 if res:
                     result['trendline_quality'][f'resistance_{tf_name}'] = self.score_trendline_quality(tf_df, res, 'resistance')
 
+        # Structural analysis on 1d (chart overlay: SWING chart draws 1D candles)
+        tf_1d = timeframes.get('1d', pd.DataFrame())
+        if len(tf_1d) >= 20:
+            result['structure']['support_1d']    = self.calculate_diagonal_support(tf_1d)
+            result['structure']['resistance_1d'] = self.calculate_diagonal_resistance(tf_1d)
+            result['structure']['divergence_1d'] = self.detect_divergences(tf_1d)
+            result['market_structure']['1d']     = self.detect_market_structure(tf_1d)
+            sup_1d = result['structure'].get('support_1d')
+            res_1d = result['structure'].get('resistance_1d')
+            if sup_1d:
+                result['trendline_quality']['support_1d']    = self.score_trendline_quality(tf_1d, sup_1d, 'support')
+            if res_1d:
+                result['trendline_quality']['resistance_1d'] = self.score_trendline_quality(tf_1d, res_1d, 'resistance')
+
         # Fibonacci on 4h and 1d
         tf_4h = timeframes.get('4h', pd.DataFrame())
         if len(tf_4h) >= 20:
             result['fibonacci']['4h'] = self.calculate_fibonacci_levels(tf_4h)
 
-        tf_1d = timeframes.get('1d', pd.DataFrame())
         if len(tf_1d) >= 10:
             result['fibonacci']['1d'] = self.calculate_fibonacci_levels(tf_1d)
 
@@ -881,9 +1016,11 @@ class MathEngine:
         if len(tf_4h) >= 10:
             result['fvg']['4h'] = self.calculate_fvg(tf_4h)
 
-        # Swing levels on 4h
+        # Swing levels on 4h and 1d
         if len(tf_4h) >= 20:
             result['swing_levels']['4h'] = self.calculate_swing_levels(tf_4h)
+        if len(tf_1d) >= 20:
+            result['swing_levels']['1d'] = self.calculate_swing_levels(tf_1d)
 
         # Multi-TF confluence zones
         result['confluence_zones'] = self.detect_confluence_zones(result)
@@ -952,6 +1089,15 @@ class MathEngine:
         tf_1w = timeframes.get('1w', pd.DataFrame())
         if len(tf_1w) >= 10:
             result['market_structure']['1w'] = self.detect_market_structure(tf_1w)
+            # Structure on 1w (chart overlay: POSITION chart draws 1W candles)
+            result['structure']['support_1w']    = self.calculate_diagonal_support(tf_1w)
+            result['structure']['resistance_1w'] = self.calculate_diagonal_resistance(tf_1w)
+            sup_1w = result['structure'].get('support_1w')
+            res_1w = result['structure'].get('resistance_1w')
+            if sup_1w:
+                result['trendline_quality']['support_1w']    = self.score_trendline_quality(tf_1w, sup_1w, 'support')
+            if res_1w:
+                result['trendline_quality']['resistance_1w'] = self.score_trendline_quality(tf_1w, res_1w, 'resistance')
 
         # Fibonacci on 1d and 1w
         if len(tf_1d) >= 10:

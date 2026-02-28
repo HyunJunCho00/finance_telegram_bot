@@ -88,10 +88,10 @@ class Settings(BaseSettings):
     # Cost guardrails for free-tier Dune credits (monthly 2500 credits)
     # Keep scheduler cadence unchanged, but throttle collector execution internally.
     DUNE_BUDGET_GUARD: bool = True
-    DUNE_GLOBAL_MIN_INTERVAL_MINUTES: int = 360  # at most once per 6h globally
-    DUNE_MAX_QUERY_RUNS_PER_DAY: int = 8
-    DUNE_MAX_QUERIES_PER_RUN: int = 1
-    DUNE_PRIORITY_QUERY_IDS: str = "21689,4319,6638261"
+    DUNE_GLOBAL_MIN_INTERVAL_MINUTES: int = 60  # at most once per 1h globally
+    DUNE_MAX_QUERY_RUNS_PER_DAY: int = 24
+    DUNE_MAX_QUERIES_PER_RUN: int = 5
+    DUNE_PRIORITY_QUERY_IDS: str = "21689,4319,6638261,5924114,3383110"
 
     # Optional low-cost long-term archive on GCS
     ENABLE_GCS_ARCHIVE: bool = False

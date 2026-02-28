@@ -7,10 +7,19 @@ Collects from 3 major exchanges (Binance, Bybit, OKX) via ccxt:
 
 Global OI eliminates single-exchange noise and measures total market energy.
 OI-price divergence is a key professional signal.
+
+Historical data availability (Binance):
+- Funding rates : Full history via /fapi/v1/fundingRate (8h intervals, back to 2019)
+- Open Interest : Only last ~30 days via /futures/data/openInterestHist (API limit)
+  → OI beyond 30 days is not available from free Binance API.
+  → Use backfill_funding_history() to populate GCS Parquet for long-term charts.
 """
 
 import ccxt
-from datetime import datetime, timezone
+import requests
+import time
+import pandas as pd
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 from config.settings import settings
 from config.database import db
@@ -201,6 +210,168 @@ class FundingCollector:
     def run(self) -> None:
         data = self.collect_all_funding_data()
         self.save_to_database(data)
+
+    # ─────────────── Historical Backfill (one-time / on-demand) ───────────────
+
+    def backfill_funding_history(self,
+                                  symbol: str,
+                                  start_date: str = "2021-01-01",
+                                  dry_run: bool = False) -> Dict:
+        """Backfill full Binance funding rate history into GCS Parquet.
+
+        Binance provides 8h-interval funding rates back to contract inception:
+          - BTCUSDT: ~2019-09-10
+          - ETHUSDT: ~2021-05-12
+        This data is NOT limited by DB retention — written directly to GCS.
+
+        OI history: Binance only provides ~30 days via openInterestHist API.
+        This method fetches OI for whatever Binance returns and stores alongside
+        the funding rates so the chart panels show real data for recent months.
+
+        Args:
+            symbol:     e.g. "BTC/USDT" (slash format)
+            start_date: ISO date string "YYYY-MM-DD"
+            dry_run:    If True, fetch and log only, do not write to GCS.
+
+        Returns:
+            summary dict with row counts and GCS paths written.
+        """
+        from processors.gcs_parquet import gcs_parquet_store
+
+        if not gcs_parquet_store.enabled:
+            logger.warning("GCS archive disabled — set ENABLE_GCS_ARCHIVE=true")
+            return {"error": "gcs_disabled"}
+
+        binance_sym = symbol.replace("/", "")  # "BTCUSDT"
+        start_ms = int(datetime.fromisoformat(start_date)
+                       .replace(tzinfo=timezone.utc).timestamp() * 1000)
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+        # ── 1. Fetch paginated funding rates ──────────────────────────────────
+        logger.info(f"[Backfill] Fetching funding rate history for {binance_sym} from {start_date}")
+        url = "https://fapi.binance.com/fapi/v1/fundingRate"
+        all_funding: List[Dict] = []
+        page_start = start_ms
+
+        while page_start < now_ms:
+            try:
+                resp = requests.get(url, params={
+                    "symbol": binance_sym,
+                    "startTime": page_start,
+                    "limit": 1000,
+                }, timeout=15)
+                resp.raise_for_status()
+                rows = resp.json()
+            except Exception as e:
+                logger.error(f"[Backfill] Funding fetch error at {page_start}: {e}")
+                break
+
+            if not rows:
+                break
+
+            all_funding.extend(rows)
+            last_ts = rows[-1]["fundingTime"]
+            if last_ts <= page_start or len(rows) < 1000:
+                break
+            page_start = last_ts + 1
+            time.sleep(0.3)  # respect rate limit
+
+        logger.info(f"[Backfill] Fetched {len(all_funding)} funding rate rows for {binance_sym}")
+
+        # ── 2. Fetch historical OI (Binance: ~30 days available, 1h interval) ─
+        logger.info(f"[Backfill] Fetching OI history for {binance_sym} (last 30 days max)")
+        oi_url = "https://fapi.binance.com/futures/data/openInterestHist"
+        all_oi: List[Dict] = []
+        oi_start = now_ms - (30 * 24 * 3600 * 1000)  # 30 days back
+
+        while oi_start < now_ms:
+            try:
+                resp = requests.get(oi_url, params={
+                    "symbol": binance_sym,
+                    "period": "1h",
+                    "startTime": oi_start,
+                    "limit": 500,
+                }, timeout=15)
+                resp.raise_for_status()
+                rows = resp.json()
+            except Exception as e:
+                logger.error(f"[Backfill] OI fetch error at {oi_start}: {e}")
+                break
+
+            if not rows or not isinstance(rows, list):
+                break
+
+            all_oi.extend(rows)
+            last_ts = rows[-1]["timestamp"]
+            if last_ts <= oi_start or len(rows) < 500:
+                break
+            oi_start = last_ts + 1
+            time.sleep(0.3)
+
+        logger.info(f"[Backfill] Fetched {len(all_oi)} OI rows for {binance_sym}")
+
+        # ── 3. Build merged DataFrame (funding + OI joined by hour) ──────────
+        if not all_funding:
+            return {"error": "no_funding_data"}
+
+        df_fund = pd.DataFrame(all_funding)
+        df_fund["timestamp"] = pd.to_datetime(df_fund["fundingTime"], unit="ms", utc=True)
+        df_fund["funding_rate"] = df_fund["fundingRate"].astype(float)
+        df_fund["symbol"] = binance_sym
+        df_fund = df_fund[["symbol", "timestamp", "funding_rate"]].copy()
+
+        # OI: build lookup dict {hour_floor_ms: open_interest}
+        oi_lookup: Dict[pd.Timestamp, float] = {}
+        if all_oi:
+            df_oi = pd.DataFrame(all_oi)
+            df_oi["ts"] = pd.to_datetime(df_oi["timestamp"], unit="ms", utc=True).dt.floor("h")
+            df_oi["oi"] = df_oi["sumOpenInterestValue"].astype(float)
+            oi_lookup = dict(zip(df_oi["ts"], df_oi["oi"]))
+
+        # Attach OI to funding rows (nearest hour, 0 if not available)
+        df_fund["open_interest"] = df_fund["timestamp"].dt.floor("h").map(oi_lookup).fillna(0)
+        df_fund["open_interest_value"] = df_fund["open_interest"]
+
+        # ── 4. Partition by month and write to GCS ───────────────────────────
+        df_fund["month"] = df_fund["timestamp"].dt.strftime("%Y-%m")
+        paths_written = []
+        total_rows = 0
+
+        for (sym, month), group in df_fund.groupby(["symbol", "month"]):
+            path = f"funding/{sym}/{month}.parquet"
+            rows_in_group = len(group)
+
+            if dry_run:
+                logger.info(f"[DRY RUN] Would write {rows_in_group} rows → {path}")
+            else:
+                g = group.drop(columns=["month"]).copy()
+                size = gcs_parquet_store._merge_upload_parquet(
+                    path, g, dedup_cols=["timestamp"]
+                )
+                logger.info(f"[Backfill] Written {rows_in_group} rows → gs://{gcs_parquet_store.bucket_name}/{path} ({size:,} bytes)")
+                paths_written.append(path)
+
+            total_rows += rows_in_group
+
+        return {
+            "symbol": binance_sym,
+            "funding_rows": len(all_funding),
+            "oi_rows": len(all_oi),
+            "months_written": len(paths_written),
+            "total_rows": total_rows,
+            "paths": paths_written,
+            "dry_run": dry_run,
+        }
+
+    def backfill_all_symbols(self, start_date: str = "2021-01-01",
+                              dry_run: bool = False) -> Dict:
+        """Run backfill for all configured trading symbols."""
+        results = {}
+        for sym in self.symbols:
+            logger.info(f"[Backfill] Starting {sym}")
+            results[sym] = self.backfill_funding_history(sym, start_date=start_date,
+                                                          dry_run=dry_run)
+        return results
 
 
 funding_collector = FundingCollector()

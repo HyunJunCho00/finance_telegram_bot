@@ -21,10 +21,13 @@ You receive ALL available data:
 4. Perplexity market narrative (WHY price is moving)
 5. LightRAG relationship context (connected events and entities)
 6. Expert Agent analyses from the Blackboard (Liquidity, Microstructure, Macro/Options)
-7. Your previous decision (maintain consistency unless data clearly changed)
-8. Chart image (if provided) - Uses full history for indicators to prevent distortion. Visual window zooms: SWING (~6 months for trend clarity), POSITION (~5 years to capture previous ATHs and major historical resistance).
+7. REGIME CONTEXT: Market regime and trust directives from the Meta-Agent.
+8. Your previous decision (maintain consistency unless data clearly changed)
+9. Chart image (if provided) - Uses full history for indicators to prevent distortion. Visual window zooms: SWING (~6 months for trend clarity), POSITION (~5 years to capture previous ATHs and major historical resistance).
 
-YOUR JOB: Make a FINAL trading decision using YOUR OWN judgment.
+YOUR JOB: Make a FINAL trading decision. 
+CRITICAL V9 RULE: You MUST perform Falsifiability Analysis BEFORE your final decision. Identify the strongest evidence AGAINST your primary bias.
+If the Meta-Agent indicates a high-risk regime, you MUST demand higher confidence levels for any entry.
 
 {mode_specific_rules}
 
@@ -38,13 +41,18 @@ Output your decision as JSON:
   "take_profit": float,
   "hold_duration": "hours/days/weeks estimate",
   "reasoning": {{
+    "counter_scenario": "The strongest argument for why my decision might be WRONG",
+    "meta_agent_context": "How the current market regime influenced your weighting of experts",
     "technical": "MTF indicators, Structure, Fibonacci levels",
     "derivatives": "Funding, Global OI, CVD context",
     "experts": "Blackboard expert summaries (Liq, Micro, Macro)",
     "narrative": "Perplexity narrative and RAG events",
     "final_logic": "Concluding synthesis"
   }},
-  "confidence": 0-100,
+  "win_probability_pct": 0-100,
+  "expected_profit_pct": float,
+  "expected_loss_pct": float,
+  "ev_rationale": "Clear math-based explanation of the Expected Value calculation.",
   "key_factors": ["short bullet 1", "short bullet 2", ...]
 }}
 
@@ -114,7 +122,8 @@ Swarm reasoning controls & Data Trust Hierarchy:
         feedback_text: str = "",
         active_orders: list = [],
         open_positions: str = "",
-        symbol: str = "BTCUSDT"
+        symbol: str = "BTCUSDT",
+        regime_context: Optional[Dict] = None
     ) -> Dict:
         mode_str = mode.value.upper()
         mode_rules = self.POSITION_RULES if mode == TradingMode.POSITION else self.SWING_RULES
@@ -171,10 +180,13 @@ OPEN POSITIONS (CURRENTLY HELD):
 ACTIVE DCA/TWAP ORDERS (V5 EXECUTION DESK PENDING):
 {json.dumps(active_orders, indent=2) if active_orders else "No active pending orders."}
 
+REGIME CONTEXT (META-AGENT TRUST DIRECTIVES):
+{json.dumps(regime_context, indent=2) if regime_context else "No regime context available."}
+
 {previous_context}
 {feedback_text}
 
-Make your trading decision. Output as JSON."""
+Make your trading decision. Output as JSON. Ensure the counter_scenario is thoroughly explored."""
 
         try:
             # Judge uses the best model (Opus)
@@ -250,8 +262,19 @@ Make your trading decision. Output as JSON."""
             "stop_loss": None,
             "take_profit": None,
             "hold_duration": "N/A",
-            "reasoning": "Error in decision-making process, defaulting to HOLD",
-            "confidence": 0,
+            "reasoning": {
+                "counter_scenario": "N/A",
+                "meta_agent_context": "N/A",
+                "technical": "N/A",
+                "derivatives": "N/A",
+                "experts": "N/A",
+                "narrative": "N/A",
+                "final_logic": "Error in decision-making process, defaulting to HOLD"
+            },
+            "win_probability_pct": 0,
+            "expected_profit_pct": 0.0,
+            "expected_loss_pct": 0.0,
+            "ev_rationale": "System failure fallback.",
             "key_factors": []
         }
 

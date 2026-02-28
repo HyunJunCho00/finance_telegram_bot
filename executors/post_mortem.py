@@ -31,29 +31,32 @@ def assess_trade_outcome(decision: dict, entry_price: float, current_price: floa
 
 def generate_llm_lesson(trade_data: dict, outcome: str) -> str:
     """Uses LLM to reflect on what went right or wrong based on the original Blackboard state."""
-    prompt = f"""You are the Head of Quant Research conducting a post-mortem on a completed trade.
-TRADE DATA:
+    prompt = f"""You are the Head of Quant Research conducting a post-mortem on a completed trade case study.
+TRADE DATA (Original Context):
 {json.dumps(trade_data, indent=2)}
 OUTCOME: {outcome}
 
-Analyze the original reasoning, the blackboard expert insights, and the final outcome.
-Write a concise, 3-sentence 'Lesson Learned'.
-- If SUCCESS: What specific combination of signals worked?
-- If FAILURE: What blindspot or conflicting signal did the PM ignore? What should we do differently next time?
-Focus strictly on the data and logic. Do not use filler text."""
+Analyze the original reasoning, the blackboard expert insights, and the final outcome. 
+Produce a structured 'CASE STUDY' for our internal Knowledge Graph:
+
+1. SETUP: Describe the market regime and key expert signals that led to the entry.
+2. OUTCOME ANALYSIS: Explain WHY the trade resulted in {outcome}. Identify the specific signal that was either correctly followed or fatally ignored.
+3. FUTURE CONSTRAINT: Provide a specific, hard rule for the Judge Agent to avoid this mistake or repeat this success (e.g., "Do not LONG if OI is dropping while price is at Fibonacci 61.8 resistance").
+
+Focus strictly on objective analysis. No filler."""
 
     try:
         response = claude_client.generate_response(
-            system_prompt="You are a strict, objective quantitative evaluator.",
+            system_prompt="You are a strict, objective quantitative analyst specializing in Case Study documentation.",
             user_message=prompt,
             temperature=0.2,
-            max_tokens=200,
-            role="macro" # Re-using rate limited queues
+            max_tokens=500,
+            role="macro"
         )
         return response.strip()
     except Exception as e:
         logger.error(f"Post-Mortem LLM error: {e}")
-        return f"Fallback lesson: The trade resulted in {outcome}."
+        return f"Fallback case study: The trade resulted in {outcome}."
 
 
 def write_post_mortem(report: dict, current_price: float):

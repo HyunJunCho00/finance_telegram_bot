@@ -33,12 +33,14 @@ from agents.liquidity_agent import liquidity_agent
 from agents.microstructure_agent import microstructure_agent
 from agents.macro_options_agent import macro_options_agent
 from agents.vlm_geometric_agent import vlm_geometric_agent
+from agents.meta_agent import meta_agent
 from agents.judge_agent import judge_agent
 from agents.risk_manager_agent import risk_manager_agent
 from config.local_state import state_manager
 from executors.report_generator import report_generator
 from executors.trade_executor import trade_executor
 from executors.post_mortem import write_post_mortem
+from executors.data_synthesizer import synthesize_training_data
 from utils.retry import api_retry
 from utils.cooldown import is_on_cooldown, set_cooldown
 from loguru import logger
@@ -96,6 +98,8 @@ class AnalysisState(TypedDict):
     chart_bytes: Optional[bytes]
 
     # Final output
+    market_regime: str
+    regime_context: dict
     final_decision: Dict
     report: Optional[Dict]
 
@@ -461,6 +465,32 @@ def node_fear_greed_context(state: AnalysisState) -> dict:
         return {"fear_greed_context": "Fear&Greed: Error"}
 
 
+def node_meta_agent(state: AnalysisState) -> dict:
+    """Run Meta-Agent to classify market regime and provide trust directives."""
+    try:
+        # [NEW] Inject RAG context and Telegram news for Narrative-Aware classification
+        rag_context = state.get("rag_context", "")
+        telegram_news = state.get("telegram_news", "")
+        
+        result = meta_agent.classify_regime(
+            market_data_compact=state.get("market_data_compact", ""),
+            deribit_context=state.get("deribit_context", ""),
+            funding_context=state.get("funding_context", ""),
+            macro_context=state.get("macro_context", ""),
+            rag_context=rag_context,
+            telegram_news=telegram_news,
+            mode=TradingMode(state["mode"])
+        )
+        logger.info(f"Market Regime classified: {result.get('regime', 'UNKNOWN')}")
+        return {
+            "market_regime": result.get("regime", "RANGE_BOUND"),
+            "regime_context": result
+        }
+    except Exception as e:
+        logger.error(f"Meta-Agent node error: {e}")
+        return {"market_regime": "RANGE_BOUND", "regime_context": {}}
+
+
 def node_triage(state: AnalysisState) -> dict:
     """Evaluate Python/Pandas rules for Anomaly Detection before waking LLMs."""
     anomalies = []
@@ -717,7 +747,8 @@ def node_judge_agent(state: AnalysisState) -> dict:
     feedback_text = state.get("feedback_text", "")
     open_positions = state.get("open_positions", "")
 
-    # Pass blackboard data
+    # Pass blackboard and regime context
+    regime_ctx = state.get("regime_context", {})
     decision = judge_agent.make_decision(
         market_data_compact=compact,
         blackboard=blackboard,
@@ -727,11 +758,34 @@ def node_judge_agent(state: AnalysisState) -> dict:
         feedback_text=feedback_text,
         active_orders=state.get("active_orders", []),
         open_positions=open_positions,
-        symbol=state.get("symbol", "BTCUSDT")
+        symbol=state.get("symbol", "BTCUSDT"),
+        regime_context=regime_ctx
     )
     
-    conviction = decision.get("confidence", 0) if isinstance(decision, dict) else 0
-    return {"final_decision": decision, "conviction_score": conviction}
+    # [NEW] Probabilistic EV & Strategic Scaling (SOTA 2026)
+    # Calculate Expected Value
+    win_prob = decision.get("win_probability_pct", 0) / 100.0
+    profit_pct = decision.get("expected_profit_pct", 0.0)
+    loss_pct = decision.get("expected_loss_pct", 0.0)
+    
+    ev = (win_prob * profit_pct) - ((1.0 - win_prob) * loss_pct)
+    
+    # Scale allocation by Risk Budget
+    risk_budget = regime_ctx.get("risk_budget_pct", 100)
+    original_alloc = decision.get("allocation_pct", 0) if isinstance(decision.get("allocation_pct"), (int, float)) else 0
+    scaled_alloc = original_alloc * (risk_budget / 100.0)
+    
+    if ev <= 0 and decision.get("decision") != "HOLD":
+        logger.warning(f"Judge EV ({ev:.2f}) is negative/zero. Forcing HOLD.")
+        decision["decision"] = "HOLD"
+        decision["reasoning"]["final_logic"] = f"[EV VETO] Forced HOLD because EV is {ev:.2f}. " + decision["reasoning"].get("final_logic", "")
+    elif decision.get("decision") != "HOLD":
+        decision["allocation_pct"] = scaled_alloc
+        logger.info(f"Scaled allocation from {original_alloc}% to {scaled_alloc:.2f}% (Risk Budget: {risk_budget}%)")
+        decision["reasoning"]["final_logic"] = f"[SCALING] Allocation constrained by {risk_budget}% Risk Budget. EV is {ev:.2f}. " + decision["reasoning"].get("final_logic", "")
+
+    # For compatibility with legacy metrics/logging, set conviction to win_probability_pct
+    return {"final_decision": decision, "conviction_score": win_prob * 100}
 
 def node_risk_manager(state: AnalysisState) -> dict:
     """Run Risk Manager (CRO). VETO power over Judge's draft."""
@@ -743,6 +797,52 @@ def node_risk_manager(state: AnalysisState) -> dict:
     
     final_decision = risk_manager_agent.evaluate_trade(draft, funding, deribit)
     return {"final_decision": final_decision}
+
+def node_portfolio_leverage_guard(state: AnalysisState) -> dict:
+    """Mathematically enforce 2.0x total account leverage limit."""
+    decision = state.get("final_decision", {})
+    if decision.get("decision") not in ["LONG", "SHORT"]:
+        return {}
+
+    try:
+        from executors.paper_exchange import paper_engine
+        
+        # 1. Fetch total equity and exposure (Paper mode for now as per strategy)
+        target_exchange = decision.get("target_exchange", "BINANCE").lower()
+        wallet_balance = paper_engine.get_wallet_balance(target_exchange)
+        
+        # In a real setup, we'd query API for open positions. 
+        # For our specific retail guard, we calculate if THIS trade + current positions exceeds 2.0x.
+        # [MOCK FOR MVP] Assume 2.0x Hard Cap
+        MAX_LEVERAGE_CAP = 2.0
+        
+        # Calculate proposed trade notional
+        allocation_pct = decision.get("allocation_pct", 0)
+        leverage = decision.get("leverage", 1)
+        proposed_notional = wallet_balance * (allocation_pct / 100.0) * leverage
+        
+        # Check current total exposure (Simulated calculation)
+        # In production: exposure = sum(abs(pos.notional) for pos in all_positions)
+        current_exposure = 0.0 # Placeholder: build extraction logic if needed
+        
+        total_projected_exposure = current_exposure + proposed_notional
+        total_leverage = total_projected_exposure / wallet_balance if wallet_balance > 0 else 0
+        
+        if total_leverage > MAX_LEVERAGE_CAP:
+            # Scale down
+            reduction_factor = MAX_LEVERAGE_CAP / total_leverage
+            new_allocation = allocation_pct * reduction_factor
+            
+            logger.warning(f"[LEVERAGE GUARD] Projected leverage {total_leverage:.2f}x exceeds {MAX_LEVERAGE_CAP}x cap. Scaling allocation from {allocation_pct}% to {new_allocation:.2f}%")
+            
+            decision["allocation_pct"] = new_allocation
+            decision["reasoning"]["final_logic"] = f"[LEVERAGE GUARD] Scaled down from {allocation_pct}% due to 2.0x account leverage cap. " + decision["reasoning"].get("final_logic", "")
+            
+        return {"final_decision": decision}
+        
+    except Exception as e:
+        logger.error(f"Leverage Guard error: {e}")
+        return {}
 
 def node_execute_trade(state: AnalysisState) -> dict:
     """Execute the final approved trade autonomously (Live or Paper)."""
@@ -831,6 +931,18 @@ def node_generate_report(state: AnalysisState) -> dict:
     return {"report": report}
 
 
+def node_data_synthesis(state: AnalysisState) -> dict:
+    """Run Data-Synthesis pipeline to extract high-quality training examples."""
+    report = state.get("report")
+    if report:
+        # Inject additional context for synthesis
+        report["market_regime"] = state.get("market_regime", "UNKNOWN")
+        report["blackboard"] = state.get("blackboard", {})
+        report["mode"] = state.get("mode", "SWING")
+        synthesize_training_data(report)
+    return {}
+
+
 # ── Helper ──
 
 def _build_full_context(state: AnalysisState) -> str:
@@ -915,6 +1027,7 @@ def build_analysis_graph():
     graph.add_node("macro_context", node_macro_context)
     graph.add_node("deribit_context", node_deribit_context)
     graph.add_node("fear_greed_context", node_fear_greed_context)
+    graph.add_node("meta_agent", node_meta_agent)
     
     # Triage and Experts
     graph.add_node("triage", node_triage)
@@ -926,8 +1039,10 @@ def build_analysis_graph():
     graph.add_node("vlm_expert", node_vlm_geometric_expert)
     graph.add_node("judge_agent", node_judge_agent)
     graph.add_node("risk_manager", node_risk_manager)
+    graph.add_node("portfolio_leverage_guard", node_portfolio_leverage_guard)
     graph.add_node("execute_trade", node_execute_trade)
     graph.add_node("generate_report", node_generate_report)
+    graph.add_node("data_synthesis", node_data_synthesis)
 
     graph.set_entry_point("collect_data")
 
@@ -943,7 +1058,8 @@ def build_analysis_graph():
     graph.add_edge("microstructure_context", "macro_context")
     graph.add_edge("macro_context", "deribit_context")
     graph.add_edge("deribit_context", "fear_greed_context")
-    graph.add_edge("fear_greed_context", "triage")
+    graph.add_edge("fear_greed_context", "meta_agent")
+    graph.add_edge("meta_agent", "triage")
 
     graph.add_conditional_edges("triage", route_triage, {
         "liquidity_expert": "liquidity_expert",
@@ -971,9 +1087,11 @@ def build_analysis_graph():
     graph.add_edge("generate_chart", "vlm_expert")
     graph.add_edge("vlm_expert", "judge_agent")
     graph.add_edge("judge_agent", "risk_manager")
-    graph.add_edge("risk_manager", "execute_trade")
+    graph.add_edge("risk_manager", "portfolio_leverage_guard")
+    graph.add_edge("portfolio_leverage_guard", "execute_trade")
     graph.add_edge("execute_trade", "generate_report")
-    graph.add_edge("generate_report", END)
+    graph.add_edge("generate_report", "data_synthesis")
+    graph.add_edge("data_synthesis", END)
 
     return graph.compile()
 
@@ -1038,6 +1156,8 @@ class Orchestrator:
             "blackboard": {},
             "conviction_score": 0.0,
             "raw_funding": {},
+            "market_regime": "RANGE_BOUND",
+            "regime_context": {},
             "chart_image_b64": None,
             "chart_bytes": None,
             "final_decision": {},
@@ -1069,6 +1189,7 @@ class Orchestrator:
             node_rag_query, node_telegram_news, node_self_correction,
             node_microstructure_context, node_macro_context,
             node_deribit_context, node_fear_greed_context,
+            node_meta_agent,
             node_triage,
             node_liquidity_expert, node_microstructure_expert,
             node_macro_options_expert,

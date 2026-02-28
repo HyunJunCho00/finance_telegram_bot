@@ -34,6 +34,9 @@ from typing import Dict, List, Optional
 from config.settings import settings, TradingMode
 from loguru import logger
 from scipy.signal import argrelextrema
+from processors.math_engine import MathEngine
+
+math_engine = MathEngine()
 
 
 class ChartGenerator:
@@ -76,7 +79,7 @@ class ChartGenerator:
                 'min_candles': 30,
                 'title_suffix': '1D SWING',
                 'fib_tf': '1d',
-                'structure_tfs': ['4h', '1d'],
+                'structure_tfs': ['1d'],   # 1D chart → use 1D slope (4h slope unit mismatch 방지)
                 'swing_tf': '1d',
             }
 
@@ -294,6 +297,25 @@ class ChartGenerator:
             # ── Overlay 9: Fair Value Gaps (FVG) ──
             self._draw_fair_value_gaps(price_ax, chart_df)
 
+            # ── [NEW] Overlay 10: Macro Order Blocks (OB) ──
+            macro_obs = math_engine.calculate_macro_order_blocks(full_resampled, count=2)
+            self._draw_macro_order_blocks(price_ax, chart_df, macro_obs)
+
+            # ── [NEW] Overlay 11: Anchored VWAP ──
+            self._draw_anchored_vwap(price_ax, chart_df, full_resampled)
+
+            # ── [NEW] Overlay 12: Alpha Divergence Markers (CVD) ──
+            if cvd_df is not None:
+                div = math_engine.detect_macro_divergences(full_resampled, cvd_df)
+                self._draw_macro_alpha_markers(price_ax, chart_df, div)
+
+            # ── Lock Y-axis to candlestick range ──
+            # Must happen AFTER all overlays so nothing autoscales the axis
+            _y_lo = float(chart_df['low'].min())
+            _y_hi = float(chart_df['high'].max())
+            _margin = (_y_hi - _y_lo) * 0.04
+            price_ax.set_ylim(_y_lo - _margin, _y_hi + _margin)
+
             # Save with high-quality settings
             buf = BytesIO()
             fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight', 
@@ -451,7 +473,15 @@ class ChartGenerator:
 
     def _draw_diagonal_line(self, ax, chart_df: pd.DataFrame,
                              line_info: Optional[Dict], value_key: str, color: str):
-        """Draw diagonal support/resistance trendline."""
+        """Draw diagonal support/resistance trendline.
+
+        Slope from math_engine is always in the same timeframe units as the chart
+        (1d slope for 1D chart, 1w slope for 1W chart) — unit mismatch is prevented
+        upstream by matching structure_tfs to the chart's resample_rule.
+
+        Y-clamping: prevents off-chart line endpoints from distorting matplotlib's
+        auto-scale. We draw only the visible portion and lock the y-axis afterward.
+        """
         if not line_info:
             return
         try:
@@ -464,25 +494,34 @@ class ChartGenerator:
             x = np.arange(n)
             intercept = float(current_value) - float(slope) * (n - 1)
             y = float(slope) * x + intercept
-            
-            # Semantic labeling for VLM: TREND prefix for diagonal lines
+
+            # Chart's actual price range (candlestick body)
+            y_lo = float(chart_df['low'].min())
+            y_hi = float(chart_df['high'].max())
+            margin = (y_hi - y_lo) * 0.05  # 5% padding
+
+            # Skip entirely if line is completely outside the visible range
+            if np.all(y > y_hi + margin) or np.all(y < y_lo - margin):
+                return
+
+            # Clamp y to [y_lo - margin, y_hi + margin] so matplotlib won't autoscale
+            y_plot = np.clip(y, y_lo - margin, y_hi + margin)
+
             kind = "SUP" if "support" in value_key else "RES"
             label_text = f"TREND {kind}"
             line_color = '#27AE60' if kind == "SUP" else '#C0392B'
-            
-            # Trendlines must be very visible for VLM
-            ax.plot(x, y, color=line_color, linewidth=2.0,
+
+            ax.plot(x, y_plot, color=line_color, linewidth=2.0,
                     linestyle='-', alpha=0.9, zorder=10)
-            
-            # Add label at both ends if visible, with margin to avoid cutoff
-            y_max = chart_df['high'].max()
-            if 0 <= y[0] <= y_max * 1.2:
-                ax.text(0.5, y[0], f' {label_text}', color=line_color, 
+
+            # Labels — only where the true (un-clamped) value is in range
+            if y_lo <= y[0] <= y_hi:
+                ax.text(0.5, y[0], f' {label_text}', color=line_color,
                         fontsize=7, fontweight='bold', va='bottom', ha='left',
                         bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=1))
-            
-            if 0 <= y[-1] <= y_max * 1.2:
-                 ax.text(n-1.5, y[-1], f' {label_text}', color=line_color, 
+
+            if y_lo <= y[-1] <= y_hi:
+                ax.text(n - 1.5, y[-1], f' {label_text}', color=line_color,
                         fontsize=7, fontweight='bold', va='bottom', ha='right',
                         bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=1))
         except Exception:
@@ -696,6 +735,80 @@ class ChartGenerator:
 
         except Exception as e:
             logger.debug(f"FVG draw error: {e}")
+
+    def _draw_macro_order_blocks(self, ax, chart_df: pd.DataFrame, obs: List[Dict]):
+        """Draw Macro Order Blocks as shaded zones with labels."""
+        try:
+            if not obs: return
+            
+            n = len(chart_df)
+            for ob in obs:
+                # Find if OB is within or near visible range
+                color = '#27AE60' if ob['type'] == 'BULLISH' else '#C0392B'
+                label = "MACRO BULL OB" if ob['type'] == 'BULLISH' else "MACRO BEAR OB"
+                
+                # Check if OB top/bottom is in price range approximately
+                y_lo, y_hi = chart_df['low'].min(), chart_df['high'].max()
+                if ob['bottom'] > y_hi * 1.2 or ob['top'] < y_lo * 0.8:
+                    continue
+                
+                # Draw horizontal span across the whole chart for macro levels
+                ax.axhspan(ob['bottom'], ob['top'], color=color, alpha=0.1, zorder=1)
+                ax.axhline(ob['top'], color=color, linestyle=':', linewidth=0.5, alpha=0.5, zorder=2)
+                ax.axhline(ob['bottom'], color=color, linestyle=':', linewidth=0.5, alpha=0.5, zorder=2)
+                
+                # Label on the left
+                ax.text(5, (ob['top'] + ob['bottom']) / 2, label, 
+                        color=color, fontsize=7, fontweight='bold', va='center', alpha=0.8,
+                        bbox=dict(facecolor='white', alpha=0.6, edgecolor='none', pad=1))
+        except Exception as e:
+            logger.debug(f"Macro OB draw error: {e}")
+
+    def _draw_anchored_vwap(self, ax, chart_df: pd.DataFrame, full_df: pd.DataFrame):
+        """Find significant cycle low/high and anchor a VWAP there."""
+        try:
+            # Find the most significant low/high in the full_df history (~6-12 months)
+            prices = full_df['close'].values
+            low_idx = np.argmin(prices)
+            high_idx = np.argmax(prices)
+            
+            # Use the most recent significant extreme as the anchor
+            anchor_idx = low_idx if low_idx > high_idx else high_idx
+            
+            avwap = math_engine.calculate_anchored_vwap(full_df, anchor_idx)
+            if avwap is None: return
+            
+            # Align with visual chart_df
+            avwap_aligned = avwap.reindex(chart_df.index).values
+            x_range = np.arange(len(chart_df))
+            
+            ax.plot(x_range, avwap_aligned, color='#D4AC0D', linewidth=1.5, 
+                    linestyle='-.', alpha=0.8, zorder=4)
+            
+            # Label
+            label = "AVWAP (Cycle Low)" if anchor_idx == low_idx else "AVWAP (Cycle High)"
+            last_valid_idx = np.where(~np.isnan(avwap_aligned))[0]
+            if len(last_valid_idx) > 0:
+                ax.text(last_valid_idx[-1], avwap_aligned[last_valid_idx[-1]], f" {label}", 
+                        color='#D4AC0D', fontsize=7, fontweight='bold', va='bottom', ha='right')
+        except Exception as e:
+            logger.debug(f"AVWAP draw error: {e}")
+
+    def _draw_macro_alpha_markers(self, ax, chart_df: pd.DataFrame, divergence: Dict):
+        """Draw explicit markers for Macro Alpha confluences."""
+        try:
+            n = len(chart_df)
+            if divergence.get('macro_bear_div'):
+                ax.text(n-5, chart_df['high'].max(), "[!] MACRO DISTRIBUTION DETECTED (Price HH vs CVD LH)", 
+                        color='#C0392B', fontsize=9, fontweight='bold', ha='right', va='top',
+                        bbox=dict(facecolor='white', alpha=0.8, edgecolor='#C0392B', pad=2))
+            
+            if divergence.get('macro_bull_div'):
+                ax.text(n-5, chart_df['low'].min(), "[!] MACRO ACCUMULATION DETECTED (Price LL vs CVD HL)", 
+                        color='#27AE60', fontsize=9, fontweight='bold', ha='right', va='bottom',
+                        bbox=dict(facecolor='white', alpha=0.8, edgecolor='#27AE60', pad=2))
+        except Exception as e:
+            logger.debug(f"Alpha markers draw error: {e}")
 
     # ─────────────── Utility Methods ───────────────
 
