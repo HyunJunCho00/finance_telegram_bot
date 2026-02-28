@@ -1,9 +1,16 @@
 import threading
 import sqlite3
 import uuid
+import sys
+import asyncio
+from telegram import Bot
+from config.settings import settings
 from datetime import datetime, timezone
 from loguru import logger
 from config.local_state import DB_PATH
+
+
+FEE_PCT = 0.0005  # 0.05% Binance Futures Market Fee
 
 
 class PaperExchangeEngine:
@@ -12,6 +19,7 @@ class PaperExchangeEngine:
     [FIX HIGH-7]  threading.Lock wraps every write operation.
     [FIX CRITICAL-2] simulate_execution() stores tp/sl in paper_positions.
                      check_tp_sl() closes positions on TP or SL hit every minute.
+    [V8 HARDENING] Added 0.05% per-side trading fee and Telegram notifications.
     """
 
     def __init__(self):
@@ -19,6 +27,19 @@ class PaperExchangeEngine:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._lock = threading.Lock()  # [FIX HIGH-7] shared write lock
+
+    def _notify(self, message: str):
+        """Send urgent notification via Telegram bot in a background thread."""
+        async def _async_send():
+            try:
+                bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+                await bot.send_message(chat_id=settings.TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
+            except Exception as e:
+                logger.error(f"PaperEngine notification failed: {e}")
+
+        import threading
+        t = threading.Thread(target=lambda: asyncio.run(_async_send()), daemon=True)
+        t.start()
 
     # ─── read helpers ───
 
@@ -69,11 +90,12 @@ class PaperExchangeEngine:
         with self._lock:
             wallet = self.get_wallet_balance(exchange)
             required_margin = amount_usd / max(leverage, 1.0)
+            entry_fee = amount_usd * FEE_PCT
 
-            if required_margin > wallet:
+            if (required_margin + entry_fee) > wallet:
                 return {
                     "success": False,
-                    "error": f"Insufficient margin. Need ${required_margin:.2f}, have ${wallet:.2f}",
+                    "error": f"Insufficient margin (incl. fee). Need ${required_margin + entry_fee:.2f}, have ${wallet:.2f}",
                 }
 
             coin_size = amount_usd / filled_price
@@ -88,15 +110,16 @@ class PaperExchangeEngine:
                 (pos_id, exchange.lower(), symbol, direction,
                  coin_size, filled_price, leverage, now, now, tp_price, sl_price),
             )
+            # Deduct margin + entry fee
             cursor.execute(
                 "UPDATE paper_wallets SET balance = balance - ?, updated_at = ? WHERE exchange = ?",
-                (required_margin, now, exchange.lower()),
+                (required_margin + entry_fee, now, exchange.lower()),
             )
             self._conn.commit()
 
         logger.info(
-            f"V7 Paper | [{exchange}] {direction} {symbol} @ {filled_price:.4f} "
-            f"(slip={slippage_pct*100:.2f}% lev={leverage}x margin=${required_margin:.2f} "
+            f"V8 Paper | [{exchange}] {direction} {symbol} @ {filled_price:.4f} "
+            f"(slip={slippage_pct*100:.2f}% lev={leverage}x margin=${required_margin:.2f} fee=${entry_fee:.2f} "
             f"tp={tp_price} sl={sl_price})"
         )
         return {
@@ -128,11 +151,23 @@ class PaperExchangeEngine:
                     f"LIQUIDATION: [{pos['exchange']}] {side} {symbol} entry={entry:.2f} now={price:.2f}"
                 )
                 with self._lock:
+                    now = datetime.now(timezone.utc).isoformat()
                     self._conn.execute(
                         "UPDATE paper_positions SET is_open = 0, updated_at = ? WHERE position_id = ?",
-                        (datetime.now(timezone.utc).isoformat(), pos["position_id"]),
+                        (now, pos["position_id"]),
                     )
                     self._conn.commit()
+                
+                # Notification
+                self._notify(
+                    f"💀 <b>LIQUIDATION</b>\n"
+                    f"Exchange: {pos['exchange'].upper()}\n"
+                    f"Symbol: {symbol}\n"
+                    f"Side: {side}\n"
+                    f"Price: {price:.2f}\n"
+                    f"Entry: {entry:.2f}\n"
+                    f"Margin Lost: ${initial_margin:.2f}"
+                )
 
     def check_tp_sl(self, current_prices: dict):
         """
@@ -167,12 +202,17 @@ class PaperExchangeEngine:
 
             if hit_reason:
                 pnl = (price - entry) * size if side == "LONG" else (entry - price) * size
+                exit_notional = size * price
+                exit_fee = exit_notional * FEE_PCT
+                
                 initial_margin = (size * entry) / max(lev, 1.0)
-                returned = max(initial_margin + pnl, 0.0)
+                # Apply exit fee to returned amount
+                returned = max(initial_margin + pnl - exit_fee, 0.0)
+                
                 icon = "✅" if "TP" in hit_reason else "🛑"
                 logger.info(
                     f"{icon} {hit_reason} [{exchange}] {side} {symbol} "
-                    f"PnL=${pnl:+.2f} returning=${returned:.2f}"
+                    f"PnL=${pnl:+.2f} fee=${exit_fee:.2f} returning=${returned:.2f}"
                 )
                 with self._lock:
                     now = datetime.now(timezone.utc).isoformat()
@@ -185,6 +225,29 @@ class PaperExchangeEngine:
                         (returned, now, exchange),
                     )
                     self._conn.commit()
+
+                # Notification
+                pnl_pct = (pnl / initial_margin) * 100 if initial_margin > 0 else 0
+                self._notify(
+                    f"{icon} <b>POSITION CLOSED ({'TP' if 'TP' in hit_reason else 'SL'})</b>\n"
+                    f"Exchange: {exchange.upper()}\n"
+                    f"Symbol: {symbol}\n"
+                    f"Side: {side}\n"
+                    f"Close Price: {price:.2f}\n"
+                    f"PnL: <b>${pnl:+.2f} ({pnl_pct:+.2f}%)</b>\n"
+                    f"Fee: ${exit_fee:.2f}"
+                )
+
+
+    def handle_realtime_price(self, symbol: str, price: float):
+        """
+        [UPGRADE V8] Called via WebSocket for sub-millisecond precision.
+        Checks TP/SL and Liquidations for a single symbol immediately.
+        """
+        # Maintain a local thread-safe check (using the main DB lock for simplicity)
+        # In a very high-traffic scenario, we would cache active positions in RAM.
+        self.check_tp_sl({symbol: price})
+        self.check_liquidations({symbol: price})
 
 
 paper_engine = PaperExchangeEngine()

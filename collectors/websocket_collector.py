@@ -29,6 +29,7 @@ from loguru import logger
 
 from config.database import db
 from config.settings import settings
+from executors.paper_exchange import paper_engine
 
 
 # ─────────────── Constants ───────────────
@@ -217,6 +218,12 @@ class WebSocketCollector:
 
                 if symbol and qty > 0 and price > 0:
                     self.whale_buffer.add(symbol, is_buyer_maker, qty, price)
+                    
+                    # [UPGRADE V8] Real-time Paper Trading Trigger
+                    if settings.PAPER_TRADING_MODE:
+                        # Map Binance symbol (BTCUSDT) to our config if necessary, 
+                        # but PaperEngine's check_tp_sl handles raw symbols.
+                        paper_engine.handle_realtime_price(symbol, price)
 
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             logger.debug(f"WS message parse error: {e}")
