@@ -34,6 +34,9 @@ Actual Price Change: {evaluation.get('actual_change_pct', 0):.2f}%
 Original Reasoning:
 {evaluation.get('reasoning', 'N/A')[:1000]}
 
+Execution Notes (Slippage/Strategy):
+{evaluation.get('note', 'N/A')}
+
 This prediction was INCORRECT.
 
 Analyze what went wrong and provide:

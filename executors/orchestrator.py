@@ -166,303 +166,116 @@ def node_collect_data(state: AnalysisState) -> dict:
         "open_positions": open_position_text,
         "errors": state.get("errors", [])
     }
-@api_retry(max_attempts=3, delay_seconds=2)
-def node_perplexity_search(state: AnalysisState) -> dict:
-    """Search Perplexity for market narrative."""
+def node_context_gathering(state: AnalysisState) -> dict:
+    """Consolidated node to gather all external context (Perplexity, RAG, DB, etc.)
+    to avoid LangGraph recursion limit (25).
+    """
+    updates = {}
     symbol = state["symbol"]
-    asset = "BTC" if "BTC" in symbol else "ETH"
+    mode = TradingMode(state["mode"])
+    
+    # 1. Perplexity Search
     try:
-        # Save with full trading symbol (e.g., BTCUSDT) for DB/report traceability
+        asset = "BTC" if "BTC" in symbol else "ETH"
         narrative = perplexity_collector.search_market_narrative(symbol)
         narrative_text = perplexity_collector.format_for_agents(narrative)
         logger.info(f"Narrative for {asset}: {narrative.get('sentiment', '?')}")
-        return {"narrative_text": narrative_text}
+        updates["narrative_text"] = narrative_text
     except Exception as e:
         logger.error(f"Perplexity error: {e}")
-        return {"narrative_text": "Market Narrative: Unavailable"}
+        updates["narrative_text"] = "Market Narrative: Unavailable"
 
-
-def node_rag_ingest(state: AnalysisState) -> dict:
-    """Ingest recent data into LightRAG:
-    1. Telegram messages (Synthesized via Categorized Batching)
-    2. Perplexity narrative (current analysis cycle, single doc)
-    """
-    from processors.telegram_batcher import telegram_batcher
-    
-    # ── 1. Batch Telegram synthesis (categorized by source) ──
-    # Note: Telegram batching is now handled asynchronously every 1 hour via scheduler.py.
-    # We no longer block the 4-hour analysis cycle to fetch and summarize Telegram here.
-
-    # ── 2. Perplexity narrative (fact-based, good for entity extraction) ──
+    # 2. RAG Ingest
     try:
-        narrative_text = state.get("narrative_text", "")
-        symbol = state.get("symbol", "")
-        if narrative_text and "Unavailable" not in narrative_text and len(narrative_text) > 50:
+        n_text = updates.get("narrative_text", "")
+        if n_text and "Unavailable" not in n_text and len(n_text) > 50:
             import hashlib
             from datetime import datetime, timezone
             ts = datetime.now(timezone.utc).isoformat()
             doc_id = hashlib.md5(f"perplexity:{symbol}:{ts[:13]}".encode()).hexdigest()
-            light_rag.ingest_message(
-                text=narrative_text,
-                channel=f"perplexity_{symbol}",
-                timestamp=ts,
-                message_id=doc_id,
-            )
+            light_rag.ingest_message(text=n_text, channel=f"perplexity_{symbol}", timestamp=ts, message_id=doc_id)
             logger.info(f"RAG: Perplexity narrative ingested for {symbol}")
     except Exception as e:
         logger.error(f"RAG Perplexity ingestion error: {e}")
 
-    return {}
-
-
-@api_retry(max_attempts=3, delay_seconds=1)
-def node_funding_context(state: AnalysisState) -> dict:
-    """Fetch funding rate and Global OI data."""
-    symbol = state["symbol"]
+    # 3. Funding Context
     try:
-        response = db.client.table("funding_data")\
-            .select("*")\
-            .eq("symbol", symbol)\
-            .order("timestamp", desc=True)\
-            .limit(1)\
-            .execute()
-
-        raw_funding = response.data[0] if response.data else {}
+        res = db.client.table("funding_data").select("*").eq("symbol", symbol).order("timestamp", desc=True).limit(1).execute()
+        raw_funding = res.data[0] if res.data else {}
         funding_data = math_engine.analyze_funding_context(raw_funding) if raw_funding else {}
-
         if raw_funding:
-            funding_data['oi_binance'] = raw_funding.get('oi_binance', 0)
-            funding_data['oi_bybit'] = raw_funding.get('oi_bybit', 0)
-            funding_data['oi_okx'] = raw_funding.get('oi_okx', 0)
-
-        funding_str = json.dumps(funding_data, default=str) if funding_data else "No funding data."
-        # [FIX] Store raw_funding for node_generate_report reuse (eliminates duplicate query)
-        return {"funding_context": funding_str, "raw_funding": raw_funding}
+            for k in ['oi_binance', 'oi_bybit', 'oi_okx']: funding_data[k] = raw_funding.get(k, 0)
+        updates["funding_context"] = json.dumps(funding_data, default=str) if funding_data else "No funding data."
+        updates["raw_funding"] = raw_funding
     except Exception as e:
         logger.error(f"Funding context error: {e}")
-        return {"funding_context": "No funding data.", "raw_funding": {}}
 
-
-def node_cvd_context(state: AnalysisState) -> dict:
-    """Fetch CVD (Cumulative Volume Delta) + Whale CVD context."""
-    symbol = state["symbol"]
-    mode = TradingMode(state["mode"])
-    lookback = settings.data_lookback_hours
-    limit = lookback * 60  # 1m resolution
-
+    # 4. CVD Context
     try:
-        cvd_df = db.get_cvd_data(symbol, limit=limit)
-        if cvd_df.empty:
-            return {"cvd_context": "CVD: No data available"}
+        cvd_df = db.get_cvd_data(symbol, limit=settings.data_lookback_hours * 60)
+        if not cvd_df.empty:
+            t_delta = float(cvd_df['volume_delta'].sum())
+            r_delta = float(cvd_df.tail(60)['volume_delta'].sum())
+            parts = [f"[CVD] {settings.data_lookback_hours}H Delta={t_delta:.2f} | 1H Delta={r_delta:.2f} | CVD={float(cvd_df['cvd'].iloc[-1]):.2f}"]
+            if 'whale_cvd' in cvd_df.columns:
+                w_buy = cvd_df['whale_buy_vol'].sum()
+                w_sell = cvd_df['whale_sell_vol'].sum()
+                parts.append(f"[WHALE_CVD] Buy=${w_buy:,.0f} Sell=${w_sell:,.0f} Ratio={w_buy/max(w_sell,1):.2f}")
+            updates["cvd_context"] = " | ".join(parts)
+    except Exception as e: logger.error(f"CVD error: {e}")
 
-        total_delta = float(cvd_df['volume_delta'].sum())
-        recent_delta = float(cvd_df.tail(60)['volume_delta'].sum())
-        cvd_final = float(cvd_df['cvd'].iloc[-1])
-
-        cvd_direction = "BUYING" if total_delta > 0 else "SELLING"
-        recent_direction = "BUYING" if recent_delta > 0 else "SELLING"
-
-        parts = [
-            f"[CVD] {lookback}H Delta={total_delta:.2f} ({cvd_direction}) | "
-            f"1H Delta={recent_delta:.2f} ({recent_direction}) | "
-            f"CVD={cvd_final:.2f}"
-        ]
-
-        # Whale CVD if available
-        if 'whale_cvd' in cvd_df.columns:
-            whale_buy = cvd_df['whale_buy_vol'].sum()
-            whale_sell = cvd_df['whale_sell_vol'].sum()
-            whale_delta = whale_buy - whale_sell
-            whale_dir = "ACCUMULATING" if whale_delta > 0 else "DISTRIBUTING"
-            ratio = whale_buy / max(whale_sell, 1)
-            parts.append(
-                f"[WHALE_CVD] Buy=${whale_buy:,.0f} Sell=${whale_sell:,.0f} "
-                f"Ratio={ratio:.2f} ({whale_dir})"
-            )
-
-        return {"cvd_context": " | ".join(parts)}
-    except Exception as e:
-        logger.error(f"CVD context error: {e}")
-        return {"cvd_context": "CVD: Error"}
-
-
-def node_liquidation_context(state: AnalysisState) -> dict:
-    """Fetch recent liquidation data for text context."""
-    symbol = state["symbol"]
-    lookback = settings.data_lookback_hours
-    limit = lookback * 60
-
+    # 5. Liquidation Context
     try:
-        liq_df = db.get_liquidation_data(symbol, limit=limit)
-        if liq_df.empty:
-            return {"liquidation_context": "Liquidation: No data (WebSocket may not be running)"}
+        liq_df = db.get_liquidation_data(symbol, limit=settings.data_lookback_hours * 60)
+        if not liq_df.empty:
+            t_long, t_short = float(liq_df['long_liq_usd'].sum()), float(liq_df['short_liq_usd'].sum())
+            updates["liquidation_context"] = f"[LIQUIDATION] Total=${t_long+t_short:,.0f} (Long=${t_long:,.0f}, Short=${t_short:,.0f})"
+    except Exception as e: logger.error(f"Liq error: {e}")
 
-        total_long = float(liq_df['long_liq_usd'].sum())
-        total_short = float(liq_df['short_liq_usd'].sum())
-        total = total_long + total_short
-
-        # Recent 1h
-        recent = liq_df.tail(60)
-        recent_long = float(recent['long_liq_usd'].sum())
-        recent_short = float(recent['short_liq_usd'].sum())
-
-        # Largest single event
-        if 'largest_single_usd' in liq_df.columns:
-            max_row = liq_df.loc[liq_df['largest_single_usd'].idxmax()]
-            largest = f"${max_row['largest_single_usd']:,.0f} {max_row.get('largest_single_side', '?')} @{max_row.get('largest_single_price', '?')}"
-        else:
-            largest = "N/A"
-
-        dominant = "LONGS_REKT" if total_long > total_short else "SHORTS_REKT"
-
-        text = (
-            f"[LIQUIDATION] {lookback}H: Total=${total:,.0f} ({dominant}) | "
-            f"Long_Liq=${total_long:,.0f} Short_Liq=${total_short:,.0f} | "
-            f"1H: Long=${recent_long:,.0f} Short=${recent_short:,.0f} | "
-            f"Largest={largest}"
-        )
-        return {"liquidation_context": text}
-
-    except Exception as e:
-        logger.debug(f"Liquidation context: {e}")
-        return {"liquidation_context": "Liquidation: No data"}
-
-
-def node_rag_query(state: AnalysisState) -> dict:
-    """Query LightRAG for relationship-aware news context."""
-    symbol = state["symbol"]
+    # 6. RAG Query
     try:
         coin_name = "Bitcoin BTC" if "BTC" in symbol else "Ethereum ETH"
-        result = light_rag.query(coin_name)
-        rag_text = light_rag.format_context_for_agents(result, max_length=1500)
-        return {"rag_context": rag_text}
-    except Exception as e:
-        logger.error(f"RAG query error: {e}")
-        return {"rag_context": "RAG Context: Unavailable"}
+        updates["rag_context"] = light_rag.format_context_for_agents(light_rag.query(coin_name), max_length=1500)
+    except Exception as e: logger.error(f"RAG query error: {e}")
 
-
-def node_telegram_news(state: AnalysisState) -> dict:
-    """Fetch recent telegram news."""
-    hours = 1 if state.get("is_emergency") else 4
-    news_data = db.get_recent_telegram_messages(hours=hours)
-    telegram_news = "\n".join([
-        f"[{msg['channel']}] {msg['text'][:200]}"
-        for msg in news_data[:10]
-    ]) if news_data else "No telegram news."
-    return {"telegram_news": telegram_news}
-
-
-def node_self_correction(state: AnalysisState) -> dict:
-    """Fetch past trading mistakes for all agents."""
+    # 7. Telegram News
     try:
-        feedback_history = db.get_feedback_history(limit=5)
-        if feedback_history:
-            feedback_text = "\n\n[PAST MISTAKES TO AVOID]\n" + "\n".join([
-                f"- {f.get('mistake_summary', 'N/A')[:150]}"
-                for f in feedback_history[:3]
-            ])
-            return {"feedback_text": feedback_text}
-    except Exception as e:
-        logger.error(f"Self-correction error: {e}")
-    return {"feedback_text": ""}
+        news = db.get_recent_telegram_messages(hours=1 if state.get("is_emergency") else 4)
+        updates["telegram_news"] = "\n".join([f"[{m['channel']}] {m['text'][:200]}" for m in news[:10]]) if news else "No news."
+    except Exception as e: logger.error(f"Telegram news error: {e}")
 
+    # 8. Self Correction
+    try:
+        fb = db.get_feedback_history(limit=5)
+        if fb: updates["feedback_text"] = "\n\n[PAST MISTAKES]\n" + "\n".join([f"- {f.get('mistake_summary', 'N/A')[:150]}" for f in fb[:3]])
+    except Exception as e: logger.error(f"Self-correction error: {e}")
 
-
-
-def node_microstructure_context(state: AnalysisState) -> dict:
-    """Fetch latest microstructure snapshot (spread/imbalance/slippage)."""
-    symbol = state["symbol"]
+    # 9. Microstructure Context
     try:
         snap = db.get_latest_microstructure(symbol)
-        if not snap:
-            return {"microstructure_context": "Microstructure: No data"}
+        if snap: updates["microstructure_context"] = f"[MICRO] spread={snap.get('spread_bps', 0):.2f}bps imbalance={snap.get('orderbook_imbalance', 0):.4f}"
+    except Exception as e: logger.error(f"Micro error: {e}")
 
-        text = (
-            f"[MICRO] spread={snap.get('spread_bps', 0):.2f}bps | "
-            f"imbalance={snap.get('orderbook_imbalance', 0):.4f} | "
-            f"slippage_100k={snap.get('slippage_buy_100k_bps', 0):.2f}bps"
-        )
-        return {"microstructure_context": text}
-    except Exception as e:
-        logger.error(f"Microstructure context error: {e}")
-        return {"microstructure_context": "Microstructure: Error"}
-
-
-def node_macro_context(state: AnalysisState) -> dict:
-    """Fetch latest macro snapshot (FRED + cross-asset proxies)."""
+    # 10. Macro Context
     try:
-        macro = db.get_latest_macro_data()
-        if not macro:
-            return {"macro_context": "Macro: No data"}
+        m = db.get_latest_macro_data()
+        if m: updates["macro_context"] = f"[MACRO] DGS10={m.get('dgs10', 'N/A')} DXY={m.get('dxy', 'N/A')} NASDAQ={m.get('nasdaq', 'N/A')}"
+    except Exception as e: logger.error(f"Macro error: {e}")
 
-        text = (
-            f"[MACRO] DGS2={macro.get('dgs2', 'N/A')} DGS10={macro.get('dgs10', 'N/A')} "
-            f"2s10s={macro.get('ust_2s10s_spread', 'N/A')} | "
-            f"DXY={macro.get('dxy', 'N/A')} NASDAQ={macro.get('nasdaq', 'N/A')} "
-            f"GOLD={macro.get('gold', 'N/A')} OIL={macro.get('oil', 'N/A')}"
-        )
-        return {"macro_context": text}
-    except Exception as e:
-        logger.error(f"Macro context error: {e}")
-        return {"macro_context": "Macro: Error"}
-
-def node_deribit_context(state: AnalysisState) -> dict:
-    """Fetch latest Deribit options data: DVOL, PCR, IV Term Structure, 25d Skew.
-    Returns empty string for symbols without Deribit options (non-BTC/ETH)."""
-    symbol = state["symbol"]
-    currency = symbol[:-4] if symbol.endswith('USDT') else symbol  # BTCUSDT → BTC
+    # 11. Deribit Context
     try:
-        data = db.get_latest_deribit_data(currency)
-        if not data:
-            return {"deribit_context": f"Deribit({currency}): No data"}
+        currency = symbol[:-4] if symbol.endswith('USDT') else symbol
+        d = db.get_latest_deribit_data(currency)
+        if d: updates["deribit_context"] = f"[DERIBIT {currency}] DVOL={d.get('dvol')} PCR={d.get('pcr_oi')}"
+    except Exception as e: logger.error(f"Deribit error: {e}")
 
-        parts = [f"[DERIBIT {currency}]"]
-
-        if data.get('dvol') is not None:
-            parts.append(f"DVOL={data['dvol']}")
-
-        if data.get('pcr_oi') is not None:
-            parts.append(f"PCR_OI={data['pcr_oi']} PCR_VOL={data.get('pcr_vol', 'N/A')}")
-
-        iv_parts = []
-        for b in ['1w', '2w', '1m', '3m', '6m']:
-            iv = data.get(f'iv_{b}')
-            if iv is not None:
-                iv_parts.append(f"{b}={iv}")
-        if iv_parts:
-            inverted_flag = " [INVERTED=panic]" if data.get('term_inverted') else ""
-            parts.append(f"IV_Term: {' '.join(iv_parts)}{inverted_flag}")
-
-        skew_parts = []
-        for b in ['1w', '2w', '1m', '3m']:
-            sk = data.get(f'skew_{b}')
-            if sk is not None:
-                skew_parts.append(f"{b}={sk:+.2f}")
-        if skew_parts:
-            parts.append(f"25dSkew(put-call): {' '.join(skew_parts)}")
-
-        return {"deribit_context": " | ".join(parts)}
-    except Exception as e:
-        logger.error(f"Deribit context error: {e}")
-        return {"deribit_context": f"Deribit({currency}): Error"}
-
-
-def node_fear_greed_context(state: AnalysisState) -> dict:
-    """Fetch latest Crypto Fear & Greed Index (market-wide daily sentiment)."""
+    # 12. Fear & Greed
     try:
-        data = db.get_latest_fear_greed()
-        if not data:
-            return {"fear_greed_context": "Fear&Greed: No data"}
+        fg = db.get_latest_fear_greed()
+        if fg: updates["fear_greed_context"] = f"[FEAR&GREED] {fg.get('value')}/100"
+    except Exception as e: logger.error(f"F&G error: {e}")
 
-        value = data.get('value', 'N/A')
-        classification = data.get('classification', 'Unknown')
-        change = data.get('change')
-        change_str = f" Δ{change:+d}" if change is not None else ""
-
-        return {"fear_greed_context": f"[FEAR&GREED] {value}/100 — {classification}{change_str}"}
-    except Exception as e:
-        logger.error(f"Fear & Greed context error: {e}")
-        return {"fear_greed_context": "Fear&Greed: Error"}
+    return updates
 
 
 def node_meta_agent(state: AnalysisState) -> dict:
@@ -1015,18 +828,7 @@ def build_analysis_graph():
 
     # Add nodes
     graph.add_node("collect_data", node_collect_data)
-    graph.add_node("perplexity_search", node_perplexity_search)
-    graph.add_node("rag_ingest", node_rag_ingest)
-    graph.add_node("funding_context", node_funding_context)
-    graph.add_node("cvd_context", node_cvd_context)
-    graph.add_node("liquidation_context", node_liquidation_context)
-    graph.add_node("rag_query", node_rag_query)
-    graph.add_node("telegram_news", node_telegram_news)
-    graph.add_node("self_correction", node_self_correction)
-    graph.add_node("microstructure_context", node_microstructure_context)
-    graph.add_node("macro_context", node_macro_context)
-    graph.add_node("deribit_context", node_deribit_context)
-    graph.add_node("fear_greed_context", node_fear_greed_context)
+    graph.add_node("context_gathering", node_context_gathering)
     graph.add_node("meta_agent", node_meta_agent)
     
     # Triage and Experts
@@ -1046,19 +848,8 @@ def build_analysis_graph():
 
     graph.set_entry_point("collect_data")
 
-    graph.add_edge("collect_data", "perplexity_search")
-    graph.add_edge("perplexity_search", "rag_ingest")
-    graph.add_edge("rag_ingest", "funding_context")
-    graph.add_edge("funding_context", "cvd_context")
-    graph.add_edge("cvd_context", "liquidation_context")
-    graph.add_edge("liquidation_context", "rag_query")
-    graph.add_edge("rag_query", "telegram_news")
-    graph.add_edge("telegram_news", "self_correction")
-    graph.add_edge("self_correction", "microstructure_context")
-    graph.add_edge("microstructure_context", "macro_context")
-    graph.add_edge("macro_context", "deribit_context")
-    graph.add_edge("deribit_context", "fear_greed_context")
-    graph.add_edge("fear_greed_context", "meta_agent")
+    graph.add_edge("collect_data", "context_gathering")
+    graph.add_edge("context_gathering", "meta_agent")
     graph.add_edge("meta_agent", "triage")
 
     graph.add_conditional_edges("triage", route_triage, {

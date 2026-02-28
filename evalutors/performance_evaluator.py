@@ -190,6 +190,22 @@ class PerformanceEvaluator:
             close_series = self._get_close_series_since(symbol, prediction_time)
             risk_metrics = self._compute_risk_metrics(close_series)
 
+            # [VLM ENHANCEMENT] Fetch related trade execution notes for deeper self-correction
+            trade_note = "N/A"
+            try:
+                exec_res = db.client.table("trade_executions")\
+                    .select("note")\
+                    .eq("symbol", symbol)\
+                    .gte("created_at", (prediction_time - timedelta(minutes=5)).isoformat())\
+                    .lte("created_at", (prediction_time + timedelta(minutes=5)).isoformat())\
+                    .order("created_at", desc=True)\
+                    .limit(1)\
+                    .execute()
+                if exec_res.data:
+                    trade_note = exec_res.data[0].get("note", "N/A")
+            except Exception as e:
+                logger.warning(f"Could not fetch trade note for evaluation: {e}")
+
             evaluation = {
                 "symbol": symbol,
                 "prediction_time": prediction_time.isoformat(),
@@ -200,6 +216,7 @@ class PerformanceEvaluator:
                 "predicted_entry": final_decision.get('entry_price', 0),
                 "confidence": final_decision.get('confidence', 0),
                 "reasoning": final_decision.get('reasoning', ''),
+                "note": trade_note,  # Pass execution context (slippage, strategy) to feedback generator
                 "sample_count": len(close_series),
                 "data_delay_minutes": self._get_data_delay_minutes(symbol),
                 **risk_metrics,

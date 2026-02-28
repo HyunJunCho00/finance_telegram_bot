@@ -231,7 +231,7 @@ class TradeExecutor:
             "filled_price": sim_res['filled_price'],
             "notional": amount,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "note": f"V7 PAPER ENGINE - Slippage: {sim_res['slippage_applied_pct']:.3f}% applied",
+            "note": f"V8 PAPER ENGINE | Style: {style} | Slippage: {sim_res.get('slippage_applied_pct', 0):.3f}% | Price: {sim_res.get('filled_price', 0):.2f}"
         }
 
     def _execute_binance(self, symbol: str, side: str, amount: float, leverage: int) -> Dict:

@@ -163,7 +163,9 @@ class MathEngine:
             cvd = cvd.set_index('timestamp')
             
             # Resample CVD to match DF timeframe
-            resample_rule = '1D' if (df['timestamp'].diff().median() >= pd.Timedelta(days=1)) else '4h'
+            # Handle both column and index for timestamp
+            df_ts = df.index if isinstance(df.index, pd.DatetimeIndex) else pd.to_datetime(df['timestamp'], utc=True)
+            resample_rule = '1D' if (df_ts.to_series().diff().median() >= pd.Timedelta(days=1)) else '4h'
             cvd_resampled = cvd.resample(resample_rule).sum().fillna(0)
             cvd_acc = (cvd_resampled.get('whale_buy_vol', 0) - cvd_resampled.get('whale_sell_vol', 0)).cumsum()
             
@@ -223,7 +225,7 @@ class MathEngine:
                             'type': 'BULLISH',
                             'top': float(df.iloc[i-1]['high']),
                             'bottom': float(df.iloc[i-1]['low']),
-                            'timestamp': df.iloc[i-1]['timestamp'],
+                            'timestamp': df.index[i-1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[i-1]['timestamp'],
                             'strength': move_size
                         })
                 
@@ -235,7 +237,7 @@ class MathEngine:
                             'type': 'BEARISH',
                             'top': float(df.iloc[i-1]['high']),
                             'bottom': float(df.iloc[i-1]['low']),
-                            'timestamp': df.iloc[i-1]['timestamp'],
+                            'timestamp': df.index[i-1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[i-1]['timestamp'],
                             'strength': move_size
                         })
             

@@ -138,17 +138,24 @@ class ReportGenerator:
             for key, emoji in mapping.items():
                 val = reasoning.get(key)
                 if val:
-                    # Escape HTML for each part
+                    # Escape HTML and truncate individual parts if necessary
                     safe_val = str(val).replace('<', '&lt;').replace('>', '&gt;')
+                    if len(safe_val) > 400:
+                        safe_val = safe_val[:397] + "..."
                     summary_lines.append(f"<b>{emoji}:</b> <i>{safe_val}</i>")
         else:
             # Fallback for flat string reasoning
             safe_reasoning = str(reasoning).replace('<', '&lt;').replace('>', '&gt;')
-            if len(safe_reasoning) > 600:
-                safe_reasoning = safe_reasoning[:600] + "..."
+            if len(safe_reasoning) > 1000:
+                safe_reasoning = safe_reasoning[:997] + "..."
             summary_lines.append(f"<i>{safe_reasoning}</i>")
 
-        return "\n".join(summary_lines)
+        # Final safety check for total length
+        final_msg = "\n".join(summary_lines)
+        if len(final_msg) > 4000:
+            final_msg = final_msg[:3997] + "..."
+            
+        return final_msg
 
     @api_retry(max_attempts=3, delay_seconds=10)
     async def send_telegram_notification(self, report: Dict, chart_bytes: Optional[bytes] = None,
