@@ -128,3 +128,4 @@ def get_feedback_history(limit: int = 5) -> dict:
 if __name__ == "__main__":
     # SSE transport (2026 SOTA): Explicit host/port for VM network access
     mcp.run(transport="sse", host="0.0.0.0", port=8001)
+    #mcp.run(transport="sse", host="127.0.0.1", port=8001)

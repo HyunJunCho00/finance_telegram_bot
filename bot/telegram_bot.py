@@ -207,26 +207,53 @@ class TradingBot:
             # 1. Active Mock Positions (If applicable)
             if is_paper:
                 from executors.paper_exchange import paper_engine
+                from executors.trade_executor import trade_executor
                 positions = paper_engine.get_open_positions()
+                
+                total_unrealized_pnl = 0.0
+                total_initial_margin = 0.0
                 
                 lines.append("📌 <b>Active Positions</b>")
                 if not positions:
                     lines.append("<i>- No open positions</i>")
                 else:
                     for pos in positions:
-                        # Calculate unrealized PnL briefly if possible (needs current price)
-                        # For now, show entry and target
+                        symbol = pos['symbol']
+                        side = pos['side']
+                        entry = pos['entry_price']
+                        size = pos['size']
+                        leverage = pos['leverage']
+                        
+                        # Get current price for PnL
+                        current_price = trade_executor._get_reference_price(symbol)
+                        pnl = 0.0
+                        if current_price > 0:
+                            pnl = (current_price - entry) * size if side == "LONG" else (entry - current_price) * size
+                        
+                        total_unrealized_pnl += pnl
+                        initial_margin = (size * entry) / leverage
+                        total_initial_margin += initial_margin
+                        
+                        pnl_icon = "🟢" if pnl >= 0 else "🔴"
                         lines.append(
-                            f"• <b>{pos['exchange'].upper()}</b> | {pos['symbol']}: {pos['side']} "
-                            f"(Entry: {pos['entry_price']:.2f}, Lev: {pos['leverage']}x)"
+                            f"• {pos['exchange'].upper()} | <b>{symbol}</b>: {side} {leverage}x\n"
+                            f"  Entry: {entry:,.2f} | Now: {current_price:,.2f}\n"
+                            f"  PnL: {pnl_icon} <b>${pnl:+.2f}</b>"
                         )
                 
-                # Wallet Balances
+                # Wallet Balances & Equity
                 lines.append("\n💰 <b>Mock Balances</b>")
                 for ex in ['binance', 'upbit']:
                     bal = paper_engine.get_wallet_balance(ex)
                     unit = 'USD' if ex == 'binance' else 'KRW'
-                    lines.append(f"• {ex.upper()}: {bal:,.2f} {unit}")
+                    
+                    if ex == 'binance':
+                        equity = bal + total_initial_margin + total_unrealized_pnl
+                        lines.append(f"• {ex.upper()} Balance: <code>${bal:,.2f}</code>")
+                        lines.append(f"• {ex.upper()} <b>Total Equity: ${equity:,.2f}</b>")
+                        lines.append(f"  (Margin: ${total_initial_margin:.2f} | UnPnL: ${total_unrealized_pnl:+.2f})")
+                    else:
+                        lines.append(f"• {ex.upper()}: {bal:,.2f} {unit}")
                 lines.append("")
 
             # 2. Strategy Analysis (Latest Reports)
