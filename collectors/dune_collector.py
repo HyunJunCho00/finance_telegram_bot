@@ -35,7 +35,7 @@ class DuneQueryConfig:
 # - Daily staking/on-chain snapshots: 360m (~6h)
 QUERY_CONFIGS = [
     DuneQueryConfig(6638261, "ETH Exchange Netflow", "netflow_hourly", 60),
-    DuneQueryConfig(5924114, "BTC On-chain Netflow", "netflow_daily", 360),
+    DuneQueryConfig(3378085, "Bitcoin ETF Real-time Tracking", "institution_flow", 60),
     DuneQueryConfig(21689, "DEX Aggregator Volume", "dex_realtime", 15),
     DuneQueryConfig(4319, "DEX Volume", "dex_realtime", 15),
     DuneQueryConfig(3383110, "Lido Staking", "staking_daily", 360),
