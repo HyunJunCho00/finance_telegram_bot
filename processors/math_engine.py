@@ -6,6 +6,28 @@ import pandas_ta_classic as ta
 from loguru import logger
 from config.settings import TradingMode
 
+# ── 분석 파이프라인(VLM + AI 에이전트)에 전달되는 지표 화이트리스트 ────────
+# 사용자 질의용 지표(PSAR, KC, Aroon, HMA 등)는 계산되지만 여기엔 포함하지 않음
+# 중복 제거 원칙:
+#   모멘텀 → RSI + StochRSI + MFI  (Williams%R, CCI, OBV 제외)
+#   이동평균 → EMA(21/50/200)       (EMA9, SMA50, SMA200 제외)
+_COMPACT_KEYS = frozenset({
+    'price', 'price_change_pct',
+    'ema_21', 'ema_50', 'ema_200',
+    'sma50_above_sma200',
+    'macd_line', 'macd_signal', 'macd_histogram', 'macd_hist_prev',
+    'adx', 'di_plus', 'di_minus',
+    'supertrend_value', 'supertrend_direction',
+    'rsi',
+    'stoch_rsi_k', 'stoch_rsi_d',
+    'mfi',
+    'bb_lower', 'bb_mid', 'bb_upper', 'bb_bandwidth', 'bb_percent_b',
+    'atr',
+    'vwap',
+    'cmf',
+    'ichimoku_tenkan', 'ichimoku_kijun', 'ichimoku_senkou_a', 'ichimoku_senkou_b',
+})
+
 
 class MathEngine:
     """Pure data provider. Calculates technical indicators across multiple timeframes.
@@ -483,6 +505,54 @@ class MathEngine:
             r['obv'] = self._safe_val(ta.obv(close, volume))
             r['vwap'] = self._safe_val(ta.vwap(high, low, close, volume))
             r['cmf'] = self._safe_val(ta.cmf(high, low, close, volume, length=20))
+
+            # HMA (Hull Moving Average) — 빠른 MA, EMA보다 노이즈 적음
+            r['hma_9'] = self._safe_val(ta.hma(close, length=9))
+            r['hma_21'] = self._safe_val(ta.hma(close, length=21))
+
+            # Parabolic SAR — 트렌드 전환 신호
+            try:
+                psar_df = ta.psar(high, low, close)
+                if psar_df is not None and not psar_df.empty:
+                    cols = psar_df.columns.tolist()
+                    # cols: PSARl (long side), PSARs (short side), PSARaf, PSARr
+                    psar_long = psar_df[cols[0]].iloc[-1]
+                    psar_short = psar_df[cols[1]].iloc[-1]
+                    # 활성 PSAR 값 (한쪽만 값이 있음)
+                    if not pd.isna(psar_long):
+                        r['psar'] = round(float(psar_long), 2)
+                        r['psar_trend'] = 'BULLISH'
+                    elif not pd.isna(psar_short):
+                        r['psar'] = round(float(psar_short), 2)
+                        r['psar_trend'] = 'BEARISH'
+            except Exception:
+                pass
+
+            # Keltner Channel — 변동성 채널 (BB 스퀴즈 감지에 활용)
+            try:
+                kc_df = ta.kc(high, low, close, length=20)
+                if kc_df is not None and not kc_df.empty:
+                    cols = kc_df.columns.tolist()
+                    r['kc_lower'] = self._safe_val(kc_df[cols[0]])
+                    r['kc_mid'] = self._safe_val(kc_df[cols[1]])
+                    r['kc_upper'] = self._safe_val(kc_df[cols[2]])
+                    # BB inside KC = Squeeze (변동성 수축, 폭발 임박)
+                    if r.get('bb_lower') and r.get('bb_upper') and r.get('kc_lower') and r.get('kc_upper'):
+                        r['bb_kc_squeeze'] = r['bb_lower'] > r['kc_lower'] and r['bb_upper'] < r['kc_upper']
+            except Exception:
+                pass
+
+            # Aroon — 트렌드 전환 조기 감지 (ADX 보완)
+            try:
+                aroon_df = ta.aroon(high, low, length=25)
+                if aroon_df is not None and not aroon_df.empty:
+                    cols = aroon_df.columns.tolist()
+                    # cols: AROOND, AROONU, AROONOSC
+                    r['aroon_down'] = self._safe_val(aroon_df[cols[0]])
+                    r['aroon_up'] = self._safe_val(aroon_df[cols[1]])
+                    r['aroon_osc'] = self._safe_val(aroon_df[cols[2]])
+            except Exception:
+                pass
 
         except Exception as e:
             logger.error(f"Indicator calculation error: {e}")
@@ -1151,7 +1221,7 @@ class MathEngine:
             if isinstance(data, dict) and 'error' not in data:
                 parts = [f"[{tf}]"]
                 for k, v in data.items():
-                    if v is not None and k != 'candle_count':
+                    if v is not None and k in _COMPACT_KEYS:  # 화이트리스트 필터
                         parts.append(f"{k}={v}")
                 lines.append(' '.join(parts))
 
@@ -1249,6 +1319,26 @@ class MathEngine:
         return '\n'.join(lines)
 
     # ─────────────── Internal Helpers ───────────────
+    def _safe_val(self, val) -> Optional[float]:
+        """Convert various TA outputs to a safe float or None."""
+        try:
+            if val is None: return None
+            if isinstance(val, (pd.Series, np.ndarray)):
+                if len(val) == 0: return None
+                val = val[-1] if isinstance(val, np.ndarray) else val.iloc[-1]
+            fval = float(val)
+            if np.isnan(fval) or np.isinf(fval): return None
+            return round(fval, 4)
+        except Exception:
+            return None
+
+    def _safe_series(self, series: pd.Series) -> Optional[List[float]]:
+        """Convert a pandas Series to a list of floats, handling NaNs."""
+        try:
+            if series is None or series.empty: return None
+            return [round(float(x), 4) if not (np.isnan(x) or np.isinf(x)) else None for x in series.tolist()]
+        except Exception:
+            return None
 
     def _recent_candle_data(self, df: pd.DataFrame, count: int = 5) -> List[Dict]:
         candles = []

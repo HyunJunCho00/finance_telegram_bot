@@ -1,4 +1,4 @@
-fastmcp>=2.14,<3
+fastmcp>=3.0.0
 google-cloud-secret-manager>=2.20,<3
 google-cloud-aiplatform>=1.70,<2
 google-cloud-logging>=3.5,<4

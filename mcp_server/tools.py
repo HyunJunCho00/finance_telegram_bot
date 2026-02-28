@@ -188,15 +188,25 @@ class MCPTools:
             return {"error": str(e)}
 
     def get_indicator_summary(self, symbol: str) -> Dict:
+        """사용자 질의용: 모든 지표 포함 (PSAR, KC, Aroon, HMA 등).
+        분석 파이프라인에는 format_compact() 화이트리스트만 전달됨."""
         try:
             df = db.get_latest_market_data(symbol, limit=settings.candle_limit)
             if df.empty:
                 return {"error": "No market data available"}
 
             mode = settings.trading_mode
-            analysis = math_engine.analyze_market(df, mode)
-            compact = math_engine.format_compact(analysis)
-            return {"symbol": symbol, "mode": mode.value, "summary": compact}
+            # 모드별 주요 타임프레임 원시 지표 반환 (화이트리스트 미적용)
+            primary_tf = '4h' if mode.value == 'swing' else '1d'
+            tf_df = math_engine.resample_to_timeframe(df, primary_tf)
+            indicators = math_engine.calculate_indicators_for_timeframe(tf_df)
+
+            return {
+                "symbol": symbol,
+                "timeframe": primary_tf,
+                "mode": mode.value,
+                "indicators": indicators,  # PSAR, KC, Aroon, HMA 포함 전체
+            }
         except Exception as e:
             logger.error(f"Indicator summary error: {e}")
             return {"error": str(e)}

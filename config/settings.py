@@ -146,6 +146,8 @@ class Settings(BaseSettings):
     # and sweeping coding/math benchmarks (e.g. 70.3% SWE-bench, 96.2% MATH 500).
     MODEL_JUDGE: str = "claude-sonnet-4-6"
     MODEL_SELF_CORRECTION: str = "claude-sonnet-4-6"
+    # 5. Telegram 대화형 채팅 — 저비용 Flash (Tool use 지원)
+    MODEL_CHAT: str = "gemini-3-flash-preview"
 
     # Soft input caps (character-based) to improve token efficiency
     MAX_INPUT_CHARS_LIQUIDITY: int = 15000
