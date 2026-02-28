@@ -458,7 +458,9 @@ class MilvusVectorStore:
                     self._client.create_index(
                         collection_name=self.COLLECTION_NAME,
                         field_name="vector",
-                        index_params={"metric_type": "COSINE", "index_type": "AUTOINDEX"},
+                        index_params=self._client.prepare_index_params(
+                            field_name="vector", metric_type="COSINE", index_type="AUTOINDEX"
+                        ),
                     )
                     self._client.load_collection(self.COLLECTION_NAME)
                 logger.info("Milvus connected and collection loaded")
@@ -491,7 +493,9 @@ class MilvusVectorStore:
                 self._client.create_index(
                     collection_name=self.COLLECTION_NAME,
                     field_name="vector",
-                    index_params={"metric_type": "COSINE", "index_type": "AUTOINDEX"},
+                    index_params=self._client.prepare_index_params(
+                        field_name="vector", metric_type="COSINE", index_type="AUTOINDEX"
+                    ),
                 )
                 logger.info(f"Milvus collection '{self.COLLECTION_NAME}' created")
         except Exception as e:

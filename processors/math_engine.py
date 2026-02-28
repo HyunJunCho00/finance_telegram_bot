@@ -258,6 +258,11 @@ class MathEngine:
         if len(df) < 20:
             return {'error': 'insufficient_data', 'candle_count': len(df)}
 
+        # [FIX] pandas_ta VWAP requires a DatetimeIndex
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if 'timestamp' in df.columns:
+                df = df.set_index('timestamp')
+            
         close = df['close'].astype(float)
         high = df['high'].astype(float)
         low = df['low'].astype(float)
