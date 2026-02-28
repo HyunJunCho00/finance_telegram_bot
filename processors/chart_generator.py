@@ -105,13 +105,16 @@ class ChartGenerator:
 
             if config['resample_rule'] == '1D' and df_1d is not None and not df_1d.empty:
                 hist_df = df_1d.copy()
-                hist_df.index = pd.to_datetime(hist_df.index, utc=True)
+                # Ensure we use the 'timestamp' column for indexing, not the RangeIndex
+                hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'], utc=True)
+                hist_df = hist_df.set_index('timestamp')
                 # Combine: historical + realtime, dropping duplicates favoring realtime
                 full_resampled = pd.concat([hist_df, full_resampled])
                 full_resampled = full_resampled[~full_resampled.index.duplicated(keep='last')].sort_index()
             elif config['resample_rule'] == '1W' and df_1w is not None and not df_1w.empty:
                 hist_df = df_1w.copy()
-                hist_df.index = pd.to_datetime(hist_df.index, utc=True)
+                hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'], utc=True)
+                hist_df = hist_df.set_index('timestamp')
                 full_resampled = pd.concat([hist_df, full_resampled])
                 full_resampled = full_resampled[~full_resampled.index.duplicated(keep='last')].sort_index()
 
@@ -134,7 +137,10 @@ class ChartGenerator:
             apds = []
             if cvd_df is not None and not cvd_df.empty:
                 cvd = cvd_df.copy()
-                cvd['timestamp'] = pd.to_datetime(cvd['timestamp'], utc=True).dt.floor('min')
+                if pd.api.types.is_numeric_dtype(cvd['timestamp']):
+                    cvd['timestamp'] = pd.to_datetime(cvd['timestamp'], unit='ms', utc=True).dt.floor('min')
+                else:
+                    cvd['timestamp'] = pd.to_datetime(cvd['timestamp'], utc=True).dt.floor('min')
                 cvd = cvd.set_index('timestamp')
                 # Resample CVD to match OHLCV rule
                 cvd_resampled = cvd.resample(config['resample_rule']).sum().fillna(0)
@@ -160,7 +166,10 @@ class ChartGenerator:
             # 5. Integrate OI and Funding if provided
             if funding_df is not None and not funding_df.empty:
                 fnd = funding_df.copy()
-                fnd['timestamp'] = pd.to_datetime(fnd['timestamp'], utc=True).dt.floor('min')
+                if pd.api.types.is_numeric_dtype(fnd['timestamp']):
+                    fnd['timestamp'] = pd.to_datetime(fnd['timestamp'], unit='ms', utc=True).dt.floor('min')
+                else:
+                    fnd['timestamp'] = pd.to_datetime(fnd['timestamp'], utc=True).dt.floor('min')
                 fnd = fnd.set_index('timestamp')
                 # Resample (OI is mean or last, Funding is mean)
                 fnd_resampled = fnd.resample(config['resample_rule']).agg({

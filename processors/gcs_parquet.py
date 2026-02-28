@@ -208,7 +208,11 @@ class GCSParquetStore:
             return pd.DataFrame()
 
         result = pd.concat(dfs, ignore_index=True)
-        result["timestamp"] = pd.to_datetime(result["timestamp"], utc=True)
+        # Handle numeric timestamps (ms) if they somehow got stored that way, otherwise ISO strings
+        if pd.api.types.is_numeric_dtype(result["timestamp"]):
+            result["timestamp"] = pd.to_datetime(result["timestamp"], unit='ms', utc=True)
+        else:
+            result["timestamp"] = pd.to_datetime(result["timestamp"], utc=True)
         result = result.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
         return result
 
@@ -231,7 +235,14 @@ class GCSParquetStore:
             return pd.DataFrame()
 
         result = pd.concat(dfs, ignore_index=True)
-        return result.sort_values(result.columns[0]).reset_index(drop=True)
+        # Handle numeric timestamps (ms) if they somehow got stored that way
+        time_col = result.columns[0] # Usually 'timestamp'
+        if pd.api.types.is_numeric_dtype(result[time_col]):
+            result[time_col] = pd.to_datetime(result[time_col], unit='ms', utc=True)
+        else:
+            result[time_col] = pd.to_datetime(result[time_col], utc=True)
+            
+        return result.sort_values(time_col).reset_index(drop=True)
 
     # ─────────────── Helpers ───────────────
 
