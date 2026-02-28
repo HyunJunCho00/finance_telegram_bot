@@ -112,8 +112,10 @@ Swarm reasoning controls & Data Trust Hierarchy:
     ) -> Dict:
         mode_str = mode.value.upper()
         mode_rules = self.POSITION_RULES if mode == TradingMode.POSITION else self.SWING_RULES
-        
-        prompt = f"{self.BASE_PROMPT.format(mode_upper=mode_str, mode_specific_rules=mode_rules)}\n\n{self.DEBATE_APPENDIX}"
+        # Wait, format() evaluates all curly braces. self.DEBATE_APPENDIX contains raw JSON templates!
+        # Instead of formatting the whole concatenated string, format the components individually.
+        base_formatted = self.BASE_PROMPT.format(mode_upper=mode_str, mode_specific_rules=mode_rules)
+        prompt = f"{base_formatted}\n\n{self.DEBATE_APPENDIX}"
         previous_decision = self.get_previous_decision(symbol=symbol)
 
         previous_context = "No previous decision available."
