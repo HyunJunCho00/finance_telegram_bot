@@ -37,7 +37,7 @@ Output your decision as JSON:
   "stop_loss": float,
   "take_profit": float,
   "hold_duration": "hours/days/weeks estimate",
-  "reasoning": "detailed reasoning",
+  "reasoning": "CONCISE reasoning (max 3-4 sentences)",
   "confidence": 0-100,
   "key_factors": ["factor1", "factor2", ...]
 }}

@@ -48,11 +48,14 @@ class ChartGenerator:
                        mode: TradingMode = TradingMode.SWING,
                        liquidation_df: Optional[pd.DataFrame] = None,
                        cvd_df: Optional[pd.DataFrame] = None,
-                       funding_df: Optional[pd.DataFrame] = None) -> Optional[bytes]:
+                       funding_df: Optional[pd.DataFrame] = None,
+                       df_1d: Optional[pd.DataFrame] = None,
+                       df_1w: Optional[pd.DataFrame] = None) -> Optional[bytes]:
         """Generate structure chart for any mode."""
         config = self._get_mode_config(mode)
         return self._generate_structure_chart(df, analysis, symbol, config, 
-                                              liquidation_df, cvd_df, funding_df)
+                                              liquidation_df, cvd_df, funding_df,
+                                              df_1d=df_1d, df_1w=df_1w)
 
     def _get_mode_config(self, mode: TradingMode) -> Dict:
         """Per-mode chart configuration."""
@@ -81,10 +84,12 @@ class ChartGenerator:
                                    symbol: str, config: Dict,
                                    liquidation_df: Optional[pd.DataFrame] = None,
                                    cvd_df: Optional[pd.DataFrame] = None,
-                                   funding_df: Optional[pd.DataFrame] = None) -> Optional[bytes]:
+                                   funding_df: Optional[pd.DataFrame] = None,
+                                   df_1d: Optional[pd.DataFrame] = None,
+                                   df_1w: Optional[pd.DataFrame] = None) -> Optional[bytes]:
         """Core chart generation — candlesticks + structure overlays only."""
         try:
-            # Prepare OHLCV
+            # Prepare OHLCV (Realtime)
             tmp = df.copy()
             tmp['timestamp'] = pd.to_datetime(tmp['timestamp'], utc=True)
             tmp = tmp.set_index('timestamp')
@@ -92,9 +97,26 @@ class ChartGenerator:
                 tmp[col] = tmp[col].astype(float)
 
             # 1. Prepare FULL resampled DF for calculations
+            # [FIX] Merge with GCS historical data if available to ensure long-term indicators (EMA200, MACD) 
+            # have enough history, even right after VM boot.
             full_resampled = tmp.resample(config['resample_rule']).agg({
                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
             }).dropna()
+
+            if config['resample_rule'] == '1D' and df_1d is not None and not df_1d.empty:
+                hist_df = df_1d.copy()
+                hist_df.index = pd.to_datetime(hist_df.index, utc=True)
+                # Combine: historical + realtime, dropping duplicates favoring realtime
+                full_resampled = pd.concat([hist_df, full_resampled])
+                full_resampled = full_resampled[~full_resampled.index.duplicated(keep='last')].sort_index()
+            elif config['resample_rule'] == '1W' and df_1w is not None and not df_1w.empty:
+                hist_df = df_1w.copy()
+                hist_df.index = pd.to_datetime(hist_df.index, utc=True)
+                full_resampled = pd.concat([hist_df, full_resampled])
+                full_resampled = full_resampled[~full_resampled.index.duplicated(keep='last')].sort_index()
+
+            # Trim to the exact required tail length to avoid overloading matplotlib, plus a buffer for EMAs
+            full_resampled = full_resampled.tail(config['tail_candles'] + 220)
 
             if len(full_resampled) < min(config['min_candles'], 5):
                 logger.warning(f"Not enough candles: {len(full_resampled)} < {config['min_candles']}")

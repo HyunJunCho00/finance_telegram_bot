@@ -671,7 +671,9 @@ def node_generate_chart(state: AnalysisState) -> dict:
     chart_bytes = chart_generator.generate_chart(df, market_data, symbol, mode,
                                                   liquidation_df=liquidation_df,
                                                   cvd_df=cvd_df,
-                                                  funding_df=funding_df)
+                                                  funding_df=funding_df,
+                                                  df_1d=df_1d,
+                                                  df_1w=df_1w)
 
     if not chart_bytes:
         logger.warning(f"Chart generation FAILED for {symbol} ({mode.value})")
