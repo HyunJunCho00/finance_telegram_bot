@@ -126,13 +126,20 @@ Swarm reasoning controls & Data Trust Hierarchy:
 
         previous_context = "No previous decision available."
         if previous_decision:
+            reasoning = previous_decision.get('reasoning', 'N/A')
+            if isinstance(reasoning, dict):
+                # If structured, extract final_logic or join summaries
+                reasoning_text = reasoning.get('final_logic', str(reasoning))
+            else:
+                reasoning_text = str(reasoning)
+
             previous_context = f"""Previous Decision:
 - Position: {previous_decision.get('decision', 'N/A')}
 - Allocation: {previous_decision.get('allocation_pct', 0)}%
 - Leverage: {previous_decision.get('leverage', 1)}x
 - Hold Duration: {previous_decision.get('hold_duration', 'N/A')}
 - Confidence: {previous_decision.get('confidence', 0)}%
-- Reasoning: {previous_decision.get('reasoning', 'N/A')[:300]}"""
+- Reasoning: {reasoning_text[:300]}"""
 
         # --- Episodic Memory Retrieval ---
         # Queries the JSONL vector DB placeholder for past identical patterns.
