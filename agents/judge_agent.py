@@ -29,7 +29,7 @@ YOUR JOB: Make a FINAL trading decision using YOUR OWN judgment.
 {mode_specific_rules}
 
 Output your decision as JSON:
-{
+{{
   "decision": "LONG" | "SHORT" | "HOLD" | "CANCEL_AND_CLOSE",
   "allocation_pct": 0-100,
   "leverage": 1-3,
@@ -40,7 +40,7 @@ Output your decision as JSON:
   "reasoning": "detailed reasoning",
   "confidence": 0-100,
   "key_factors": ["factor1", "factor2", ...]
-}
+}}
 
 You have FULL AUTONOMY. If the market is unclear, HOLD is always valid.
 CRITICAL V5 RULE: You will be given a list of ACTIVE_ORDERS (e.g. pending DCA chunks). If the market paradigm shifts against your active orders, you MUST output "decision": "CANCEL_AND_CLOSE". If you just want to add to an existing order, you can output LONG/SHORT again.
