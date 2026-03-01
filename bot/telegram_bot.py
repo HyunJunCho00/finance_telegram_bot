@@ -10,7 +10,7 @@ Commands:
 """
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from config.settings import settings, TradingMode
 from config.database import db
 from loguru import logger
@@ -361,6 +361,44 @@ class TradingBot:
             logger.error(f"Report command error: {e}")
             await update.message.reply_text(f"Error: {e}")
 
+    async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle button clicks for deep analysis."""
+        query = update.callback_query
+        await query.answer()
+        
+        data = query.data
+        if data.startswith("detail_"):
+            try:
+                report_id = data.split("_")[1]
+                # If report_id is not integer (UUID), we might need to adjust lookup
+                # Depending on how db.insert_ai_report returns the ID
+                
+                # Fetch report from DB
+                from config.database import db
+                report = None
+                
+                # Try lookup by created_at or ID if we have it
+                # For now, let's assume we can get it by newest for the symbol
+                # or better yet, search in the ai_reports table if report_id is the primary key.
+                response = db.client.table("ai_reports").select("*").eq("id", report_id).execute()
+                if response.data:
+                    report = response.data[0]
+                
+                if report:
+                    from executors.report_generator import report_generator
+                    # Determine mode - default to swing if not found (or store in callback_data)
+                    mode = TradingMode.SWING 
+                    if "POSITION" in report.get('final_decision', ''):
+                        mode = TradingMode.POSITION
+
+                    detail_text = report_generator.format_detail_message(report, mode)
+                    await query.message.reply_text(detail_text, parse_mode='HTML')
+                else:
+                    await query.message.reply_text("Report no longer available in database.")
+            except Exception as e:
+                logger.error(f"Callback error: {e}")
+                await query.message.reply_text(f"Error fetching detail: {e}")
+
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """자연어 메시지를 Gemini Flash function calling으로 처리.
         분석 리포트(Judge)는 Claude를 유지하고, 대화형 채팅은 저비용 Gemini Flash 사용.
@@ -523,6 +561,7 @@ class TradingBot:
         app.add_handler(CommandHandler("analyze", self.cmd_analyze))
         app.add_handler(CommandHandler("mode", self.cmd_mode))
         app.add_handler(CommandHandler("report", self.cmd_report))
+        app.add_handler(CallbackQueryHandler(self.handle_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
         import asyncio

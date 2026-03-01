@@ -51,158 +51,129 @@ class ReportGenerator:
         except Exception as e:
             logger.error(f"Error formatting advanced indicators: {e}")
 
-    def format_telegram_message(self, report: Dict, mode: TradingMode = TradingMode.SWING) -> str:
-        """Premium formatted Telegram message with rich layout and emojis."""
+    def format_summary_message(self, report: Dict, mode: TradingMode = TradingMode.SWING) -> str:
+        """Concise summary message with key targets and final logic."""
         decision = json.loads(report['final_decision']) if isinstance(report['final_decision'], str) else report['final_decision']
-        market_data = json.loads(report['market_data']) if isinstance(report['market_data'], str) else report['market_data']
-
+        
         d = decision.get('decision', 'N/A')
         confidence = decision.get('confidence', 0)
         
-        # Color coding for decision
-        if d == 'LONG':
-            header_icon = "🟢"
-            status_text = "✨ BULLISH SETUP DETECTED"
-        elif d == 'SHORT':
-            header_icon = "🔴"
-            status_text = "📉 BEARISH SETUP DETECTED"
-        else:
-            header_icon = "🟡"
-            status_text = "⚖️ NEUTRAL / MONITORING"
-
+        header_icon = "🟢" if d == "LONG" else "🔴" if d == "SHORT" else "🟡"
         mode_label = "SWING" if mode == TradingMode.SWING else "POSITION"
-        mode_icon = "📈" if mode == TradingMode.SWING else "🏔️"
         
-        # Summary block (High level)
-        summary_lines = [
-            f"{header_icon} <b>{mode_label} REPORT | {report['symbol']}</b> {mode_icon}",
-            f"<code>{report['timestamp'][:16].replace('T', ' ')} UTC</code>",
-            "",
-            f"🎯 <b>DECISION: {d}</b>",
-            f"📊 <b>Confidence: {confidence}%</b> | <b>Alloc: {decision.get('allocation_pct', 0)}%</b>",
-            f"⏲️ <b>Exp. Hold: {decision.get('hold_duration', 'N/A')}</b>",
-            "",
-        ]
-
-        # Targets block
+        # Format prices
         def fmt_price(val):
             if val is None or val == 0 or val == '0': return '---'
             try: return f"{float(val):,.2f}"
             except: return str(val)
 
-        summary_lines += [
-            "🏁 <b>TRADING TARGETS</b>",
-            f"  • Entry: <code>{fmt_price(decision.get('entry_price'))}</code>",
-            f"  • Stop : <code>{fmt_price(decision.get('stop_loss'))}</code>",
-            f"  • TP   : <code>{fmt_price(decision.get('take_profit'))}</code>",
+        summary_lines = [
+            f"{header_icon} <b>{mode_label} REPORT | {report['symbol']}</b>",
+            f"<code>{report['timestamp'][:16].replace('T', ' ')} UTC</code>",
+            "",
+            f"🎯 <b>DECISION: {d}</b> ({confidence}%)",
+            f"🏁 Entry: <code>{fmt_price(decision.get('entry_price'))}</code> | SL: <code>{fmt_price(decision.get('stop_loss'))}</code>",
+            f"🎯 TP: <code>{fmt_price(decision.get('take_profit'))}</code>",
             "",
         ]
 
         # Execution Status
-        receipt_text = ""
         receipt = decision.get("execution_receipt")
         if receipt and receipt.get("success"):
-            orders_count = len(receipt.get('receipts', []))
-            receipt_text = f"✅ <b>EXECUTION ACTIVE</b> ({orders_count} orders)\n"
-        elif recipe := decision.get("execution_receipt"):
-            if recipe.get("note") == "No valid trade direction":
-                receipt_text = "⏸️ <b>NO TRADE TRIGGERED</b> (Directionless)\n"
-            else:
-                receipt_text = f"🚨 <b>EXECUTION ERROR:</b> {recipe.get('error', 'Check Logs')}\n"
+            summary_lines.append(f"✅ <b>EXECUTION ACTIVE</b> ({len(receipt.get('receipts', []))} orders)")
+        elif receipt:
+            summary_lines.append(f"⏸️ <b>STATUS:</b> {receipt.get('note', 'PENDING')}")
+
+        # Final Logic (Summary)
+        reasoning = decision.get('reasoning', {})
+        final_logic = reasoning.get('final_logic', 'No summary available.') if isinstance(reasoning, dict) else str(reasoning)[:200]
         
-        if receipt_text:
-            summary_lines.append(receipt_text)
+        summary_lines.append(f"\n💡 <b>SUMMARY:</b> <i>{final_logic}</i>")
+        
+        return "\n".join(summary_lines)
 
-        # Key Factors (Bulleted)
-        key_factors = decision.get('key_factors', [])
-        if key_factors:
-            summary_lines.append("🔍 <b>KEY RATIONALE</b>")
-            for f in key_factors[:5]:
-                summary_lines.append(f"  ▫️ {f}")
-            summary_lines.append("")
-
-        # Post-Mortem / Reasoning (Structured or Flat)
+    def format_detail_message(self, report: Dict, mode: TradingMode = TradingMode.SWING) -> str:
+        """Full reasoning detail from the report."""
+        decision = json.loads(report['final_decision']) if isinstance(report['final_decision'], str) else report['final_decision']
         reasoning = decision.get('reasoning', 'N/A')
         
-        summary_lines.append("📝 <b>DECISION RATIONALE</b>")
+        lines = [f"🔍 <b>DEEP ANALYSIS | {report['symbol']}</b>\n"]
         
         if isinstance(reasoning, dict):
-            # Format structured reasoning
             mapping = {
-                "technical": "📏 TA",
-                "derivatives": "⛓️ DERIV",
-                "experts": "🧠 EXP",
-                "narrative": "🌐 NARR",
-                "final_logic": "💡 FIN"
+                "technical": "📏 TECHNICALS",
+                "derivatives": "⛓️ DERIVATIVES",
+                "experts": "🧠 EXPERT SWARM",
+                "narrative": "🌐 NARRATIVE/RAG",
+                "counter_scenario": "⚠️ RISK/FALSIFIABILITY"
             }
-            for key, emoji in mapping.items():
+            for key, title in mapping.items():
                 val = reasoning.get(key)
                 if val:
-                    # Escape HTML and truncate individual parts if necessary
                     safe_val = str(val).replace('<', '&lt;').replace('>', '&gt;')
-                    if len(safe_val) > 400:
-                        safe_val = safe_val[:397] + "..."
-                    summary_lines.append(f"<b>{emoji}:</b> <i>{safe_val}</i>")
+                    if len(safe_val) > 800: safe_val = safe_val[:797] + "..."
+                    lines.append(f"<b>{title}:</b>\n<i>{safe_val}</i>\n")
         else:
-            # Fallback for flat string reasoning
-            safe_reasoning = str(reasoning).replace('<', '&lt;').replace('>', '&gt;')
-            if len(safe_reasoning) > 1000:
-                safe_reasoning = safe_reasoning[:997] + "..."
-            summary_lines.append(f"<i>{safe_reasoning}</i>")
+            lines.append(f"<i>{str(reasoning).replace('<', '&lt;').replace('>', '&gt;')}</i>")
 
-        # Final safety check for total length
-        final_msg = "\n".join(summary_lines)
-        if len(final_msg) > 4000:
-            final_msg = final_msg[:3997] + "..."
-            
-        return final_msg
+        final_msg = "\n".join(lines)
+        return final_msg[:4000]
 
     @api_retry(max_attempts=3, delay_seconds=10)
     async def send_telegram_notification(self, report: Dict, chart_bytes: Optional[bytes] = None,
                                           mode: TradingMode = TradingMode.SWING) -> None:
         try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             bot = Bot(token=self.bot_token)
-            message = self.format_telegram_message(report, mode)
+            
+            # 1. Summary message
+            summary_text = self.format_summary_message(report, mode)
+            
+            # 2. Add Button
+            report_id = report.get('report_id') or report.get('id')
+            keyboard = [[InlineKeyboardButton("🔍 View Deep Analysis", callback_data=f"detail_{report_id}")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
 
             if chart_bytes:
-                logger.info(f"Sending Telegram photo for {report['symbol']} ({len(chart_bytes)} bytes)")
                 photo = BytesIO(chart_bytes)
                 photo.name = f"{report['symbol']}_chart.png"
                 
-                # If message is short, send as caption. Otherwise send separately.
-                if len(message) <= 1024:
-                    await bot.send_photo(chat_id=self.chat_id, photo=photo, caption=message, parse_mode='HTML')
+                # Send photo with summary as caption (if short) or separately
+                if len(summary_text) <= 1024:
+                    await bot.send_photo(
+                        chat_id=self.chat_id, 
+                        photo=photo, 
+                        caption=summary_text, 
+                        parse_mode='HTML',
+                        reply_markup=reply_markup
+                    )
                 else:
-                    # Send photo first with a brief header
-                    header = f"<b>📈 {report['symbol']} Chart</b>"
-                    await bot.send_photo(chat_id=self.chat_id, photo=photo, caption=header, parse_mode='HTML')
-                    # Follow up with full report message
-                    await bot.send_message(chat_id=self.chat_id, text=message, parse_mode='HTML')
+                    await bot.send_photo(chat_id=self.chat_id, photo=photo, caption=f"📈 {report['symbol']} Analysis", parse_mode='HTML')
+                    await bot.send_message(chat_id=self.chat_id, text=summary_text, parse_mode='HTML', reply_markup=reply_markup)
             else:
-                await bot.send_message(
-                    chat_id=self.chat_id,
-                    text=message,
-                    parse_mode='HTML'
-                )
+                await bot.send_message(chat_id=self.chat_id, text=summary_text, parse_mode='HTML', reply_markup=reply_markup)
 
-            logger.info("Telegram notification sent")
+            logger.info(f"Telegram summary notification sent (ID: {report_id})")
         except Exception as e:
             logger.error(f"Telegram notification error: {e}")
 
     def notify(self, report: Dict, chart_bytes: Optional[bytes] = None,
                mode: TradingMode = TradingMode.SWING) -> None:
         try:
-            asyncio.get_running_loop()
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                # If we are in an async loop (like APScheduler thread might be), 
+                # we can create a task or just run it in a thread to be safe.
+                threading.Thread(
+                    target=lambda: asyncio.run(self.send_telegram_notification(report, chart_bytes, mode)),
+                    daemon=True,
+                ).start()
+            else:
+                asyncio.run(self.send_telegram_notification(report, chart_bytes, mode))
         except RuntimeError:
             asyncio.run(self.send_telegram_notification(report, chart_bytes, mode))
-            return
 
-        # If called from an async context (e.g. Telegram command handler),
-        # run notification in a separate thread with its own event loop.
-        threading.Thread(
-            target=lambda: asyncio.run(self.send_telegram_notification(report, chart_bytes, mode)),
-            daemon=True,
-        ).start()
+report_generator = ReportGenerator()
 
 
 report_generator = ReportGenerator()

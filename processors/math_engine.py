@@ -96,15 +96,55 @@ class MathEngine:
         local_max_idx = argrelextrema(close_prices, np.greater, order=o)[0]
         return local_min_idx, local_max_idx
 
-    def calculate_diagonal_support(self, df: pd.DataFrame) -> Optional[Dict]:
+    def find_td_points(self, df: pd.DataFrame, n: int = 5) -> Tuple[List[int], List[int]]:
+        """Identify DeMark TD Points (Level 1/2).
+        A high is a TD Point High if it's higher than N candles to its left and right.
+        A low is a TD Point Low if it's lower than N candles to its left and right.
+        """
+        highs = df['high'].values.astype(float)
+        lows = df['low'].values.astype(float)
+        length = len(df)
+        
+        td_highs = []
+        td_lows = []
+        
+        for i in range(n, length - n):
+            # Check for TD High
+            is_high = True
+            for j in range(1, n + 1):
+                if highs[i] <= highs[i - j] or highs[i] <= highs[i + j]:
+                    is_high = False
+                    break
+            if is_high:
+                td_highs.append(i)
+                
+            # Check for TD Low
+            is_low = True
+            for j in range(1, n + 1):
+                if lows[i] >= lows[i - j] or lows[i] >= lows[i + j]:
+                    is_low = False
+                    break
+            if is_low:
+                td_lows.append(i)
+                
+        return td_lows, td_highs
+
+    def calculate_diagonal_support(self, df: pd.DataFrame, mode: TradingMode = TradingMode.SWING) -> Optional[Dict]:
+        """TD Point-based Support Trendline."""
         try:
-            local_min_idx, _ = self.find_pivot_points(df)
+            n = 12 if mode == TradingMode.POSITION else 5
+            local_min_idx, _ = self.find_td_points(df, n=n)
+            
+            if len(local_min_idx) < 2:
+                # Fallback to standard pivots if TD points are too sparse
+                local_min_idx, _ = self.find_pivot_points(df, order=n)
+                
             if len(local_min_idx) < 2:
                 return None
 
-            recent_lows = local_min_idx[-3:] if len(local_min_idx) >= 3 else local_min_idx[-2:]
-            x1, x2 = recent_lows[0], recent_lows[-1]
-            y1, y2 = float(df.iloc[x1]['close']), float(df.iloc[x2]['close'])
+            # Institutional Rule: Connect the two most recent significant points
+            x1, x2 = local_min_idx[-2], local_min_idx[-1]
+            y1, y2 = float(df.iloc[x1]['low']), float(df.iloc[x2]['low'])
 
             slope = (y2 - y1) / (x2 - x1) if x2 != x1 else 0
             intercept = y1 - slope * x1
@@ -120,18 +160,24 @@ class MathEngine:
                 'pivot_count': len(local_min_idx),
             }
         except Exception as e:
-            logger.error(f"Diagonal support error: {e}")
+            logger.error(f"TD Support error: {e}")
             return None
 
-    def calculate_diagonal_resistance(self, df: pd.DataFrame) -> Optional[Dict]:
+    def calculate_diagonal_resistance(self, df: pd.DataFrame, mode: TradingMode = TradingMode.SWING) -> Optional[Dict]:
+        """TD Point-based Resistance Trendline."""
         try:
-            _, local_max_idx = self.find_pivot_points(df)
+            n = 12 if mode == TradingMode.POSITION else 5
+            _, local_max_idx = self.find_td_points(df, n=n)
+            
+            if len(local_max_idx) < 2:
+                # Fallback
+                _, local_max_idx = self.find_pivot_points(df, order=n)
+                
             if len(local_max_idx) < 2:
                 return None
 
-            recent_highs = local_max_idx[-3:] if len(local_max_idx) >= 3 else local_max_idx[-2:]
-            x1, x2 = recent_highs[0], recent_highs[-1]
-            y1, y2 = float(df.iloc[x1]['close']), float(df.iloc[x2]['close'])
+            x1, x2 = local_max_idx[-2], local_max_idx[-1]
+            y1, y2 = float(df.iloc[x1]['high']), float(df.iloc[x2]['high'])
 
             slope = (y2 - y1) / (x2 - x1) if x2 != x1 else 0
             intercept = y1 - slope * x1
@@ -147,7 +193,7 @@ class MathEngine:
                 'pivot_count': len(local_max_idx),
             }
         except Exception as e:
-            logger.error(f"Diagonal resistance error: {e}")
+            logger.error(f"TD Resistance error: {e}")
             return None
 
     def detect_divergences(self, df: pd.DataFrame) -> Dict:
