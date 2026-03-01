@@ -1366,43 +1366,6 @@ class MathEngine:
         return '\n'.join(lines)
 
     # ─────────────── Internal Helpers ───────────────
-    def _safe_val(self, val) -> Optional[float]:
-        """Convert various TA outputs to a safe float or None."""
-        try:
-            if val is None: return None
-            if isinstance(val, (pd.Series, np.ndarray)):
-                if len(val) == 0: return None
-                val = val[-1] if isinstance(val, np.ndarray) else val.iloc[-1]
-            fval = float(val)
-            if np.isnan(fval) or np.isinf(fval): return None
-            return round(fval, 4)
-        except Exception:
-            return None
-
-    def _safe_series(self, series: pd.Series) -> Optional[List[float]]:
-        """Convert a pandas Series to a list of floats, handling NaNs."""
-        try:
-            if series is None or series.empty: return None
-            return [round(float(x), 4) if not (np.isnan(x) or np.isinf(x)) else None for x in series.tolist()]
-        except Exception:
-            return None
-
-    def _recent_candle_data(self, df: pd.DataFrame, count: int = 5) -> List[Dict]:
-        candles = []
-        for _, row in df.tail(count).iterrows():
-            o, h, l, c = float(row['open']), float(row['high']), float(row['low']), float(row['close'])
-            body = abs(c - o)
-            candles.append({
-                'open': round(o, 2),
-                'high': round(h, 2),
-                'low': round(l, 2),
-                'close': round(c, 2),
-                'volume': round(float(row['volume']), 2),
-                'body_size': round(body, 2),
-                'upper_wick': round(h - max(o, c), 2),
-                'lower_wick': round(min(o, c) - l, 2),
-                'is_bullish': c > o,
-            })
         return candles
 
 
