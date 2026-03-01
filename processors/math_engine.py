@@ -238,7 +238,8 @@ class MathEngine:
             cvd_acc = (cvd_resampled.get('whale_buy_vol', 0) - cvd_resampled.get('whale_sell_vol', 0)).cumsum()
             
             # Align
-            df = df.set_index('timestamp')
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df = df.set_index('timestamp')
             combined = pd.concat([df['close'], cvd_acc.rename('cvd')], axis=1).ffill().dropna()
             
             if len(combined) < 30:

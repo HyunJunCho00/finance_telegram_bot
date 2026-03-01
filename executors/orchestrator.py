@@ -41,6 +41,7 @@ from executors.report_generator import report_generator
 from executors.trade_executor import trade_executor
 from executors.post_mortem import write_post_mortem
 from executors.data_synthesizer import synthesize_training_data
+from agents.claude_client import claude_client
 from utils.retry import api_retry
 from utils.cooldown import is_on_cooldown, set_cooldown
 from loguru import logger

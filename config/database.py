@@ -75,23 +75,18 @@ class DatabaseClient:
 
     def batch_upsert_whale_data(self, data_list: List[Dict]) -> Dict:
         """Upsert whale trade data into cvd_data table (whale columns)."""
-        # Merge whale columns into existing cvd_data rows for the same timestamp/symbol
-        for record in data_list:
+        for attempt in range(2):
             try:
-                self.client.table("cvd_data").upsert(
-                    {
-                        "timestamp": record["timestamp"],
-                        "symbol": record["symbol"],
-                        "whale_buy_vol": record.get("whale_buy_vol", 0),
-                        "whale_sell_vol": record.get("whale_sell_vol", 0),
-                        "whale_buy_count": record.get("whale_buy_count", 0),
-                        "whale_sell_count": record.get("whale_sell_count", 0),
-                    },
-                    on_conflict="timestamp,symbol"
+                return self.client.table("cvd_data").upsert(
+                    data_list, on_conflict="timestamp,symbol"
                 ).execute()
             except Exception as e:
-                logger.warning(f"Whale data upsert error: {e}")
-        return {"upserted": len(data_list)}
+                if attempt == 0:
+                    logger.warning(f"Whale upsert failed, reconnecting: {e}")
+                    self.client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+                else:
+                    logger.error(f"Whale upsert failed after reconnect: {e}")
+                    raise
 
     # ─────────────── Liquidation Data ───────────────
 
