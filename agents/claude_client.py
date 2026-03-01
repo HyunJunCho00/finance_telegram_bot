@@ -83,6 +83,8 @@ class AIClient:
             return settings.MODEL_SELF_CORRECTION, settings.MAX_INPUT_CHARS_SELF_CORRECTION
         if role in ("rag", "rag_extraction"):
             return settings.MODEL_RAG_EXTRACTION, settings.MAX_INPUT_CHARS_RAG_EXTRACTION
+        if role == "vlm_geometric":
+            return settings.MODEL_VLM_GEOMETRIC, settings.MAX_INPUT_CHARS_MACRO
         return self.default_model_id, settings.MAX_INPUT_CHARS_LIQUIDITY
 
     def _trim_input(self, text: str, max_chars: int) -> str:

@@ -42,6 +42,8 @@ def run_static_checks() -> tuple[list[str], list[str]]:
             "node_liquidity_expert",
             "node_microstructure_expert",
             "node_macro_options_expert",
+            "node_vlm_geometric_expert",
+            "node_blackboard_synthesis",
             "node_meta_agent",
             "node_judge_agent",
             "node_risk_manager",

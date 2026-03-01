@@ -110,27 +110,68 @@ def write_post_mortem(report: dict, current_price: float):
         logger.error(f"Failed to ingest post-mortem into RAG: {e}")
 
 def retrieve_similar_memories(current_anomalies: list, symbol: str) -> str:
-    """Retrieves relevant past memories from local JSONL (Mocking Vector DB for now)."""
-    if not os.path.exists(MEMORY_FILE_PATH): return "No memory database found."
-    
+    """Retrieve past trade memories semantically similar to current market conditions.
+
+    Primary: LightRAG vector search (semantic similarity — finds structurally similar
+    past setups regardless of time). Post-mortems are stored with channel=SYSTEM_POST_MORTEM.
+    Fallback: JSONL time-reverse scan (used when LightRAG/Milvus unavailable).
+    """
+    query_text = (
+        f"past trade outcome {symbol} "
+        f"anomalies: {', '.join(current_anomalies) if current_anomalies else 'none'}"
+    )
+
+    # ── Primary: LightRAG semantic search ──
+    try:
+        result = light_rag.query(query_text, top_k=10)
+        semantic_hits = [
+            r for r in result.get("semantic_results", [])
+            if r.get("channel") == "SYSTEM_POST_MORTEM"
+               and r.get("text", "").strip()
+        ][:3]
+
+        if semantic_hits:
+            mem_str = "Similar Past Trades (Semantic Match via LightRAG):\n"
+            for hit in semantic_hits:
+                score = hit.get("score", 0)
+                text = hit.get("text", "")[:180]
+                mem_str += f"- [similarity={score:.2f}] {text}\n"
+            return mem_str
+    except Exception as e:
+        logger.warning(f"LightRAG memory search failed, falling back to JSONL: {e}")
+
+    # ── Fallback: JSONL time-reverse scan ──
+    return _retrieve_from_jsonl(symbol)
+
+
+def _retrieve_from_jsonl(symbol: str) -> str:
+    """JSONL fallback: returns the 3 most recent post-mortems for this symbol."""
+    if not os.path.exists(MEMORY_FILE_PATH):
+        return "No memory database found."
+
     relevant_memories = []
     try:
         with open(MEMORY_FILE_PATH, 'r', encoding='utf-8') as f:
             lines = f.readlines()
-            # Get last 5 memories for context
-            for line in reversed(lines[-50:]): 
-                mem = json.loads(line)
-                if mem.get("symbol") == symbol:
-                    relevant_memories.append(mem)
-                if len(relevant_memories) >= 3:
-                    break
+        for line in reversed(lines[-50:]):
+            mem = json.loads(line)
+            if mem.get("symbol") == symbol:
+                relevant_memories.append(mem)
+            if len(relevant_memories) >= 3:
+                break
     except Exception as e:
-        logger.error(f"Failed to read memory: {e}")
-        
+        logger.error(f"Failed to read JSONL memory: {e}")
+
     if not relevant_memories:
         return "System running in Bootstrap mode. No historical matches found yet."
-        
-    mem_str = "Recent Past Outcomes:\n"
+
+    mem_str = "Recent Past Outcomes (JSONL fallback — time-ordered, not semantic):\n"
     for mem in relevant_memories:
-        mem_str += f"- [{mem['outcome']}] Pred: {mem['predicted_direction']} | Rationale: {mem['reasoning'][:100]}...\n"
+        reasoning = mem.get("reasoning", "")
+        if isinstance(reasoning, dict):
+            reasoning = reasoning.get("final_logic", str(reasoning))
+        mem_str += (
+            f"- [{mem['outcome']}] {mem['predicted_direction']} | "
+            f"{str(reasoning)[:100]}...\n"
+        )
     return mem_str

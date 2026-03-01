@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     MILVUS_URI: str = ""  # e.g. https://in03-xxxxxx.api.gcp-us-west1.zillizcloud.com
     MILVUS_TOKEN: str = ""
 
+    # Cloudflare Workers AI (bge-reranker-base — Free tier: 10,000 neurons/day)
+    # Used as borderline-zone cross-encoder in LightRAG dedup pipeline.
+    CLOUDFLARE_ACCOUNT_ID: str = ""
+    CLOUDFLARE_AI_API_KEY: str = ""
+
 
     # ===== Trading Symbols (single source of truth) =====
     # Comma-separated, Binance Futures format (no slashes).
@@ -322,6 +327,8 @@ class SecretManager:
             "NEO4J_PASSWORD",
             "MILVUS_URI",
             "MILVUS_TOKEN",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "CLOUDFLARE_AI_API_KEY",
             "GCS_ARCHIVE_BUCKET",
             "ENABLE_GCS_ARCHIVE",
             "DUNE_API_KEY",

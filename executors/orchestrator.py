@@ -440,17 +440,81 @@ def node_macro_options_expert(state: AnalysisState) -> dict:
     return {"blackboard": bb, "budget": state["budget"] - 15, "turn_count": state.get("turn_count", 0) + 1}
 
 def node_vlm_geometric_expert(state: AnalysisState) -> dict:
-    """Run VLM Geometric visual analysis."""
+    """Run VLM Geometric visual analysis. Sole agent that receives the raw chart image.
+    Judge reads VLM's structured text output only — no raw chart forwarded to Judge."""
     bb = state.get("blackboard", {})
-    if state.get("budget", 0) <= 0: return {}
-    
-    # Needs chart image generated previously
-    result = vlm_geometric_agent.analyze(
-        state.get("chart_image_b64", ""),
-        mode=state.get("mode", "SWING").upper()
-    )
+    chart = state.get("chart_image_b64", "")
+    if not chart:
+        bb["vlm_geometry"] = {"anomaly": "none", "directional_bias": "NEUTRAL",
+                               "confidence": 0, "rationale": "No chart available"}
+        return {"blackboard": bb}
+
+    result = vlm_geometric_agent.analyze(chart, mode=state.get("mode", "SWING").upper())
     bb["vlm_geometry"] = result
-    return {"blackboard": bb, "budget": state["budget"] - 25, "turn_count": state.get("turn_count", 0) + 1}
+    return {"blackboard": bb, "budget": state.get("budget", 100) - 25,
+            "turn_count": state.get("turn_count", 0) + 1}
+
+
+def node_blackboard_synthesis(state: AnalysisState) -> dict:
+    """Synthesize all Blackboard expert outputs into a structured conflict map.
+
+    Runs AFTER all experts (including VLM). Produces a compact JSON that tells
+    Judge: what experts agree on, where they conflict, and which conflict needs
+    resolving. This reduces Judge's cognitive load from scanning 4+ raw JSONs.
+    Model: gemini-3-flash-preview (cheap, fast — synthesis not reasoning).
+    """
+    bb = state.get("blackboard", {})
+    if not bb:
+        return {}
+
+    regime = state.get("market_regime", "UNKNOWN")
+    trust_directive = state.get("regime_context", {}).get("trust_directive", "")
+
+    system_prompt = (
+        "You are a Senior Quantitative Analyst. Synthesize expert signals into a structured conflict map. "
+        "Be concise and precise. Output strictly JSON."
+    )
+    schema = """{
+  "consensus_signals": ["list of points ALL experts agree on, with price levels if available"],
+  "conflicts": [
+    {
+      "between": ["expert_a", "expert_b"],
+      "expert_a_claim": "...",
+      "expert_b_claim": "...",
+      "tiebreaker": "What data or condition would resolve this conflict"
+    }
+  ],
+  "dominant_signal": "BULLISH | BEARISH | NEUTRAL",
+  "highest_confidence_expert": "liquidity | microstructure | macro | vlm_geometry",
+  "key_uncertainty": "Single most important unresolved question for the Judge",
+  "regime_note": "Given the regime and trust_directive, which expert output should be weighted most"
+}"""
+
+    user_message = (
+        f"MARKET REGIME: {regime}\n"
+        f"TRUST DIRECTIVE: {trust_directive}\n\n"
+        f"BLACKBOARD:\n{json.dumps(bb, indent=2)}\n\n"
+        f"Output JSON matching this schema:\n{schema}"
+    )
+
+    try:
+        response = claude_client.generate_response(
+            system_prompt=system_prompt,
+            user_message=user_message,
+            temperature=0.1,
+            max_tokens=700,
+            role="liquidity",  # Gemini Flash — synthesis, not reasoning
+        )
+        s, e = response.find('{'), response.rfind('}') + 1
+        if s != -1 and e > s:
+            synthesis = json.loads(response[s:e])
+            bb["synthesis"] = synthesis
+            logger.info(f"Blackboard synthesis: dominant={synthesis.get('dominant_signal')}, "
+                        f"conflicts={len(synthesis.get('conflicts', []))}")
+            return {"blackboard": bb}
+    except Exception as exc:
+        logger.error(f"Blackboard synthesis error: {exc}")
+    return {}
 
 
 def node_generate_chart(state: AnalysisState) -> dict:
@@ -560,13 +624,15 @@ def node_judge_agent(state: AnalysisState) -> dict:
     feedback_text = state.get("feedback_text", "")
     open_positions = state.get("open_positions", "")
 
-    # Pass blackboard and regime context
+    # Pass blackboard (includes synthesis + vlm_geometry) and regime context.
+    # Chart image is NOT forwarded — VLMGeometricAgent is the sole visual analyst.
+    # Judge reads VLM's structured text output from the blackboard instead.
     regime_ctx = state.get("regime_context", {})
     decision = judge_agent.make_decision(
         market_data_compact=compact,
         blackboard=blackboard,
         funding_context=funding_context,
-        chart_image_b64=state.get("chart_image_b64"),
+        chart_image_b64=None,
         mode=mode,
         feedback_text=feedback_text,
         active_orders=state.get("active_orders", []),
@@ -780,20 +846,18 @@ def _build_full_context(state: AnalysisState) -> str:
 # ── Conditional edge ──
 
 def route_triage(state: AnalysisState) -> str:
-    """[FIX CRITICAL-3] Always run Judge — SWING trading requires evaluation every cycle,
-    not only when anomalies are detected. Without this, positions are never re-evaluated
-    and new trend entries are missed in quiet markets."""
-    anomalies = state.get("anomalies", [])
-    if not anomalies:
-        return "generate_chart"  # → vlm_expert → judge_agent → risk_manager → execute_trade
-    
-    if "liquidation_cluster" in anomalies or "whale_cvd_divergence" in anomalies:
-        return "liquidity_expert"
-    elif "microstructure_imbalance" in anomalies:
-        return "microstructure_expert"
-    elif "options_panic" in anomalies:
-        return "macro_expert"
-    return "generate_chart"
+    """Always run the full Expert Swarm (liquidity → microstructure → macro).
+
+    Previous bug: returned 'generate_chart' when no anomalies detected, silently
+    skipping all three domain experts. In quiet trending markets this meant Judge
+    made decisions with zero expert input — defeating the purpose of the swarm.
+
+    Fix: always start from liquidity_expert. route_swarm fills remaining experts.
+    Anomaly context is embedded in state fields (cvd_context, deribit_context etc.)
+    so experts are fully informed regardless of entry point.
+    MetaAgent trust_directive handles regime-based expert weighting at Judge level.
+    """
+    return "liquidity_expert"
 
 def route_swarm(state: AnalysisState) -> str:
     budget = state.get("budget", 0)
@@ -839,6 +903,7 @@ def build_analysis_graph():
     
     graph.add_node("generate_chart", node_generate_chart)
     graph.add_node("vlm_expert", node_vlm_geometric_expert)
+    graph.add_node("blackboard_synthesis", node_blackboard_synthesis)
     graph.add_node("judge_agent", node_judge_agent)
     graph.add_node("risk_manager", node_risk_manager)
     graph.add_node("portfolio_leverage_guard", node_portfolio_leverage_guard)
@@ -876,7 +941,8 @@ def build_analysis_graph():
     })
 
     graph.add_edge("generate_chart", "vlm_expert")
-    graph.add_edge("vlm_expert", "judge_agent")
+    graph.add_edge("vlm_expert", "blackboard_synthesis")
+    graph.add_edge("blackboard_synthesis", "judge_agent")
     graph.add_edge("judge_agent", "risk_manager")
     graph.add_edge("risk_manager", "portfolio_leverage_guard")
     graph.add_edge("portfolio_leverage_guard", "execute_trade")
@@ -971,18 +1037,17 @@ class Orchestrator:
             "is_emergency": is_emergency, "errors": [],
         }
 
-        # Run each node sequentially
-        # [FIX CRITICAL-4] Replace undefined node_bull_agent/node_bear_agent/node_risk_agent
-        # with actual node functions defined in this module.
+        # Run each node sequentially — mirrors the LangGraph DAG order.
+        # node_context_gathering consolidates: perplexity, RAG ingest, funding, CVD,
+        # liquidation, RAG query, telegram news, self-correction, microstructure,
+        # macro, deribit, and fear&greed context in a single function.
         for node_fn in [
-            node_collect_data, node_perplexity_search, node_rag_ingest,
-            node_funding_context, node_cvd_context, node_liquidation_context,
-            node_rag_query, node_telegram_news, node_self_correction,
-            node_microstructure_context, node_macro_context,
-            node_deribit_context, node_fear_greed_context,
+            node_collect_data,
+            node_context_gathering,
             node_meta_agent,
             node_triage,
-            node_liquidity_expert, node_microstructure_expert,
+            node_liquidity_expert,
+            node_microstructure_expert,
             node_macro_options_expert,
         ]:
             try:
@@ -991,14 +1056,26 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Node {node_fn.__name__} error: {e}")
 
-        # Conditional chart (all modes now)
+        # Chart generation → VLM analysis → Blackboard synthesis → Judge
         if settings.should_use_chart and state.get("df_size", 0) > 0:
             try:
                 state.update(node_generate_chart(state))
             except Exception as e:
                 logger.error(f"Chart generation error: {e}")
 
-        # Judge
+        # VLM: analyzes chart, posts structured output to blackboard["vlm_geometry"]
+        try:
+            state.update(node_vlm_geometric_expert(state))
+        except Exception as e:
+            logger.error(f"VLM expert error: {e}")
+
+        # Synthesis: distills blackboard into conflict map for Judge
+        try:
+            state.update(node_blackboard_synthesis(state))
+        except Exception as e:
+            logger.error(f"Blackboard synthesis error: {e}")
+
+        # Judge reads blackboard (incl. synthesis + vlm_geometry). No raw chart.
         try:
             state.update(node_judge_agent(state))
         except Exception as e:
