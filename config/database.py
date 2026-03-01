@@ -139,9 +139,17 @@ class DatabaseClient:
     @reconnect_on_error
     def upsert_telegram_message(self, data: Dict) -> Dict:
         """Upsert to avoid duplicate errors on (channel, message_id)."""
-        return self.client.table("telegram_messages").upsert(
-            data, on_conflict="channel,message_id"
-        ).execute()
+        try:
+            response = self.client.table("telegram_messages").upsert(
+                data, on_conflict="channel,message_id"
+            ).execute()
+            if response.data:
+                msg = data.get("text", "")[:30].replace("\n", " ")
+                logger.info(f"✅ DB: Saved [{data.get('channel')}] ID:{data.get('message_id')} | {msg}...")
+            return response
+        except Exception as e:
+            logger.error(f"❌ DB: Failed to upsert telegram message: {e}")
+            raise
 
     def insert_telegram_message(self, data: Dict) -> Dict:
         """Backward compatible - now uses upsert."""

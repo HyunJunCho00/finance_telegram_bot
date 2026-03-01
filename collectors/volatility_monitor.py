@@ -45,22 +45,31 @@ class VolatilityMonitor:
         return {'spike_detected': spike_detected, 'details': spike_details}
 
     def trigger_emergency_analysis(self, spike_details: list) -> None:
-        from collectors.telegram_listener import telegram_listener
+        from executors.orchestrator import orchestrator
         from config.local_state import state_manager
         if not state_manager.is_analysis_enabled():
             logger.info(f"EMERGENCY DETECTED but analysis disabled. Skip {len(spike_details)} symbols.")
             return
 
         logger.critical(f"EMERGENCY ANALYSIS TRIGGERED: {len(spike_details)} spikes")
-        import asyncio
-        asyncio.run(telegram_listener.run_backfill(hours=1))
+        
+        # [V13.5] Enable Panic Mode for Telegram Listener
+        state_manager.set_panic_mode(True)
+        
+        # Trigger emergency analysis for each symbol
         for detail in spike_details:
             orchestrator.run_emergency_analysis(detail['symbol'])
 
     def run(self) -> None:
+        from config.local_state import state_manager
         result = self.check_volatility_spike()
         if result['spike_detected']:
             self.trigger_emergency_analysis(result['details'])
+        else:
+            # If market is quiet, ensure panic mode is off
+            if state_manager.is_panic_mode():
+                logger.info("Market stabilized. Disabling Panic Mode.")
+                state_manager.set_panic_mode(False)
 
 
 volatility_monitor = VolatilityMonitor()

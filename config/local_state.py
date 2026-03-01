@@ -63,9 +63,12 @@ def init_db():
         )
     ''')
 
-    # Default to AI analysis ON if not set
+    # Default configs
     cursor.execute(
         "INSERT OR IGNORE INTO system_config (key, value) VALUES ('enable_ai_analysis', 'true')"
+    )
+    cursor.execute(
+        "INSERT OR IGNORE INTO system_config (key, value) VALUES ('panic_mode', 'false')"
     )
     conn.commit()
     conn.close()
@@ -91,6 +94,29 @@ class LocalStateManager:
             if row:
                 return row['value'].lower() == 'true'
             return True
+
+    def is_panic_mode(self) -> bool:
+        """Check if market is currently in a high-volatility state."""
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT value FROM system_config WHERE key = 'panic_mode'")
+            row = cursor.fetchone()
+            if row:
+                return row['value'].lower() == 'true'
+            return False
+
+    def set_panic_mode(self, enabled: bool):
+        """Set or clear the market panic (high-volatility) flag."""
+        val = 'true' if enabled else 'false'
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO system_config (key, value) VALUES ('panic_mode', ?)",
+                (val,)
+            )
+            self.conn.commit()
+        if enabled:
+            logger.warning("System Config: Market Panic Mode ENABLED")
 
     def set_analysis_enabled(self, enabled: bool):
         """Enable or disable AI analysis/reporting."""

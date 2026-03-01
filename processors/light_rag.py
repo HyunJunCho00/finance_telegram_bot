@@ -1443,6 +1443,9 @@ Rules:
                 )
 
         self._ingested_ids.add(doc_id)
+        # [V13.8] Explicit confirmation log (replaces mystery JSON)
+        logger.info(f"🧠 LightRAG: Ingested '{text[:40].replace('\n', ' ')}...' | Entities: {len(entity_names)} | DocID: {doc_id[:8]}")
+
         # [FIX HIGH-11] Persist to disk for process restart resilience
         if len(self._ingested_ids) % 50 == 0:  # Batch writes every 50 ingestions
             self._save_ingested_ids()

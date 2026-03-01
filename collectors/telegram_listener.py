@@ -14,6 +14,7 @@ from config.database import db
 from agents.claude_client import claude_client
 from processors.light_rag import light_rag
 from utils.text_sanitizer import clean_telegram_text
+from config.local_state import state_manager
 
 logger = logging.getLogger(__name__)
 
@@ -43,34 +44,29 @@ SOURCE_CREDIBILITY = {
     "Cointelegraph": 0.6,
 }
 
-# Keywords that indicate BTC/ETH relevance in a chart caption.
-SIGNAL_KEYWORDS = {
-    "btc", "bitcoin", "eth", "ethereum", "stablecoin", "usdt", "usdc",
-    "exchange", "inflow", "outflow", "netflow", "funding", "liquidat",
-    "leverage", "borrow", "staking", "whale", "reserve", "mvrv", "sopr",
-    "onchain", "on-chain", "defi", "aave", "lido", "supply", "demand",
-    "market", "price", "sell", "buy", "bull", "bear", "capitulat",
+# Routine NOISE Patterns to ignore for LLM Extraction (High-confidence spam/ads)
+NOISE_KEYWORDS = {
+    "referral", "sign up", "join now", "exclusive offer", "maintenance",
+    "advertising", "sponsored", "trading competition", "giveaway", "discount code"
 }
 
 ALPHA_EXTRACTION_PROMPT = """You are a Senior Crypto Alpha Strategist.
-Your goal is to extract structured intelligence from real-time Telegram alerts.
+Your goal is to extract structured intelligence from real-time global news and Telegram alerts.
 
 TASK:
-1. Identify key Entities (MicroStrategy, Justin Sun, SEC, BlackRock, etc.)
-2. Determine the Action/Relationship (Bought, Sold, Sued, Approved, etc.)
-3. Calculate Market Impact Logic: Why does this matter for BTC or ETH?
-4. Output structured Triplets for Graph ingestion.
+1. FILTER: Discard routine noise (periodic price updates, exchange maintenance, ads).
+2. SIGNAL: Identify impactful news (Crypto-specific, Macro-financial, or Geopolitical events).
+3. EXTRACT: For each signal, identify key Entities, Actions, and the Logic for why it matters for crypto markets (e.g., War -> Risk-off -> BTC/ETH impact).
 
 EXTRACTION RULES:
 - Format: [ENTITY] | [RELATION] | [TARGET] | [IMPACT_LOGIC]
-- Focus ONLY on Bitcoin (BTC) and Ethereum (ETH) relevance.
-- If a message has no BTC/ETH signal, skip it.
+- Focus on anything that shifts Market Sentiment or Liquidity.
 
 SOURCE CONTEXT:
 Channels: {sources}
 Overall Signal: {signal_type}
 
-Output should be a list of dense factual triplets, one per line.
+Output should be a list of dense factual triplets, one per line. If no significant signal exists, return "NONE".
 """
 
 VLM_SYSTEM_PROMPT = (
@@ -214,6 +210,8 @@ class TelegramListener:
             "Lookonchain": "lookonchainchannel",
             "Watcher_Guru": "WatcherGuru"
         }
+        # Pre-compute reverse map for lightning-fast lookups in real-time handler
+        self._username_to_key = {v.lower(): k for k, v in self.channels.items()}
 
     async def start(self):
         if not self.api_id or not self.api_hash:
@@ -227,8 +225,26 @@ class TelegramListener:
         async def handler(event):
             try:
                 chat = await event.get_chat()
-                sender_name = getattr(chat, 'title', getattr(chat, 'username', 'Unknown'))
-                await self._process_single_message(event.message, sender_name)
+                # 1. Normalize identifiers (username or title)
+                username = getattr(chat, 'username', '')
+                username_low = username.lower() if username else ""
+                title = getattr(chat, 'title', '')
+                
+                # 2. Match with our target channels
+                sender_key = self._username_to_key.get(username_low)
+                if not sender_key:
+                    # Fallback for channels without usernames or title matches
+                    for k, v in self.channels.items():
+                        if v == title:
+                            sender_key = k
+                            break
+                
+                if not sender_key:
+                    return # Not a target channel
+
+                # 3. Real-time logging (Proof of delivery)
+                logger.info(f"⚡ REAL-TIME: Received message from [{sender_key}]")
+                await self._process_single_message(event.message, sender_key)
             except Exception as e:
                 logger.error(f"Handler error: {e}")
 
@@ -277,27 +293,61 @@ class TelegramListener:
 
         if not clean_text: return
 
-        # Persistence
-        db.client.table("telegram_messages").upsert({
+        # Persistence (V13.8 Refactor: use resilient wrapper)
+        db.upsert_telegram_message({
             "channel": sender_name, "text": clean_text, "message_id": message.id,
             "timestamp": datetime.now(timezone.utc).isoformat()
-        }, on_conflict="channel,message_id").execute()
+        })
 
         # Buffer for Alpha
         async with self._buffer_lock:
             self._message_buffer.append({"source": sender_name, "text": clean_text, "timestamp": datetime.now(timezone.utc).isoformat()})
 
     async def _batch_processor_loop(self):
+        last_flush = datetime.now(timezone.utc)
         while self._running:
-            await asyncio.sleep(60)
+            await asyncio.sleep(10) # High-resolution state check
+            
+            is_panic = state_manager.is_panic_mode()
+            threshold = 60 if is_panic else 900
+            
+            elapsed = (datetime.now(timezone.utc) - last_flush).total_seconds()
+            if elapsed < threshold:
+                continue
+
             async with self._buffer_lock:
-                if not self._message_buffer: continue
+                if not self._message_buffer: 
+                    last_flush = datetime.now(timezone.utc)
+                    continue
                 batch, self._message_buffer = self._message_buffer, []
+            
+            logger.info(f"Flushing Telegram batch ({len(batch)} messages, Mode: {'PANIC' if is_panic else 'ROUTINE'})")
             await self._process_batch(batch)
+            last_flush = datetime.now(timezone.utc)
 
     async def _process_batch(self, batch: List[Dict]):
-        sources = list(set([m['source'] for m in batch]))
-        full_text = "\n---\n".join([f"[{m['source']}]: {m['text']}" for m in batch])
+        # 1. Basic Junk Filter (Spam/Redundancy)
+        filtered_batch = []
+        seen_texts = set()
+        
+        for msg in batch:
+            text_low = msg['text'].lower()
+            if text_low in seen_texts: continue
+            seen_texts.add(text_low)
+            
+            # Only skip blatant spam. Routine price updates are now 
+            # handed to the LLM for "Smart" evaluation because they 
+            # might contain context a rule would miss.
+            if any(nkw in text_low for nkw in NOISE_KEYWORDS):
+                continue
+                
+            filtered_batch.append(msg)
+
+        if not filtered_batch:
+            return
+
+        sources = list(set([m['source'] for m in filtered_batch]))
+        full_text = "\n---\n".join([f"[{m['source']}]: {m['text']}" for m in filtered_batch])
         try:
             extraction = await asyncio.to_thread(
                 claude_client.generate_response,
