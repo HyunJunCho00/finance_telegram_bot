@@ -35,33 +35,32 @@ def run_static_checks() -> tuple[list[str], list[str]]:
     failures: list[str] = []
     passes: list[str] = []
 
-    # 1) Flow and role separation
+    # 1) Flow and role separation (Expert Swarm + Decision Core)
     miss = assert_contains(
         "executors/orchestrator.py",
         [
-            "node_bull_agent",
-            "node_bear_agent",
-            "node_risk_agent",
+            "node_liquidity_expert",
+            "node_microstructure_expert",
+            "node_macro_options_expert",
+            "node_meta_agent",
             "node_judge_agent",
-            "graph.add_edge(\"bull_agent\", \"bear_agent\")",
-            "graph.add_edge(\"bear_agent\", \"risk_agent\")",
-            "graph.add_edge(\"judge_agent\", \"generate_report\")",
+            "node_risk_manager",
+            "node_portfolio_leverage_guard",
         ],
     )
     (passes if not miss else failures).append(
         "multi-agent orchestration chain" if not miss else f"orchestration missing: {miss}"
     )
 
-    # 2) Debate guardrails
+    # 2) Decision guardrails in active agents
     for file, needles in [
-        ("agents/bullish_agent.py", ["INDEPENDENCE_APPENDIX", "invalidation risks"]),
-        ("agents/bearish_agent.py", ["INDEPENDENCE_APPENDIX", "invalidation risks"]),
-        ("agents/risk_agent.py", ["DEBATE_APPENDIX", "disagreement matrix", "no-trade/HOLD"]),
-        ("agents/judge_agent.py", ["DEBATE_APPENDIX", "Evaluate Bull vs Bear", "choose HOLD"]),
+        ("agents/judge_agent.py", ["DEBATE_APPENDIX", "Falsifiability Analysis", "counter_scenario", "choose HOLD"]),
+        ("agents/meta_agent.py", ["trust_directive", "risk_budget_pct", "VOLATILITY_PANIC"]),
+        ("agents/risk_manager_agent.py", ["cro_veto_applied", "UPBIT", "BINANCE"]),
     ]:
         miss = assert_contains(file, needles)
         (passes if not miss else failures).append(
-            f"debate guardrails in {file}" if not miss else f"{file} missing: {miss}"
+            f"guardrails in {file}" if not miss else f"{file} missing: {miss}"
         )
 
     # 3) Indicators coverage
