@@ -8,7 +8,7 @@ import json
 
 
 class JudgeAgent:
-    """The final decision maker. Uses the best available model (Opus).
+    """The final decision maker. Uses the best available model (Sonnet 4.6).
     ONLY agent that receives chart image (SWING mode, cost optimization).
     AI decides everything - we just deliver data."""
 
@@ -79,6 +79,10 @@ Be aware of your previous decision for consistency."""
 - Fundamental shifts and narrative multi-month trends are more important than daily orderbook noise
 - Extreme negative funding over long periods = generational bottom; Extreme positive over months = late cycle
 - DVOL (Deribit Volatility Index) spikes indicate capitulation/bottoms
+- CME BASIS (BTC/ETH): Monitor the premium/discount of CME Futures vs Spot. Persistent Backwardation (Spot > Futures) indicates institutional hedging or lack of buy-side conviction. Contango (Futures > Spot) indicates institutional long-bias.
+- OTC FOOTPRINT: Even if OTC is hidden, watch for "footprints":
+    1. Deribit Skew: Large players hedge OTC buys with put options.
+    2. CVD Trends: OTC desks rebalancing inventory on public exchanges.
 - Position sizing: 5-15% of Kelly criterion (highly conservative, room for deep drawdowns)
 - Leverage: 1x (Spot) or maximum 1.5x. Liquidation must be nearly impossible.
 - Hold period: months to years"""

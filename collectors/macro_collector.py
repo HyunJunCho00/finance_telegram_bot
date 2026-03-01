@@ -66,6 +66,7 @@ class MacroCollector:
             return None
 
     def run(self) -> None:
+        # 1. Fetch cross-asset data
         payload: Dict = {
             "timestamp": datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat(),
             "source": "macro_collector",
@@ -79,6 +80,32 @@ class MacroCollector:
             "oil": self._fetch_yfinance_last(self.tickers["oil"]),
         }
 
+        # 2. CME Basis Calculation (Institutional Sentiment)
+        # Pairs: BTC=F (CME) vs BTC-USD (Spot), ETH=F (CME) vs ETH-USD (Spot)
+        assets = {"btc": ("BTC=F", "BTC-USD"), "eth": ("ETH=F", "ETH-USD")}
+        for asset, (f_ticker, s_ticker) in assets.items():
+            try:
+                cme_f = self._fetch_yfinance_last(f_ticker)
+                spot = self._fetch_yfinance_last(s_ticker)
+                
+                key_basis = f"{asset}_cme_basis"
+                key_pct = f"{asset}_cme_basis_pct"
+                
+                if cme_f and spot:
+                    basis = cme_f - spot
+                    basis_pct = (basis / spot) * 100
+                    payload[key_basis] = round(basis, 2)
+                    payload[key_pct] = round(basis_pct, 4)
+                    logger.info(f"CME {asset.upper()} Basis: ${payload[key_basis]} ({payload[key_pct]}%)")
+                else:
+                    payload[key_basis] = None
+                    payload[key_pct] = None
+            except Exception as e:
+                logger.warning(f"CME {asset.upper()} Basis calc failed: {e}")
+                payload[f"{asset}_cme_basis"] = None
+                payload[f"{asset}_cme_basis_pct"] = None
+
+        # 3. Spread Calculation
         if payload["dgs2"] is not None and payload["dgs10"] is not None:
             payload["ust_2s10s_spread"] = round(payload["dgs10"] - payload["dgs2"], 4)
         else:
