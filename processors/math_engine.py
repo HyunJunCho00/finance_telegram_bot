@@ -1366,6 +1366,22 @@ class MathEngine:
         return '\n'.join(lines)
 
     # ─────────────── Internal Helpers ───────────────
+    def _recent_candle_data(self, df: pd.DataFrame, count: int = 5) -> List[Dict]:
+        candles = []
+        for _, row in df.tail(count).iterrows():
+            o, h, l, c = float(row['open']), float(row['high']), float(row['low']), float(row['close'])
+            body = abs(c - o)
+            candles.append({
+                'open': round(o, 2),
+                'high': round(h, 2),
+                'low': round(l, 2),
+                'close': round(c, 2),
+                'volume': round(float(row['volume']), 2),
+                'body_size': round(body, 2),
+                'upper_wick': round(h - max(o, c), 2),
+                'lower_wick': round(min(o, c) - l, 2),
+                'is_bullish': c > o,
+            })
         return candles
 
 
