@@ -23,13 +23,29 @@ import threading
 
 
 def job_1min_tick():
+    # 1. Price Collection (Critical)
     try:
         collector.run()
+    except Exception as e:
+        logger.error(f"Price collection error: {e}")
+
+    # 2. Funding Rate (8h signal, 1m cadence)
+    try:
         funding_collector.run()
+    except Exception as e:
+        logger.error(f"Funding collection error: {e}")
+
+    # 3. Microstructure (Ephemeral)
+    try:
         microstructure_collector.run()
+    except Exception as e:
+        logger.error(f"Microstructure collection error: {e}")
+
+    # 4. Volatility Monitor
+    try:
         volatility_monitor.run()
     except Exception as e:
-        logger.error(f"1-minute tick job error: {e}")
+        logger.error(f"Volatility monitor error: {e}")
 
 def job_1min_execution():
     """V5: Process Orders, V7: Check Margin Calls + TP/SL"""

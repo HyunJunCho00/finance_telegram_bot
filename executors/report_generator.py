@@ -174,6 +174,3 @@ class ReportGenerator:
             asyncio.run(self.send_telegram_notification(report, chart_bytes, mode))
 
 report_generator = ReportGenerator()
-
-
-report_generator = ReportGenerator()

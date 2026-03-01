@@ -22,6 +22,7 @@ import pandas as pd
 import pytz
 from config.settings import settings
 from config.database import db
+from utils.retry import api_retry
 from loguru import logger
 
 
@@ -45,6 +46,7 @@ class PriceCollector:
             'upbit': settings.trading_symbols_krw,
         }
 
+    @api_retry(max_attempts=3, delay_seconds=2)
     def fetch_binance_ohlcv_with_cvd(
         self,
         symbol: str,
@@ -105,6 +107,7 @@ class PriceCollector:
         """Standard OHLCV fetch (backward compatible)."""
         return self.fetch_binance_ohlcv_with_cvd(symbol, timeframe, limit)
 
+    @api_retry(max_attempts=3, delay_seconds=2)
     def fetch_upbit_ohlcv(
         self,
         symbol: str,

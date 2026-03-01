@@ -92,8 +92,8 @@ class LiquidationBuffer:
                 entry["largest_single_side"] = liq_side
                 entry["largest_single_price"] = price
 
-    def flush(self) -> List[Dict]:
-        """Return accumulated data and reset buffer."""
+    def get_data(self) -> List[Dict]:
+        """Return accumulated data without clearing the buffer."""
         with self._lock:
             if not self._buffer:
                 return []
@@ -114,8 +114,18 @@ class LiquidationBuffer:
                         "largest_single_side": data["largest_single_side"],
                         "largest_single_price": round(data["largest_single_price"], 2),
                     })
-            self._buffer.clear()
             return records
+
+    def clear(self):
+        """Reset the buffer."""
+        with self._lock:
+            self._buffer.clear()
+
+    def flush(self) -> List[Dict]:
+        """[DEPRECATED] Use get_data() + clear() for safe DB flush."""
+        data = self.get_data()
+        self.clear()
+        return data
 
 
 class WhaleBuffer:
@@ -154,8 +164,8 @@ class WhaleBuffer:
                 entry["whale_sell_vol"] += usd_value
                 entry["whale_sell_count"] += 1
 
-    def flush(self) -> Dict[str, Dict]:
-        """Return accumulated whale data per symbol and reset."""
+    def get_data(self) -> Dict[str, Dict]:
+        """Return accumulated whale data per symbol without clearing."""
         with self._lock:
             result = {}
             for symbol, data in self._buffer.items():
@@ -166,8 +176,18 @@ class WhaleBuffer:
                         "whale_buy_count": data["whale_buy_count"],
                         "whale_sell_count": data["whale_sell_count"],
                     }
-            self._buffer.clear()
             return result
+
+    def clear(self):
+        """Reset the buffer."""
+        with self._lock:
+            self._buffer.clear()
+
+    def flush(self) -> Dict[str, Dict]:
+        """[DEPRECATED] Use get_data() + clear() for safe DB flush."""
+        data = self.get_data()
+        self.clear()
+        return data
 
 
 # ─────────────── WebSocket Collector ───────────────
@@ -233,15 +253,19 @@ class WebSocketCollector:
         while self._running:
             await asyncio.sleep(FLUSH_INTERVAL)
             try:
-                # Flush liquidations
-                liq_records = self.liq_buffer.flush()
+                # 1. Flush liquidations: Only clear if DB write succeeds
+                liq_records = self.liq_buffer.get_data()
                 if liq_records:
-                    db.batch_upsert_liquidations(liq_records)
-                    total_liq = sum(r["long_liq_usd"] + r["short_liq_usd"] for r in liq_records)
-                    logger.info(f"WS flush: {len(liq_records)} liquidation records (${total_liq:,.0f})")
+                    try:
+                        db.batch_upsert_liquidations(liq_records)
+                        self.liq_buffer.clear() # Success
+                        total_liq = sum(r["long_liq_usd"] + r["short_liq_usd"] for r in liq_records)
+                        logger.info(f"WS flush: {len(liq_records)} liquidation records (${total_liq:,.0f})")
+                    except Exception as e:
+                        logger.warning(f"WS liquidation flush failed (data kept in buffer): {e}")
 
-                # Flush whale CVD (merge into existing cvd_data minute row)
-                whale_data = self.whale_buffer.flush()
+                # 2. Flush whale CVD: Only clear if DB write succeeds
+                whale_data = self.whale_buffer.get_data()
                 if whale_data:
                     now = datetime.now(timezone.utc).replace(second=0, microsecond=0).isoformat()
                     whale_records = []
@@ -254,8 +278,12 @@ class WebSocketCollector:
                             "whale_buy_count": wdata["whale_buy_count"],
                             "whale_sell_count": wdata["whale_sell_count"],
                         })
-                    db.batch_upsert_whale_data(whale_records)
-                    logger.info(f"WS flush: {len(whale_records)} whale CVD records")
+                    try:
+                        db.batch_upsert_whale_data(whale_records)
+                        self.whale_buffer.clear() # Success
+                        logger.info(f"WS flush: {len(whale_records)} whale CVD records")
+                    except Exception as e:
+                        logger.warning(f"WS whale flush failed (data kept in buffer): {e}")
 
             except Exception as e:
                 logger.error(f"WS flush error: {e}")

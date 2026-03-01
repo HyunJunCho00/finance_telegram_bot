@@ -13,17 +13,39 @@ class DatabaseClient:
             settings.SUPABASE_KEY
         )
 
+    def reconnect_on_error(func):
+        """Decorator to handle Supabase disconnections and retry once."""
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except Exception as e:
+                err_msg = str(e).lower()
+                if "disconnected" in err_msg or "closed" in err_msg or "connection" in err_msg:
+                    logger.warning(f"Database disconnected during {func.__name__}, reconnecting: {e}")
+                    try:
+                        self.client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+                        return func(self, *args, **kwargs)
+                    except Exception as retry_e:
+                        logger.error(f"Database reconnection/retry failed: {retry_e}")
+                        raise
+                raise
+        return wrapper
+
     # ─────────────── Market Data ───────────────
 
+    @reconnect_on_error
     def insert_market_data(self, data: Dict) -> Dict:
         return self.client.table("market_data").insert(data).execute()
 
+    @reconnect_on_error
     def batch_insert_market_data(self, data_list: List[Dict]) -> Dict:
         """Upsert to avoid duplicate errors on (timestamp, symbol, exchange)."""
         return self.client.table("market_data").upsert(
             data_list, on_conflict="timestamp,symbol,exchange"
         ).execute()
 
+    @reconnect_on_error
     def get_latest_market_data(self, symbol: str, limit: int = 1000, exchange: str = "binance") -> pd.DataFrame:
         response = self.client.table("market_data")\
             .select("*")\
@@ -41,12 +63,14 @@ class DatabaseClient:
 
     # ─────────────── CVD Data ───────────────
 
+    @reconnect_on_error
     def batch_upsert_cvd_data(self, data_list: List[Dict]) -> Dict:
         """Upsert CVD (volume delta) data."""
         return self.client.table("cvd_data").upsert(
             data_list, on_conflict="timestamp,symbol"
         ).execute()
 
+    @reconnect_on_error
     def get_cvd_data(self, symbol: str, limit: int = 240) -> pd.DataFrame:
         """Get recent CVD data for a symbol. Default 240 = 4 hours of 1m data."""
         response = self.client.table("cvd_data")\
@@ -73,29 +97,25 @@ class DatabaseClient:
 
     # ─────────────── Whale Data (from WebSocket aggTrade) ───────────────
 
+    @reconnect_on_error
     def batch_upsert_whale_data(self, data_list: List[Dict]) -> Dict:
         """Upsert whale trade data into cvd_data table (whale columns)."""
-        for attempt in range(2):
-            try:
-                return self.client.table("cvd_data").upsert(
-                    data_list, on_conflict="timestamp,symbol"
-                ).execute()
-            except Exception as e:
-                if attempt == 0:
-                    logger.warning(f"Whale upsert failed, reconnecting: {e}")
-                    self.client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
-                else:
-                    logger.error(f"Whale upsert failed after reconnect: {e}")
-                    raise
+        return self.client.table("cvd_data").upsert(
+            data_list, on_conflict="timestamp,symbol"
+        ).execute()
+
+    # (Previous manual retry logic removed in favor of decorator)
 
     # ─────────────── Liquidation Data ───────────────
 
+    @reconnect_on_error
     def batch_upsert_liquidations(self, data_list: List[Dict]) -> Dict:
         """Upsert liquidation data."""
         return self.client.table("liquidations").upsert(
             data_list, on_conflict="timestamp,symbol"
         ).execute()
 
+    @reconnect_on_error
     def get_liquidation_data(self, symbol: str, limit: int = 240) -> pd.DataFrame:
         """Get recent liquidation data. Default 240 = 4 hours of 1m data."""
         response = self.client.table("liquidations")\
@@ -113,6 +133,7 @@ class DatabaseClient:
 
     # ─────────────── Telegram Messages ───────────────
 
+    @reconnect_on_error
     def upsert_telegram_message(self, data: Dict) -> Dict:
         """Upsert to avoid duplicate errors on (channel, message_id)."""
         return self.client.table("telegram_messages").upsert(
@@ -147,6 +168,7 @@ class DatabaseClient:
 
     # ─────────────── Funding Data ───────────────
 
+    @reconnect_on_error
     def upsert_funding_data(self, data: Dict) -> Dict:
         """Upsert funding data. Uses truncated timestamp to avoid duplication."""
         return self.client.table("funding_data").upsert(
@@ -157,6 +179,7 @@ class DatabaseClient:
 
     # ─────────────── Microstructure Data ───────────────
 
+    @reconnect_on_error
     def batch_upsert_microstructure_data(self, data_list: List[Dict]) -> Dict:
         return self.client.table("microstructure_data").upsert(
             data_list, on_conflict="timestamp,symbol,exchange"
@@ -173,6 +196,7 @@ class DatabaseClient:
 
     # ─────────────── Macro Data ───────────────
 
+    @reconnect_on_error
     def upsert_macro_data(self, data: Dict) -> Dict:
         return self.client.table("macro_data").upsert(
             data, on_conflict="timestamp,source"
@@ -188,6 +212,7 @@ class DatabaseClient:
 
     # ─────────────── Narrative Data ───────────────
 
+    @reconnect_on_error
     def upsert_narrative_data(self, data: Dict) -> Dict:
         """Upsert Perplexity/market narrative data for auditability."""
         return self.client.table("narrative_data").upsert(
@@ -208,6 +233,7 @@ class DatabaseClient:
 
     # ─────────────── Dune Query Data ───────────────
 
+    @reconnect_on_error
     def upsert_dune_query_result(self, data: Dict) -> Dict:
         """Upsert Dune query snapshot by (query_id, collected_at)."""
         return self.client.table("dune_query_results").upsert(
@@ -226,6 +252,7 @@ class DatabaseClient:
 
     # ─────────────── Deribit Options Data ───────────────
 
+    @reconnect_on_error
     def upsert_deribit_data(self, data: Dict) -> Dict:
         """Upsert Deribit options snapshot (DVOL, PCR, IV Term Structure, Skew)."""
         return self.client.table("deribit_data").upsert(
@@ -243,6 +270,7 @@ class DatabaseClient:
 
     # ─────────────── Fear & Greed Data ───────────────
 
+    @reconnect_on_error
     def upsert_fear_greed(self, data: Dict) -> Dict:
         """Upsert daily Crypto Fear & Greed Index snapshot."""
         return self.client.table("fear_greed_data").upsert(
@@ -259,8 +287,10 @@ class DatabaseClient:
 
     # ─────────────── AI Reports ───────────────
 
-    def insert_ai_report(self, data: Dict) -> Dict:
-        return self.client.table("ai_reports").insert(data).execute()
+    @reconnect_on_error
+    def insert_ai_report(self, data: Dict) -> Optional[str]:
+        response = self.client.table("ai_reports").insert(data).execute()
+        return response.data[0]['id'] if response.data else None
 
     def get_latest_report(self, symbol: str = None) -> Optional[Dict]:
         query = self.client.table("ai_reports")\
@@ -275,6 +305,7 @@ class DatabaseClient:
 
     # ─────────────── Feedback ───────────────
 
+    @reconnect_on_error
     def insert_feedback(self, data: Dict) -> Dict:
         return self.client.table("feedback_logs").insert(data).execute()
 
@@ -289,6 +320,7 @@ class DatabaseClient:
 
     # ─────────────── Trade Executions ───────────────
 
+    @reconnect_on_error
     def insert_trade_execution(self, data: Dict) -> Dict:
         return self.client.table("trade_executions").insert(data).execute()
 
@@ -320,6 +352,7 @@ class DatabaseClient:
 
     # ─────────────── Data Cleanup (500MB free tier) ───────────────
 
+    @reconnect_on_error
     def cleanup_old_data(self) -> Dict:
         """Delete data older than configured retention days.
         Uses settings for retention periods. Called daily by the scheduler."""
