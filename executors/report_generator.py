@@ -159,18 +159,12 @@ class ReportGenerator:
 
     def notify(self, report: Dict, chart_bytes: Optional[bytes] = None,
                mode: TradingMode = TradingMode.SWING) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-            if loop.is_running():
-                # If we are in an async loop (like APScheduler thread might be), 
-                # we can create a task or just run it in a thread to be safe.
-                threading.Thread(
-                    target=lambda: asyncio.run(self.send_telegram_notification(report, chart_bytes, mode)),
-                    daemon=True,
-                ).start()
-            else:
-                asyncio.run(self.send_telegram_notification(report, chart_bytes, mode))
-        except RuntimeError:
-            asyncio.run(self.send_telegram_notification(report, chart_bytes, mode))
+        # Always run in a background thread to avoid blocking the caller
+        # (APScheduler threads have no running asyncio loop, causing synchronous
+        # execution and up to 6-minute blocking on Telegram API timeouts)
+        threading.Thread(
+            target=lambda: asyncio.run(self.send_telegram_notification(report, chart_bytes, mode)),
+            daemon=True,
+        ).start()
 
 report_generator = ReportGenerator()
