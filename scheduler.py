@@ -105,6 +105,11 @@ def job_analysis():
         mode = settings.trading_mode
         logger.info(f"Running analysis job (mode={mode.value}, "
                      f"interval={settings.analysis_interval_hours}h)")
+        from config.local_state import state_manager
+        if not state_manager.is_analysis_enabled():
+            logger.info("Analysis job skipped (disabled by user)")
+            return
+            
         macro_collector.run()
         orchestrator.run_scheduled_analysis()
     except Exception as e:
@@ -141,7 +146,11 @@ def job_1hour_telegram():
         
         # 3. Truth Engine: Triangulate corroborated claims via Perplexity (Web)
         # Process 10 candidates per hour to manage API costs
-        light_rag.run_triangulation_worker(limit=3)
+        from config.local_state import state_manager
+        if state_manager.is_analysis_enabled():
+            light_rag.run_triangulation_worker(limit=3)
+        else:
+            logger.info("Triangulation worker skipped (AI analysis disabled)")
     except Exception as e:
         logger.error(f"1-hour Telegram job error: {e}")
 

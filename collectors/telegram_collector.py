@@ -1,12 +1,17 @@
 import os
 import stat
 import base64
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 from config.settings import settings
 from config.database import db
 from loguru import logger
 from utils.text_sanitizer import clean_telegram_text
+
+# Channels that regularly post on-chain metric charts worth VLM analysis.
+# Only these channels trigger image download + Gemini Flash chart extraction.
+VISUAL_CHANNELS = {"CryptoQuant", "Glassnode", "Lookonchain"}
 
 # 세션 파일 경로: data/ 디렉토리에 저장 (프로젝트 루트 노출 방지)
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -227,6 +232,119 @@ class TelegramCollector:
                 logger.error(f"Telethon client init failed (will skip Telegram collection): {e}")
         return self._client
 
+    # Keywords that indicate BTC/ETH relevance in a caption.
+    # If caption is long enough (>30 chars) but contains none of these → skip VLM entirely.
+    _SIGNAL_KEYWORDS = {
+        "btc", "bitcoin", "eth", "ethereum", "stablecoin", "usdt", "usdc",
+        "exchange", "inflow", "outflow", "netflow", "funding", "liquidat",
+        "leverage", "borrow", "staking", "whale", "reserve", "mvrv", "sopr",
+        "onchain", "on-chain", "defi", "aave", "lido", "supply", "demand",
+        "market", "price", "sell", "buy", "bull", "bear", "capitulat",
+    }
+
+    _VLM_SYSTEM_PROMPT = (
+        "You are a crypto on-chain chart analyst embedded in an automated trading system. "
+        "Your job: extract exactly three fields from a chart image, anchored by its caption. "
+        "Accuracy is critical — your output feeds directly into trading decisions. "
+        "Never invent data. Never read values from axis tick marks or scales. "
+        "Only report values that appear as explicit printed text annotations on the chart itself."
+    )
+
+    _VLM_USER_TEMPLATE = """\
+Channel: {channel}
+Caption: "{caption}"
+
+Study the chart using the caption as your anchor for what metric is being shown.
+Return EXACTLY three lines in this format — no markdown, no extra text:
+
+LABELS: <text values printed as annotations ON the chart e.g. "$102B, $51B, 100B" — NONE if absent>
+TREND: <BULLISH | BEARISH | NEUTRAL — based on the rightmost/most recent section of the chart>
+MISMATCH: <If the chart's current state directly contradicts the caption's claim, one sentence. NONE if aligned.>
+
+Examples:
+---
+Caption: "Stablecoin inflows doubling despite persistent selling pressure"
+LABELS: $102B, $51B
+TREND: BULLISH
+MISMATCH: NONE
+---
+Caption: "Borrowing demand is rising again across DeFi"
+LABELS: NONE
+TREND: BEARISH
+MISMATCH: Chart shows borrow amounts collapsed near historical lows, contradicting the caption's "rising" claim.
+---
+
+Now analyze the provided chart:"""
+
+    async def _extract_chart_analysis(
+        self, message, channel_name: str, caption: str
+    ) -> str:
+        """Download the photo in message and run Gemini Flash VLM analysis.
+
+        Gate 1 (free): caption keyword check — skips VLM for non-BTC/ETH content.
+        Gate 2: image size sanity check.
+        Prompt: few-shot examples teach Flash the MISMATCH detection pattern.
+        Returns a compact pipe-delimited string for DB storage, or "" on skip/failure.
+        """
+        try:
+            if not getattr(message, 'photo', None):
+                return ""
+
+            # Gate 1: skip VLM if caption is substantive but clearly off-topic
+            if len(caption) > 30:
+                caption_lower = caption.lower()
+                if not any(kw in caption_lower for kw in self._SIGNAL_KEYWORDS):
+                    logger.debug(
+                        f"Chart VLM skipped — no BTC/ETH keywords in caption "
+                        f"[{channel_name} msg={message.id}]"
+                    )
+                    return ""
+
+            # Gate 2: download in-memory only, no disk I/O
+            image_bytes = await self.client.download_media(message.photo, file=bytes)
+            if not image_bytes or len(image_bytes) < 2000:
+                return ""
+
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
+            caption_snippet = (caption[:400] if caption else "none").replace("{", "(").replace("}", ")")
+            user_message = self._VLM_USER_TEMPLATE.format(
+                channel=channel_name,
+                caption=caption_snippet,
+            )
+
+            from agents.claude_client import claude_client
+            # Run blocking VLM call in thread pool to avoid blocking Telethon event loop
+            result = await asyncio.to_thread(
+                claude_client.generate_response,
+                system_prompt=self._VLM_SYSTEM_PROMPT,
+                user_message=user_message,
+                max_tokens=120,
+                temperature=0.0,
+                chart_image_b64=image_b64,
+                role="vlm_telegram_chart",
+            )
+
+            if not result or "TREND:" not in result:
+                return ""
+
+            # Extract only the three expected fields — discard any "Note:", commentary, etc.
+            field_lines = [
+                ln.strip()
+                for ln in result.strip().splitlines()
+                if ln.strip().startswith(("LABELS:", "TREND:", "MISMATCH:"))
+            ]
+            if len(field_lines) < 2:
+                return ""
+
+            compact = " | ".join(field_lines)
+            logger.debug(f"Chart VLM [{channel_name}]: {compact}")
+            return compact
+
+        except Exception as e:
+            logger.warning(f"Chart VLM skipped ({channel_name} msg={message.id}): {e}")
+            return ""
+
     def _get_channel_max_message_id(self, channel_name: str) -> int:
         """Query DB for the latest message_id for a channel. Returns 0 if none found."""
         try:
@@ -294,20 +412,37 @@ class TelegramCollector:
                             if count % 100 == 0:
                                 print(f"\r  [{channel_name}] Downloaded: {count:,} new messages...", end="", flush=True)
 
+                            # ── Text content ──
+                            text_content = ""
                             if message.message:
-                                cleaned_text = clean_telegram_text(message.message)
-                                # Skip messages that are completely empty after sanitization
-                                if not cleaned_text:
-                                    continue
-                                messages.append({
-                                    'channel': channel_name,
-                                    'message_id': message.id,
-                                    'text': cleaned_text[:5000],
-                                    'views': message.views or 0,
-                                    'forwards': message.forwards or 0,
-                                    'timestamp': message.date.isoformat(),
-                                    'created_at': datetime.now(timezone.utc).isoformat()
-                                })
+                                cleaned = clean_telegram_text(message.message)
+                                if cleaned:
+                                    text_content = cleaned
+
+                            # ── Chart VLM (visual channels only, photo messages only) ──
+                            if channel_name in VISUAL_CHANNELS and getattr(message, 'photo', None):
+                                chart_analysis = await self._extract_chart_analysis(
+                                    message, channel_name, caption=text_content
+                                )
+                                if chart_analysis:
+                                    text_content = (
+                                        f"{text_content}\n[CHART] {chart_analysis}"
+                                        if text_content else f"[CHART] {chart_analysis}"
+                                    )
+
+                            # Skip if no usable content at all
+                            if not text_content:
+                                continue
+
+                            messages.append({
+                                'channel': channel_name,
+                                'message_id': message.id,
+                                'text': text_content[:5000],
+                                'views': message.views or 0,
+                                'forwards': message.forwards or 0,
+                                'timestamp': message.date.isoformat(),
+                                'created_at': datetime.now(timezone.utc).isoformat()
+                            })
 
                             # Save every 2000 messages to prevent OOM
                             if len(messages) >= 2000:

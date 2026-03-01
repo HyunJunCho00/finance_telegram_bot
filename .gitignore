@@ -51,6 +51,7 @@ old_backup
 *.tar.gz
 
 # Tests and Temporary Scripts
+test/
 test*
 AI_test.py
 ARCHITECTURE_V8_FINAL.md

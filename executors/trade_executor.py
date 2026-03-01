@@ -63,16 +63,28 @@ class TradeExecutor:
                 
             price = self._get_reference_price(symbol, exchange=target_exchange)
             if price <= 0: return {"success": False, "error": "Could not fetch price"}
-            
+
             # V8 Multi-Exchange Wallet Balances
             tp_price = float(final_decision.get("take_profit", 0))
             sl_price = float(final_decision.get("stop_loss", 0))
 
+            # [BUG-FIX] 중복 포지션 방지: 동일 symbol+exchange에 오픈 포지션이 있으면 스킵
+            if settings.PAPER_TRADING_MODE:
+                from executors.paper_exchange import paper_engine
+                open_pos = paper_engine.get_open_positions()
+                open_keys = {(p['symbol'], p['exchange']) for p in open_pos}
+                exchanges_to_check = ['binance', 'upbit'] if target_exchange == 'split' else [target_exchange]
+                for ex in exchanges_to_check:
+                    if (symbol, ex) in open_keys:
+                        logger.info(f"Skipping {direction} {symbol} on {ex}: position already open")
+                        return {"success": False, "note": f"Position already open for {symbol} on {ex.upper()}"}
+
             if target_exchange == 'split':
                 alloc_pct = allocation_pct / 100.0
                 binance_notional = (settings.BINANCE_PAPER_BALANCE_USD * alloc_pct * leverage) * 0.5
-                # [FIX HIGH-8] Upbit is spot-only — no leverage
-                upbit_notional = (settings.UPBIT_PAPER_BALANCE_KRW * alloc_pct * 1) * 0.5
+                # [BUG-FIX] UPBIT_PAPER_BALANCE_USD 사용 (KRW → USD 단위 통일)
+                # 이전: UPBIT_PAPER_BALANCE_KRW → amount_usd로 전달 → coin_size 1,375배 부풀림
+                upbit_notional = (settings.UPBIT_PAPER_BALANCE_USD * alloc_pct * 1) * 0.5
                 
                 intent_b = state_manager.add_intent(
                     symbol=symbol, direction=direction, style=exec_style,
@@ -93,7 +105,8 @@ class TradeExecutor:
             else:
                 # Upbit spot: force leverage=1
                 lev_for_exchange = 1 if target_exchange == 'upbit' else leverage
-                wallet_balance = settings.BINANCE_PAPER_BALANCE_USD if target_exchange == "binance" else settings.UPBIT_PAPER_BALANCE_KRW
+                # [BUG-FIX] UPBIT도 USD 단위 잔액 사용 (KRW 혼용 제거)
+                wallet_balance = settings.BINANCE_PAPER_BALANCE_USD if target_exchange == "binance" else settings.UPBIT_PAPER_BALANCE_USD
                 target_notional = wallet_balance * (allocation_pct / 100.0) * lev_for_exchange
                 
                 # V5: Register Intent with Local State Manager instead of immediate naive execution

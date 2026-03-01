@@ -85,6 +85,8 @@ class AIClient:
             return settings.MODEL_RAG_EXTRACTION, settings.MAX_INPUT_CHARS_RAG_EXTRACTION
         if role == "vlm_geometric":
             return settings.MODEL_VLM_GEOMETRIC, settings.MAX_INPUT_CHARS_MACRO
+        if role == "vlm_telegram_chart":
+            return settings.MODEL_VLM_TELEGRAM_CHART, settings.MAX_INPUT_CHARS_VLM_TELEGRAM_CHART
         return self.default_model_id, settings.MAX_INPUT_CHARS_LIQUIDITY
 
     def _trim_input(self, text: str, max_chars: int) -> str:

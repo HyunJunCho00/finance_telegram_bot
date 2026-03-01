@@ -1763,28 +1763,46 @@ Rules:
             
             logger.info(f"Triangulating claim: ({source}) --[{rel_type}]--> ({target})")
             
+            # [FIX] Define search parameters
+            entity = f"{source} and {target}"
+            context = f"Relationship: {rel_type} | Claim: {desc}"
+            
             # Use Perplexity targeted search to verify
-            query_entity = f"{source} and {target}"
-            context = f"Claim: {source} {rel_type} {target}. Description: {desc}. Is there recent news confirming this?"
+            # [Optimized Search] Determine importance for Tavily Credit saving
+            priority_keywords = ["ETF", "SEC", "FED", "HACK", "LISTING", "APPROVAL", "COURT", "LAWSUIT", "HACK", "EXPLOIT"]
+            is_high_priority = any(k in (source + target + desc).upper() for k in priority_keywords)
+            
+            # Major coins also trigger advanced
+            major_coins = ["BTC", "ETH", "SOL", "BNB", "XRP"]
+            is_major_coin = any(c in (source + target).upper() for c in major_coins)
+            
+            search_depth = "advanced" if (is_high_priority or is_major_coin) else "basic"
             
             try:
                 result = perplexity_collector.search_targeted(
-                    entity=query_entity,
+                    entity=entity,
                     entity_type="narrative",
-                    context=context
+                    context=context,
+                    search_depth=search_depth
                 )
                 
-                # If Perplexity finds key facts corroborating the entity context
-                if result.get("status") == "ok" and len(result.get("key_facts", [])) > 0:
-                    logger.info(f"Truth Engine: Triangulation SUCCEEDED for ({source})-({target}). Moving to PROBABLE.")
+                # [ENHANCED] Use trust_score for verification
+                trust_score = result.get("trust_score", 0)
+                fact_count = len(result.get("key_facts", []))
+                
+                # If trust score is high (80+) and we have at least 1 fact
+                if result.get("status") == "ok" and trust_score >= 80 and fact_count > 0:
+                    logger.info(f"Truth Engine: Triangulation SUCCEEDED (Trust {trust_score}%) for ({source})-({target}). Moving to PROBABLE.")
                     if hasattr(self.graph, "update_relationship_status"):
                         self.graph.update_relationship_status(
                             source=source, target=target, rel_type=rel_type,
                             status="PROBABLE", weight_boost=2.0
                         )
                     verified_count += 1
+                elif trust_score >= 50:
+                    logger.info(f"Truth Engine: Triangulation WEAK (Trust {trust_score}%) for ({source})-({target}). Keeping as CORROBORATED.")
                 else:
-                    logger.info(f"Truth Engine: Triangulation FAILED for ({source})-({target}). Keeping as CORROBORATED.")
+                    logger.info(f"Truth Engine: Triangulation FAILED (Trust {trust_score}%) for ({source})-({target}). Sources might be weak.")
             except Exception as e:
                 logger.error(f"Truth Engine: Triangulation search error: {e}")
                 

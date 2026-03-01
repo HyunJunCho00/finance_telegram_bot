@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     PERPLEXITY_API_KEY: str = ""
     PERPLEXITY_MODEL_NARRATIVE: str = "sonar-pro"
     PERPLEXITY_MODEL_TARGETED: str = "sonar"
+    TAVILY_API_KEY: str = ""
     TRIANGULATION_MAX_ATTEMPTS: int = 2
 
     # FRED API for macro regime data
@@ -116,6 +117,7 @@ class Settings(BaseSettings):
     # Hardcoded by User Request for Retail Scale limits
     BINANCE_PAPER_BALANCE_USD: float = 2000.0
     UPBIT_PAPER_BALANCE_KRW: float = 2000000.0
+    UPBIT_PAPER_BALANCE_USD: float = 1500.0   # ≈ 2,000,000 KRW; paper engine은 USD 단위로 통일
     MAX_LEVERAGE: int = 3
     
     COINBASE_API_KEY: str = ""
@@ -143,6 +145,8 @@ class Settings(BaseSettings):
     # 2. Vision / Multimodal Geometry
     # Using gemini-3.1-pro-preview (Thinking Level: HIGH)
     MODEL_VLM_GEOMETRIC: str = "gemini-3.1-pro-preview"
+    # 2b. Telegram chart analysis — Flash is sufficient (label reading + trend direction only)
+    MODEL_VLM_TELEGRAM_CHART: str = "gemini-3-flash-preview"
     
     # 3. World Knowledge / Macro Economy
     # gemini-3-flash-preview: fast, cheap, sufficient for macro text context
@@ -164,6 +168,7 @@ class Settings(BaseSettings):
     MAX_INPUT_CHARS_JUDGE: int = 25000
     MAX_INPUT_CHARS_SELF_CORRECTION: int = 10000
     MAX_INPUT_CHARS_RAG_EXTRACTION: int = 5000
+    MAX_INPUT_CHARS_VLM_TELEGRAM_CHART: int = 1000  # caption only, short
 
     # ===== Trading Mode =====
     # "swing"       = multi-day (days~2weeks), 4h analysis cycle
@@ -189,9 +194,9 @@ class Settings(BaseSettings):
     POSITION_CANDLE_LIMIT: int = 60000
 
     # ===== Analysis Intervals per Mode =====
-    # SWING: every 4 hours
+    # SWING: every 8 hours
     # POSITION: every 24 hours (once daily at 09:00 KST)
-    SWING_INTERVAL_HOURS: int = 4
+    SWING_INTERVAL_HOURS: int = 8
     POSITION_INTERVAL_HOURS: int = 24
 
     # ===== Data Retention (days) =====
@@ -202,6 +207,15 @@ class Settings(BaseSettings):
     RETENTION_REPORTS_DAYS: int = 365  # AI 리포트 영구에 가깝게
     RETENTION_CVD_DAYS: int = 30
     RETENTION_GRAPH_DAYS: int = 0  # 0 = 영구 보존 (Neo4j Aura free: 200K nodes)
+    
+    # ===== Source Credibility =====
+    TRUSTED_NEWS_DOMAINS: List[str] = [
+        "bloomberg.com", "reuters.com", "wsj.com", "ft.com", "cnbc.com",
+        "coindesk.com", "cointelegraph.com", "theblock.co", "decrypt.co",
+        "dlnews.com", "blockworks.co", "sec.gov", "cftc.gov", "federalreserve.gov",
+        "glassnode.com", "cryptoquant.com", "hankyung.com", "bloomingbit.io",
+        "mk.co.kr", "digitalasset.works"
+    ]
 
     @property
     def neo4j_uri(self) -> str:
@@ -323,6 +337,7 @@ class SecretManager:
             "TELEGRAM_BOT_TOKEN",
             "TELEGRAM_CHAT_ID",
             "PERPLEXITY_API_KEY",
+            "TAVILY_API_KEY",
             "FRED_API_KEY",
             "NEO4J_URI",
             "NEO4J_USER",

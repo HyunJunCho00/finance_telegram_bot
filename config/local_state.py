@@ -55,58 +55,24 @@ def init_db():
     except Exception:
         pass
 
-    # V7: Hardened Paper Trading Engine
+    # V12: Interactive Control
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS paper_wallets (
-            exchange   TEXT PRIMARY KEY,
-            balance    REAL NOT NULL,
-            updated_at TEXT NOT NULL
+        CREATE TABLE IF NOT EXISTS system_config (
+            key   TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         )
     ''')
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS paper_positions (
-            position_id TEXT PRIMARY KEY,
-            exchange    TEXT NOT NULL,
-            symbol      TEXT NOT NULL,
-            side        TEXT NOT NULL,
-            size        REAL NOT NULL,
-            entry_price REAL NOT NULL,
-            leverage    REAL NOT NULL,
-            is_open     BOOLEAN DEFAULT 1,
-            created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL,
-            tp_price    REAL DEFAULT 0,
-            sl_price    REAL DEFAULT 0
-        )
-    ''')
-
-    # [FIX CRITICAL-2] paper_positions에 tp/sl 컬럼 추가 (기존 DB 마이그레이션)
-    for col, col_def in [
-        ("tp_price", "REAL DEFAULT 0"),
-        ("sl_price", "REAL DEFAULT 0"),
-    ]:
-        try:
-            conn.execute(f"ALTER TABLE paper_positions ADD COLUMN {col} {col_def}")
-        except Exception:
-            pass
-
-    # Initialize default V8 wallets if not exists
-    now = datetime.now(timezone.utc).isoformat()
+    # Default to AI analysis ON if not set
     cursor.execute(
-        "INSERT OR IGNORE INTO paper_wallets (exchange, balance, updated_at) VALUES ('binance', 2000.0, ?)",
-        (now,)
-    )
-    cursor.execute(
-        "INSERT OR IGNORE INTO paper_wallets (exchange, balance, updated_at) VALUES ('upbit', 2000000.0, ?)",
-        (now,)
+        "INSERT OR IGNORE INTO system_config (key, value) VALUES ('enable_ai_analysis', 'true')"
     )
     conn.commit()
     conn.close()
 
 
 class LocalStateManager:
-    """Manages fast, temporary state for the Execution Desk."""
+    """Manages fast, temporary state for the Execution Desk and System Config."""
 
     def __init__(self):
         init_db()
@@ -115,6 +81,28 @@ class LocalStateManager:
         self.conn.execute("PRAGMA journal_mode=WAL;")
         # [FIX HIGH-7] 멀티스레드 동시 쓰기 방지 락
         self._lock = threading.Lock()
+
+    def is_analysis_enabled(self) -> bool:
+        """Check if AI analysis/reporting is currently enabled."""
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT value FROM system_config WHERE key = 'enable_ai_analysis'")
+            row = cursor.fetchone()
+            if row:
+                return row['value'].lower() == 'true'
+            return True
+
+    def set_analysis_enabled(self, enabled: bool):
+        """Enable or disable AI analysis/reporting."""
+        val = 'true' if enabled else 'false'
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO system_config (key, value) VALUES ('enable_ai_analysis', ?)",
+                (val,)
+            )
+            self.conn.commit()
+        logger.info(f"System Config: AI Analysis {'ENABLED' if enabled else 'DISABLED'}")
 
     def add_intent(
         self,

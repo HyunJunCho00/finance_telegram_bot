@@ -76,9 +76,11 @@ class DuneCollector:
         if not ended:
             return True
         try:
-            ended_at = datetime.fromisoformat(ended.replace("Z", "+00:00"))
+            # Handle both Z and +00:00 formats
+            dt_str = ended.replace("Z", "+00:00")
+            ended_at = datetime.fromisoformat(dt_str)
             return (datetime.now(timezone.utc) - ended_at) > timedelta(hours=STALE_HOURS)
-        except ValueError:
+        except (ValueError, TypeError):
             return True
 
     def _run_execution_cycle(self, query_id: int, limit: int = 100) -> dict[str, Any]:
@@ -126,11 +128,18 @@ class DuneCollector:
 
 
     def _parse_priority_query_ids(self) -> list[int]:
-        raw = (settings.DUNE_PRIORITY_QUERY_IDS or "").strip()
+        raw = settings.DUNE_PRIORITY_QUERY_IDS
         if not raw:
             return []
+        if isinstance(raw, list):
+            return [int(x) for x in raw]
+            
+        # If it's a string (fallback)
+        raw_str = str(raw).strip()
+        if not raw_str:
+            return []
         out: list[int] = []
-        for token in raw.split(','):
+        for token in raw_str.split(','):
             token = token.strip()
             if not token:
                 continue
@@ -251,7 +260,7 @@ class DuneCollector:
             if not self._global_guard_allows_run():
                 stats["budget_blocked"] += 1
                 logger.info(
-                    "Dune budget guard: skipped (global min interval not reached)"
+                    "Dune budget guard: skipped entire run (global min interval not reached)"
                 )
                 return stats
 
@@ -259,7 +268,7 @@ class DuneCollector:
             if daily_runs >= max(1, int(settings.DUNE_MAX_QUERY_RUNS_PER_DAY)):
                 stats["budget_blocked"] += 1
                 logger.info(
-                    "Dune budget guard: skipped (daily run budget reached)"
+                    "Dune budget guard: skipped entire run (daily run budget reached)"
                 )
                 return stats
 
@@ -271,10 +280,13 @@ class DuneCollector:
 
             if not force and not self._should_run_now(query_cfg):
                 stats["skipped"] += 1
+                logger.debug(f"Dune skip: query_id={query_cfg.query_id} (cadence {query_cfg.cadence_minutes}m not reached)")
                 continue
 
+            # Limit number of ACTUAL queries (API calls) per run to save credits
             if settings.DUNE_BUDGET_GUARD and not force and stats["ran"] >= max_queries_per_run:
                 stats["skipped"] += 1
+                logger.debug(f"Dune skip: query_id={query_cfg.query_id} (max_queries_per_run limit {max_queries_per_run} reached)")
                 continue
 
             try:

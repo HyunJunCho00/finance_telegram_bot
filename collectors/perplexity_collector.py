@@ -19,6 +19,8 @@ from config.database import db
 from datetime import datetime, timezone, timedelta
 from loguru import logger
 import json
+import os
+from collectors.tavily_collector import tavily_collector
 
 
 class PerplexityCollector:
@@ -67,6 +69,7 @@ class PerplexityCollector:
             "max_tokens": max_tokens,
             "temperature": 0.1,
             "return_citations": True,
+            "response_format": {"type": "json_object"},
         }
         
         try:
@@ -193,23 +196,24 @@ class PerplexityCollector:
 
         lines += [
             "",
-            f"Search for events from {date_7d_ago} to {date_today} that directly affect {coin_name} price.",
-            "Prioritize the last 48 hours. Every item must include its exact date.",
+            f"Search for events in the LAST 8 HOURS that directly affect {coin_name} price.",
+            "Prioritize price action, news, and institutional flows. Every item must include its exact date/time.",
             "",
             "Return this exact JSON:",
             "{",
-            f'  "summary": "2-3 sentences: what specifically happened to {coin_name} in the last 7 days that matters for a swing trade",',
+            f'  "summary": "2-3 sentences: what specifically happened to {coin_name} in the last 8 hours that matters for a swing trade",',
             '  "sentiment": "bullish" or "bearish" or "neutral",',
-            '  "bullish_factors": ["YYYY-MM-DD: catalyst that supports buying — expected price impact"],',
-            '  "bearish_factors": ["YYYY-MM-DD: risk or catalyst that supports selling or staying flat"],',
-            '  "upcoming_events": ["YYYY-MM-DD: scheduled macro/crypto event in next 7 days that could move price"],',
-            f'  "reasoning": "1 sentence: the single highest-probability near-term driver for the next 1-7 days",',
+            '  "bullish_factors": ["YYYY-MM-DD HH:mm: catalyst that supports buying"],',
+            '  "bearish_factors": ["YYYY-MM-DD HH:mm: risk or catalyst that supports selling"],',
+            '  "upcoming_events": ["YYYY-MM-DD: scheduled macro/crypto event in next 7 days"],',
+            f'  "reasoning": "1 sentence: the single highest-probability near-term driver for the next 8-24 hours",',
             f'  "macro_context": "how rates/DXY/risk appetite is interacting with {coin_name} right now"',
             "}",
             "",
             "Search priorities (in order):",
-            "1. Upcoming macro events (next 7 days): Fed speakers, CPI, NFP, futures/options expiry dates",
-            "2. BTC ETF net flows (last 7 days): trend from BlackRock IBIT, Fidelity FBTC, ARK 21Shares",
+            f"1. HIGH AUTHORITY VERIFICATION: Prioritize reports from {', '.join(settings.TRUSTED_NEWS_DOMAINS[:8])}.",
+            "2. Upcoming macro events (next 7 days): Fed speakers, CPI, NFP, futures/options expiry dates",
+            "3. BTC ETF net flows (last 7 days): trend from BlackRock IBIT, Fidelity FBTC, ARK 21Shares",
             f"3. Exchange flows: {coin_name} inflows to exchanges (sell pressure) or outflows (accumulation)",
             "4. Funding rate extremes: whether current positioning creates liquidation cascade risk",
             "5. Key price levels: specific support/resistance levels cited by analysts with precise prices",
@@ -308,11 +312,12 @@ class PerplexityCollector:
         if not is_emergency:
             try:
                 # [FIX CRITICAL-BUDGET] Retrieve last successful narrative from DB
-                last_n = db.get_latest_narrative(symbol)
+                last_n = db.get_latest_narrative_data(symbol)
                 if last_n:
                     last_ts = datetime.fromisoformat(last_n['timestamp'].replace('Z', '+00:00'))
-                    if datetime.now(timezone.utc) - last_ts < timedelta(hours=12):
-                        logger.info(f"Perplexity [{symbol}]: Within 12h window, using cached narrative.")
+                    cache_hours = max(4, settings.analysis_interval_hours - 1)
+                    if datetime.now(timezone.utc) - last_ts < timedelta(hours=cache_hours):
+                        logger.info(f"Perplexity [{symbol}]: Within {cache_hours}h window, using cached narrative.")
                         # Ensure we return a properly formatted dict
                         cached_result = last_n.get('raw_payload', {})
                         if not cached_result:
@@ -360,33 +365,60 @@ class PerplexityCollector:
         self.persist_narrative(result, symbol)
         return result
 
+    def _check_tavily_budget(self, daily_limit: int = 30) -> bool:
+        """Check if we have remaining daily budget for Tavily."""
+        usage_file = "data/tavily_usage.json"
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        
+        usage = {"date": today, "count": 0}
+        if os.path.exists(usage_file):
+            try:
+                with open(usage_file, "r") as f:
+                    usage = json.load(f)
+            except Exception:
+                pass
+        
+        if usage.get("date") != today:
+            usage = {"date": today, "count": 0}
+            
+        if usage.get("count", 0) >= daily_limit:
+            return False
+            
+        # Increment and save
+        usage["count"] = usage.get("count", 0) + 1
+        os.makedirs(os.path.dirname(usage_file), exist_ok=True)
+        with open(usage_file, "w") as f:
+            json.dump(usage, f)
+        return True
+
     def search_targeted(
         self,
         entity: str,
         entity_type: str = "institution",
         context: str = "",
+        force_perplexity: bool = False,
+        search_depth: str = "basic"
     ) -> Dict:
-        """Graph-triggered targeted search for BTC/ETH market signal context.
-
-        Called when the graph analyzer detects significant entity spikes or
-        cross-channel corroboration that warrants deeper investigation.
-
-        All searches are framed through the lens of BTC/ETH price impact.
-
-        Args:
-            entity:      Entity detected in the graph
-                         (e.g., "BlackRock", "Federal Reserve", "BTC ETF flows")
-            entity_type: BTC/ETH-centric signal type — one of:
-                         "institution"  → fund/corporate activity affecting BTC/ETH
-                         "regulator"    → policy action affecting crypto markets
-                         "exchange"     → exchange-specific BTC/ETH flow data
-                         "macro_event"  → macro event impact on crypto risk appetite
-                         "narrative"    → market narrative affecting BTC/ETH thesis
-            context:     Additional context from graph signals (optional)
-
-        Returns:
-            {"entity", "summary", "btc_eth_impact", "key_facts", "market_relevance", "sources", "status"}
+        """Graph-triggered targeted search.
+        
+        Strategy: Use Tavily as default (routine triangulation) with configurable depth.
+        Budget Guard: Max 30 Tavily searches per day to stay within free tier.
         """
+        # [Hybrid Search] Use Tavily if available, not forced, and within budget
+        if settings.TAVILY_API_KEY and not force_perplexity:
+            if self._check_tavily_budget(daily_limit=30):
+                logger.info(f"Using Tavily ({search_depth}) for targeted search: [{entity}]")
+                try:
+                    result = tavily_collector.search_targeted_compat(entity, context, search_depth=search_depth)
+                    if result.get("status") == "ok":
+                        return result
+                    logger.warning(f"Tavily search failed for [{entity}], falling back to Perplexity")
+                except Exception as e:
+                    logger.error(f"Tavily search error for [{entity}]: {e}")
+            else:
+                logger.info(f"Tavily daily budget reached, falling back to Perplexity for [{entity}]")
+
+        # Original Perplexity Logic (as fallback or high-quality)
         if not self.api_key:
             logger.warning("PERPLEXITY_API_KEY not set, skipping targeted search")
             return self._empty_targeted_result(entity)
@@ -398,27 +430,32 @@ class PerplexityCollector:
         type_focus = {
             "institution": (
                 f"Recent activity of {entity} related to Bitcoin or Ethereum: "
-                "purchases, custody announcements, ETF filings, fund allocation, public statements"
+                "purchases, custody announcements, ETF filings, fund allocation, public statements. "
+                f"Verify using {', '.join(settings.TRUSTED_NEWS_DOMAINS[:5])}."
             ),
             "regulator": (
                 f"Recent actions by {entity} affecting Bitcoin, Ethereum, or crypto markets: "
-                "rulings, enforcement actions, statements, pending legislation"
+                "rulings, enforcement actions, statements, pending legislation. "
+                "Prioritize official government domains (.gov) and tier-1 financial media."
             ),
             "exchange": (
                 f"Recent {entity} exchange data affecting BTC and ETH: "
-                "reserve changes, significant inflow/outflow, unusual volume, regulatory issues"
+                "reserve changes, significant inflow/outflow, unusual volume, regulatory issues. "
+                "Cross-reference with on-chain data providers if possible."
             ),
             "macro_event": (
                 f"Details of '{entity}' and its expected impact on Bitcoin and Ethereum "
-                "as risk assets: market reaction, rate expectations, dollar impact"
+                "as risk assets: market reaction, rate expectations, dollar impact. "
+                "Prioritize Bloomberg, Reuters, and FT for macro context."
             ),
             "narrative": (
                 f"Current strength and evidence of '{entity}' as a crypto market narrative: "
-                "capital inflows, institutional backing, BTC/ETH price correlation"
+                "capital inflows, institutional backing, BTC/ETH price correlation. "
+                f"Check if {', '.join(settings.TRUSTED_NEWS_DOMAINS[5:10])} are reporting this."
             ),
         }.get(
             entity_type,
-            f"Recent developments related to {entity} and its impact on Bitcoin or Ethereum price",
+            f"Recent developments related to {entity} and its impact on Bitcoin or Ethereum price. Prioritize high-authority financial news.",
         )
 
         context_line = f"\nAdditional context from market signals: {context}" if context else ""
@@ -432,6 +469,7 @@ Focus ONLY on implications for Bitcoin (BTC) or Ethereum (ETH) price and positio
 Return this exact JSON:
 {{
   "summary": "2-3 sentences: what is {entity} and what has specifically happened recently",
+  "confidence_score": 0-100,
   "btc_eth_impact": "1-2 sentences: how does this directly affect BTC or ETH price, positioning, or investment thesis",
   "key_facts": [
     "YYYY-MM-DD: specific fact with date",
@@ -444,14 +482,30 @@ Return this exact JSON:
 Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that explicitly in btc_eth_impact."""
 
         try:
-            # Targeted search always uses the cheaper model
             content, citations = self._call_api(prompt, max_tokens=600, model=settings.PERPLEXITY_MODEL_TARGETED)
             result = self._parse_targeted_response(content, entity)
             if citations:
                 result["sources"] = citations[:5]
+            
+            # Calculate trust_score: Hybrid of AI confidence and source authority
+            sources = result.get("sources", [])
+            trusted_count = 0
+            for s in sources:
+                if any(domain in s for domain in settings.TRUSTED_NEWS_DOMAINS):
+                    trusted_count += 1
+            
+            ai_conf = result.get("confidence_score", 50)
+            try:
+                ai_conf = int(ai_conf)
+            except:
+                ai_conf = 50
+            
+            source_score = min(60, trusted_count * 15)
+            result["trust_score"] = int((ai_conf * 0.4) + source_score)
+
             logger.info(
                 f"Perplexity targeted [{entity}/{entity_type}]: "
-                f"{len(result.get('key_facts', []))} facts found"
+                f"Trust {result['trust_score']}% | {len(result.get('key_facts', []))} facts"
             )
             return result
 
@@ -489,9 +543,10 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
             "entity": entity,
             "status": "unavailable",
             "summary": f"No information found for {entity}.",
+            "confidence_score": 0,
             "btc_eth_impact": "",
             "key_facts": [],
-            "market_relevance": "",
+            "market_relevance": "low",
             "sources": [],
         }
 

@@ -105,12 +105,12 @@ _CHAT_TOOLS = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
-        "name": "switch_trading_mode",
-        "description": "트레이딩 모드 전환 (swing 또는 position)",
+        "name": "toggle_ai_analysis",
+        "description": "AI 분석 및 리포트 생성을 켜거나 끕니다 (비용 절약용)",
         "input_schema": {
             "type": "object",
-            "properties": {"mode": {"type": "string", "description": "'swing' 또는 'position'"}},
-            "required": ["mode"],
+            "properties": {"enabled": {"type": "boolean", "description": "True: 켜기, False: 끄기"}},
+            "required": ["enabled"],
         },
     },
     {
@@ -174,20 +174,21 @@ class TradingBot:
             f"Mode: {mode}\n"
             f"Symbols: BTC, ETH\n\n"
             f"Commands:\n"
-            f"/status - Current position\n"
-            f"/analyze BTC - Immediate analysis\n"
-            f"/mode swing|position - Switch mode\n"
-            f"/report - Latest report\n"
-            f"/help - Show commands"
+            f"/status  - Current position\n"
+            f"/analyze - BTC/ETH analysis\n"
+            f"/report_off - Pause AI reports (Save cost)\n"
+            f"/report_on  - Resume AI reports\n"
+            f"/mode    - Switch mode\n"
+            f"/help    - Show commands"
         )
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "/status - Current positions & latest decision\n"
             "/analyze BTC|ETH - Run immediate analysis\n"
+            "/report_off - PAUSE automated reports & search (Save $)\n"
+            "/report_on  - RESUME automated reports & search\n"
             "/mode - Show current mode\n"
-            "/mode swing - Switch to swing (multi-day)\n"
-            "/mode position - Switch to position (long-term)\n"
             "/report - Resend latest report\n"
             "/help - Show this message"
         )
@@ -210,9 +211,12 @@ class TradingBot:
                 from executors.trade_executor import trade_executor
                 positions = paper_engine.get_open_positions()
                 
-                total_unrealized_pnl = 0.0
-                total_initial_margin = 0.0
-                
+                # [BUG-FIX] 거래소별 마진/PnL 분리 추적 (이전: 모두 합산해 Binance Equity에 표시)
+                binance_unrealized = 0.0
+                binance_margin = 0.0
+                upbit_unrealized = 0.0
+                upbit_margin = 0.0
+
                 lines.append("📌 <b>Active Positions</b>")
                 if not positions:
                     lines.append("<i>- No open positions</i>")
@@ -223,37 +227,39 @@ class TradingBot:
                         entry = pos['entry_price']
                         size = pos['size']
                         leverage = pos['leverage']
-                        
+                        exchange = pos['exchange']
+
                         # Get current price for PnL
                         current_price = trade_executor._get_reference_price(symbol)
                         pnl = 0.0
                         if current_price > 0:
                             pnl = (current_price - entry) * size if side == "LONG" else (entry - current_price) * size
-                        
-                        total_unrealized_pnl += pnl
+
                         initial_margin = (size * entry) / leverage
-                        total_initial_margin += initial_margin
-                        
+                        if exchange == 'binance':
+                            binance_unrealized += pnl
+                            binance_margin += initial_margin
+                        else:
+                            upbit_unrealized += pnl
+                            upbit_margin += initial_margin
+
                         pnl_icon = "🟢" if pnl >= 0 else "🔴"
                         lines.append(
-                            f"• {pos['exchange'].upper()} | <b>{symbol}</b>: {side} {leverage}x\n"
+                            f"• {exchange.upper()} | <b>{symbol}</b>: {side} {leverage}x\n"
                             f"  Entry: {entry:,.2f} | Now: {current_price:,.2f}\n"
                             f"  PnL: {pnl_icon} <b>${pnl:+.2f}</b>"
                         )
-                
-                # Wallet Balances & Equity
+
+                # Wallet Balances & Equity (거래소별 독립 계산)
                 lines.append("\n💰 <b>Mock Balances</b>")
                 for ex in ['binance', 'upbit']:
                     bal = paper_engine.get_wallet_balance(ex)
-                    unit = 'USD' if ex == 'binance' else 'KRW'
-                    
-                    if ex == 'binance':
-                        equity = bal + total_initial_margin + total_unrealized_pnl
-                        lines.append(f"• {ex.upper()} Balance: <code>${bal:,.2f}</code>")
-                        lines.append(f"• {ex.upper()} <b>Total Equity: ${equity:,.2f}</b>")
-                        lines.append(f"  (Margin: ${total_initial_margin:.2f} | UnPnL: ${total_unrealized_pnl:+.2f})")
-                    else:
-                        lines.append(f"• {ex.upper()}: {bal:,.2f} {unit}")
+                    ex_margin = binance_margin if ex == 'binance' else upbit_margin
+                    ex_unrealized = binance_unrealized if ex == 'binance' else upbit_unrealized
+                    equity = bal + ex_margin + ex_unrealized
+                    lines.append(f"• {ex.upper()} Balance: <code>${bal:,.2f}</code>")
+                    lines.append(f"• {ex.upper()} <b>Total Equity: ${equity:,.2f}</b>")
+                    lines.append(f"  (Margin: ${ex_margin:.2f} | UnPnL: ${ex_unrealized:+.2f})")
                 lines.append("")
 
             # 2. Strategy Analysis (Latest Reports)
@@ -361,6 +367,16 @@ class TradingBot:
             logger.error(f"Report command error: {e}")
             await update.message.reply_text(f"Error: {e}")
 
+    async def cmd_report_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        from config.local_state import state_manager
+        state_manager.set_analysis_enabled(True)
+        await update.message.reply_text("✅ <b>AI 리포트 및 분석이 활성화되었습니다.</b>\n이제 정기적으로 시장을 분석하고 속보를 검증합니다.", parse_mode='HTML')
+
+    async def cmd_report_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        from config.local_state import state_manager
+        state_manager.set_analysis_enabled(False)
+        await update.message.reply_text("🛑 <b>AI 리포트 및 분석이 중단되었습니다.</b>\n데이터 수집은 계속되지만, 고비용 AI 호출은 발생하지 않습니다.", parse_mode='HTML')
+
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle button clicks for deep analysis."""
         query = update.callback_query
@@ -436,6 +452,7 @@ class TradingBot:
                     "analysis_interval_hours": settings.analysis_interval_hours,
                 },
                 "switch_trading_mode":       lambda a: mcp_tools.switch_mode(a["mode"]),
+                "toggle_ai_analysis":        lambda a: (state_manager.set_analysis_enabled(a["enabled"]), {"status": f"AI 분석 {'활성화' if a['enabled'] else '비활성화'} 완료"})[1],
                 "get_feedback_history":      lambda a: mcp_tools.get_feedback_history(a.get("limit", 5)),
                 "query_knowledge_graph":     lambda a: mcp_tools.query_rag(a["query"], mode=a.get("mode", "hybrid")),
                 "search_narrative":          lambda a: mcp_tools.search_market_narrative(a["symbol"]),
@@ -561,6 +578,8 @@ class TradingBot:
         app.add_handler(CommandHandler("analyze", self.cmd_analyze))
         app.add_handler(CommandHandler("mode", self.cmd_mode))
         app.add_handler(CommandHandler("report", self.cmd_report))
+        app.add_handler(CommandHandler("report_on", self.cmd_report_on))
+        app.add_handler(CommandHandler("report_off", self.cmd_report_off))
         app.add_handler(CallbackQueryHandler(self.handle_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 
