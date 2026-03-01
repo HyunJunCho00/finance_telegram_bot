@@ -41,7 +41,6 @@ CHECKS = [
         "file": "executors/orchestrator.py",
         "needles": [
             "def run_scheduled_analysis",
-            "telegram_collector.run(hours=4)",
             "for symbol in self.symbols:",
             "self.run_analysis(symbol, is_emergency=False)",
         ],

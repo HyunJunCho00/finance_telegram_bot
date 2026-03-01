@@ -26,7 +26,6 @@ from config.settings import settings, TradingMode
 from processors.math_engine import math_engine
 from processors.chart_generator import chart_generator
 from processors.light_rag import light_rag
-from collectors.telegram_collector import telegram_collector
 from collectors.perplexity_collector import perplexity_collector
 from collectors.macro_collector import macro_collector
 from agents.liquidity_agent import liquidity_agent

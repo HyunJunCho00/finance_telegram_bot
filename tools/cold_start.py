@@ -391,8 +391,8 @@ class TelegramBulkLoader:
     """Load historical Telegram messages."""
 
     def load(self, days: int = 30) -> int:
-        """Use existing TelegramCollector with extended lookback."""
-        from collectors.telegram_collector import telegram_collector
+        """Use unified TelegramListener with extended lookback."""
+        from collectors.telegram_listener import telegram_listener
         import asyncio
 
         if days == 0:
@@ -405,16 +405,11 @@ class TelegramBulkLoader:
         try:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            messages = loop.run_until_complete(
-                telegram_collector.fetch_recent_messages(hours=hours)
-            )
+            from collectors.telegram_listener import _ensure_session_security
+            _ensure_session_security()
+            loop.run_until_complete(telegram_listener.run_backfill(hours=hours))
             loop.close()
-
-            if messages:
-                telegram_collector.save_to_database(messages)
-                logger.info(f"Saved {len(messages)} Telegram messages")
-                return len(messages)
-            return 0
+            return 1 # Simplified return
         except Exception as e:
             logger.error(f"Telegram bulk load error: {e}")
             return 0

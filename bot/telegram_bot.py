@@ -159,6 +159,15 @@ _CHAT_TOOLS = [
             "required": ["symbol"],
         },
     },
+    {
+        "name": "search_web",
+        "description": "Tavily API(저비용)를 사용한 일반 웹 검색. 최신 뉴스나 일반적인 정보 조색용.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "검색어"}},
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -457,6 +466,7 @@ class TradingBot:
                 "query_knowledge_graph":     lambda a: mcp_tools.query_rag(a["query"], mode=a.get("mode", "hybrid")),
                 "search_narrative":          lambda a: mcp_tools.search_market_narrative(a["symbol"]),
                 "get_chart_image":           lambda a: mcp_tools.get_chart_image(a["symbol"]),
+                "search_web":                lambda a: mcp_tools.search_web(a["query"]),
             }
 
             # _CHAT_TOOLS (Anthropic 포맷) → Gemini FunctionDeclaration 변환

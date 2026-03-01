@@ -365,8 +365,11 @@ class PerplexityCollector:
         self.persist_narrative(result, symbol)
         return result
 
-    def _check_tavily_budget(self, daily_limit: int = 30) -> bool:
-        """Check if we have remaining daily budget for Tavily."""
+    def _check_tavily_budget(self, daily_limit: int = 33) -> bool:
+        """Check if we have remaining daily budget for Tavily.
+        
+        [V12.2] Updated limit to 33/day (1000/month).
+        """
         usage_file = "data/tavily_usage.json"
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         
@@ -404,19 +407,21 @@ class PerplexityCollector:
         Strategy: Use Tavily as default (routine triangulation) with configurable depth.
         Budget Guard: Max 30 Tavily searches per day to stay within free tier.
         """
-        # [Hybrid Search] Use Tavily if available, not forced, and within budget
+        # [V12.2] Prioritize Tavily (budget: 33/day). Reserve Perplexity for Reports only.
         if settings.TAVILY_API_KEY and not force_perplexity:
-            if self._check_tavily_budget(daily_limit=30):
+            if self._check_tavily_budget(daily_limit=33):
                 logger.info(f"Using Tavily ({search_depth}) for targeted search: [{entity}]")
                 try:
                     result = tavily_collector.search_targeted_compat(entity, context, search_depth=search_depth)
                     if result.get("status") == "ok":
                         return result
-                    logger.warning(f"Tavily search failed for [{entity}], falling back to Perplexity")
+                    logger.warning(f"Tavily search failed for [{entity}], skipping Perplexity fallback to save cost.")
+                    return self._empty_targeted_result(entity)
                 except Exception as e:
                     logger.error(f"Tavily search error for [{entity}]: {e}")
             else:
-                logger.info(f"Tavily daily budget reached, falling back to Perplexity for [{entity}]")
+                logger.info(f"Tavily daily budget reached. Skipping Perplexity fallback for non-report search: [{entity}]")
+                return self._empty_targeted_result(entity)
 
         # Original Perplexity Logic (as fallback or high-quality)
         if not self.api_key:

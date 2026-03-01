@@ -114,7 +114,7 @@ class MCPTools:
             return {"error": str(e)}
 
     def search_market_narrative(self, symbol: str) -> Dict:
-        """Search market narrative via Perplexity API."""
+        """Search market narrative via Perplexity API. [Report Grade]"""
         try:
             from collectors.perplexity_collector import perplexity_collector
             coin = "BTC" if "BTC" in symbol.upper() else "ETH"
@@ -128,6 +128,28 @@ class MCPTools:
             }
         except Exception as e:
             logger.error(f"Perplexity search error: {e}")
+            return {"error": str(e)}
+
+    def search_web(self, query: str) -> Dict:
+        """Search the web for general information using Tavily (Low Cost)."""
+        try:
+            from collectors.tavily_collector import tavily_collector
+            result = tavily_collector.search(query, search_depth="basic", max_results=5)
+            if result.get("status") == "ok":
+                # Concise formatting for conversational AI
+                formatted = "\n".join([
+                    f"[{i+1}] {r.get('title', 'N/A')}: {r.get('content', '')[:200]}... ({r.get('url')})"
+                    for i, r in enumerate(result.get("results", []))
+                ])
+                return {
+                    "query": query,
+                    "results": formatted,
+                    "answer": result.get("answer", ""),
+                    "status": "ok"
+                }
+            return {"error": "Search failed"}
+        except Exception as e:
+            logger.error(f"Tavily web search error: {e}")
             return {"error": str(e)}
 
     def query_rag(self, query: str, mode: str = "hybrid") -> Dict:

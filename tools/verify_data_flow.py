@@ -16,7 +16,7 @@ CHECKS = [
     ("collectors/price_collector.py", ["def run(self)", "self.collect_all_prices()", "self.save_to_database(data)", "db.batch_insert_market_data", "db.batch_upsert_cvd_data"]),
     ("collectors/funding_collector.py", ["def run(self)", "self.collect_all_funding_data()", "self.save_to_database(data)", "db.upsert_funding_data"]),
     ("scheduler.py", ["def job_4hour_analysis", "orchestrator.run_scheduled_analysis()"]),
-    ("executors/orchestrator.py", ["def run_scheduled_analysis", "telegram_collector.run(hours=4)", "self.run_analysis(symbol, is_emergency=False)"]),
+    ("executors/orchestrator.py", ["def run_scheduled_analysis", "self.run_analysis(symbol, is_emergency=False)"]),
     ("executors/orchestrator.py", ["def node_generate_report", "report_generator.notify(report, chart_bytes=chart_bytes, mode=mode)"]),
     ("executors/report_generator.py", ["def send_telegram_notification", "await bot.send_photo(", "await bot.send_message("]),
 ]

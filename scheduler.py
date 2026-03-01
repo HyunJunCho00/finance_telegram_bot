@@ -136,13 +136,8 @@ def job_1hour_telegram():
     """Fetch and batch Telegram messages into LightRAG every 1 hour."""
     try:
         logger.info("Running 1-hour Telegram batching job")
-        # 1. Fetch raw messages directly via the collector
-        from collectors.telegram_collector import telegram_collector
-        telegram_collector.run(hours=1)
-        
-        # 2. Synthesize and ingest
-        from processors.telegram_batcher import telegram_batcher
-        telegram_batcher.process_and_ingest(lookback_hours=1)
+        # [V13.2] Redundant — Real-time listener handles this.
+        # Truth Engine: Triangulate corroborated claims via Perplexity (Web)
         
         # 3. Truth Engine: Triangulate corroborated claims via Perplexity (Web)
         # Process 10 candidates per hour to manage API costs
@@ -362,6 +357,19 @@ def main():
     bot_thread.start()
     logger.info("Telegram bot started in background thread.")
 
+    # [V13.1] Persistent Telegram Listener (Real-Time Alpha Ingestion)
+    def _run_telegram_listener():
+        try:
+            from collectors.telegram_listener import telegram_listener
+            import asyncio
+            asyncio.run(telegram_listener.start())
+        except Exception as e:
+            logger.error(f"Telegram listener crashed: {e}")
+
+    listener_thread = threading.Thread(target=_run_telegram_listener, name="telegram-listener", daemon=True)
+    listener_thread.start()
+    logger.info("Real-time Telegram Listener (Alpha V13.1) started.")
+
     # Main thread: keep alive + graceful shutdown
     try:
         import time
@@ -373,12 +381,18 @@ def main():
                 time.sleep(30)
                 bot_thread = threading.Thread(target=_run_telegram_bot, name="telegram-bot", daemon=True)
                 bot_thread.start()
+
+            if not listener_thread.is_alive():
+                logger.warning("Telegram listener thread died — restarting in 30s...")
+                time.sleep(30)
+                listener_thread = threading.Thread(target=_run_telegram_listener, name="telegram-listener", daemon=True)
+                listener_thread.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down...")
         # Upload Telegram session to Secret Manager before exit
         try:
-            from collectors.telegram_collector import upload_session_to_secret_manager
-            upload_session_to_secret_manager()
+            from collectors.telegram_listener import upload_session_to_cloud
+            upload_session_to_cloud()
         except Exception:
             pass
         try:
