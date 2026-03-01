@@ -111,7 +111,7 @@ class ReportGenerator:
                 val = reasoning.get(key)
                 if val:
                     safe_val = str(val).replace('<', '&lt;').replace('>', '&gt;')
-                    if len(safe_val) > 800: safe_val = safe_val[:797] + "..."
+                    if len(safe_val) > 1500: safe_val = safe_val[:1497] + "..."
                     lines.append(f"<b>{title}:</b>\n<i>{safe_val}</i>\n")
         else:
             lines.append(f"<i>{str(reasoning).replace('<', '&lt;').replace('>', '&gt;')}</i>")

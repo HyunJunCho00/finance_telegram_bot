@@ -69,7 +69,6 @@ class PerplexityCollector:
             "max_tokens": max_tokens,
             "temperature": 0.1,
             "return_citations": True,
-            "response_format": {"type": "json_object"},
         }
         
         try:

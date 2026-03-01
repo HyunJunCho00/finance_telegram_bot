@@ -291,7 +291,20 @@ class TradingBot:
                 else:
                     lines.append(f"• {symbol}: No report yet")
 
-            await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            keyboard = []
+            if is_paper and 'positions' in locals() and positions:
+                for pos in positions:
+                    pos_id = pos.get('position_id')
+                    sym = pos.get('symbol')
+                    if pos_id:
+                        keyboard.append([
+                            InlineKeyboardButton(f"🔒 SL 본절", callback_data=f"pos_sl_{pos_id}"),
+                            InlineKeyboardButton(f"✂️ {sym} 50%", callback_data=f"pos_half_{pos_id}"),
+                            InlineKeyboardButton(f"🛑 {sym} 100%", callback_data=f"pos_close_{pos_id}")
+                        ])
+            reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+            await update.message.reply_text('\n'.join(lines), parse_mode='HTML', reply_markup=reply_markup)
         except Exception as e:
             logger.error(f"Status command error: {e}")
             await update.message.reply_text(f"Error: {e}")
@@ -392,7 +405,43 @@ class TradingBot:
         await query.answer()
         
         data = query.data
-        if data.startswith("detail_"):
+        if data.startswith("pos_"):
+            try:
+                parts = data.split("_")
+                action_type = parts[1]
+                pos_id = "_".join(parts[2:])
+                
+                from executors.paper_exchange import paper_engine
+                from executors.trade_executor import trade_executor
+                cursor = paper_engine._conn.cursor()
+                cursor.execute("SELECT symbol FROM paper_positions WHERE position_id = ?", (pos_id,))
+                pos = cursor.fetchone()
+                
+                if not pos:
+                    await query.edit_message_text(f"{query.message.text}\n\n❌ Position not found or closed.")
+                    return
+                
+                symbol = pos["symbol"]
+                current_price = trade_executor._get_reference_price(symbol)
+                
+                if action_type == "sl":
+                    res = paper_engine.update_sl_to_breakeven(pos_id)
+                elif action_type == "half":
+                    res = paper_engine.close_position_partial(pos_id, current_price, 0.5)
+                elif action_type == "close":
+                    res = paper_engine.close_position_partial(pos_id, current_price, 1.0)
+                else:
+                    res = {"success": False, "error": "Unknown action"}
+                    
+                if res.get("success"):
+                    msg = f"✅ Action {action_type.upper()} processed successfully."
+                    await query.edit_message_text(f"{query.message.text}\n\n{msg}", parse_mode='HTML')
+                else:
+                    await query.message.reply_text(f"Failed: {res.get('error')}")
+            except Exception as e:
+                logger.error(f"Position control error: {e}")
+                await query.message.reply_text(f"Error: {e}")
+        elif data.startswith("detail_"):
             try:
                 report_id = data.split("_")[1]
                 # If report_id is not integer (UUID), we might need to adjust lookup

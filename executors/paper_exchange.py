@@ -245,6 +245,86 @@ class PaperExchangeEngine:
                     f"Fee: ${exit_fee:.2f}"
                 )
 
+    def apply_funding_fees(self, symbol_funding_rates: dict, current_prices: dict):
+        """
+        [V8] Simulates 8-hour funding fee collection/payment.
+        symbol_funding_rates: dict mapping symbol -> funding_rate
+        """
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT * FROM paper_positions WHERE is_open = 1")
+        open_positions = cursor.fetchall()
+        if not open_positions: return
+
+        with self._lock:
+            now = datetime.now(timezone.utc).isoformat()
+            for pos in open_positions:
+                symbol, rate = pos["symbol"], symbol_funding_rates.get(pos["symbol"], 0.0)
+                if rate == 0.0: continue
+                
+                price = current_prices.get(symbol)
+                if not price: continue
+
+                size, side, exchange = pos["size"], pos["side"], pos["exchange"]
+                notional = size * price
+                fee = notional * rate if side == "LONG" else notional * -rate
+
+                self._conn.execute(
+                    "UPDATE paper_wallets SET balance = balance - ?, updated_at = ? WHERE exchange = ?",
+                    (fee, now, exchange),
+                )
+                logger.info(f"Funding Fee Applied: [{exchange}] {side} {symbol} Rate: {rate*100:.4f}% Fee: ${fee:+.4f}")
+            self._conn.commit()
+
+    def close_position_partial(self, pos_id: str, current_price: float, fraction: float):
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT * FROM paper_positions WHERE is_open = 1 AND position_id = ?", (pos_id,))
+        pos = cursor.fetchone()
+        if not pos: return {"success": False, "error": "Position not found"}
+
+        symbol, side, entry, size, lev, exchange = pos["symbol"], pos["side"], pos["entry_price"], pos["size"], pos["leverage"], pos["exchange"]
+        close_size = size * fraction
+        if close_size <= 0: return {"success": False, "error": "Invalid fraction"}
+
+        pnl = (current_price - entry) * close_size if side == "LONG" else (entry - current_price) * close_size
+        exit_notional = close_size * current_price
+        exit_fee = exit_notional * FEE_PCT
+        initial_margin = (close_size * entry) / max(lev, 1.0)
+        returned = max(initial_margin + pnl - exit_fee, 0.0)
+
+        with self._lock:
+            now = datetime.now(timezone.utc).isoformat()
+            if fraction >= 0.99:
+                self._conn.execute("UPDATE paper_positions SET is_open = 0, updated_at = ? WHERE position_id = ?", (now, pos_id))
+            else:
+                self._conn.execute("UPDATE paper_positions SET size = size - ?, updated_at = ? WHERE position_id = ?", (close_size, now, pos_id))
+            self._conn.execute("UPDATE paper_wallets SET balance = balance + ?, updated_at = ? WHERE exchange = ?", (returned, now, exchange))
+            self._conn.commit()
+
+        icon, action = ("🛑", "CLOSED") if fraction >= 0.99 else ("✂️", f"PARTIAL CLOSE ({fraction*100:.0f}%)")
+        logger.info(f"{icon} {action} [{exchange}] {side} {symbol} PnL=${pnl:+.2f} fee=${exit_fee:.2f} returning=${returned:.2f}")
+
+        pnl_pct = (pnl / initial_margin) * 100 if initial_margin > 0 else 0
+        self._notify(
+            f"{icon} <b>POSITION {action} (MANUAL)</b>\n"
+            f"Symbol: {symbol}\nSide: {side}\nClose Price: {current_price:.2f}\n"
+            f"PnL: <b>${pnl:+.2f} ({pnl_pct:+.2f}%)</b>\nFee: ${exit_fee:.2f}"
+        )
+        return {"success": True, "pnl": pnl, "returned": returned}
+
+    def update_sl_to_breakeven(self, pos_id: str):
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT * FROM paper_positions WHERE is_open = 1 AND position_id = ?", (pos_id,))
+        pos = cursor.fetchone()
+        if not pos: return {"success": False, "error": "Position not found"}
+
+        entry = pos["entry_price"]
+        with self._lock:
+            now = datetime.now(timezone.utc).isoformat()
+            self._conn.execute("UPDATE paper_positions SET sl_price = ?, updated_at = ? WHERE position_id = ?", (entry, now, pos_id))
+            self._conn.commit()
+
+        self._notify(f"🔒 <b>BREAK-EVEN SL SET</b>\nSymbol: {pos['symbol']}\nNew SL: {entry:.2f}")
+        return {"success": True, "new_sl": entry}
 
     def handle_realtime_price(self, symbol: str, price: float):
         """

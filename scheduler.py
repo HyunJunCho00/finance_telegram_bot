@@ -90,6 +90,32 @@ def job_1hour_deribit():
     except Exception as e:
         logger.error(f"Deribit collection job error: {e}")
 
+def job_8hour_funding_fee():
+    """V8: Simulate funding fee deduction every 8 hours."""
+    try:
+        from executors.paper_exchange import paper_engine
+        from executors.trade_executor import trade_executor
+        
+        rates = {}
+        prices = {}
+        positions = paper_engine.get_open_positions()
+        if not positions: return
+            
+        for pos in positions:
+            symbol = pos["symbol"]
+            if symbol not in rates:
+                try:
+                    f_info = trade_executor.binance.fetch_funding_rate(symbol)
+                    rates[symbol] = float(f_info['fundingRate'])
+                    t = trade_executor.binance.fetch_ticker(symbol)
+                    prices[symbol] = float(t['last'])
+                except Exception as e:
+                    logger.warning(f"Failed to fetch funding rate for {symbol}: {e}")
+                    
+        paper_engine.apply_funding_fees(rates, prices)
+    except Exception as e:
+        logger.error(f"8-hour funding fee job error: {e}")
+
 
 def job_daily_fear_greed():
     """Collect Crypto Fear & Greed Index (alternative.me, daily)."""
@@ -264,6 +290,15 @@ def main():
         id='job_1hour_deribit',
         max_instances=1
     )
+
+    # Funding Fee Simulation - every 8 hours (00:00, 08:00, 16:00 UTC)
+    if settings.PAPER_TRADING_MODE:
+        scheduler.add_job(
+            job_8hour_funding_fee,
+            CronTrigger(hour='0,8,16', minute=0),
+            id='job_8hour_funding_fee',
+            max_instances=1
+        )
 
     # Fear & Greed Index — daily at 00:15 UTC (after data refreshes)
     scheduler.add_job(

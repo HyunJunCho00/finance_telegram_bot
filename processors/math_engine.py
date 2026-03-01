@@ -145,18 +145,18 @@ class MathEngine:
             # Institutional Rule: Connect the two most recent significant points
             x1, x2 = local_min_idx[-2], local_min_idx[-1]
             y1, y2 = float(df.iloc[x1]['low']), float(df.iloc[x2]['low'])
-
-            slope = (y2 - y1) / (x2 - x1) if x2 != x1 else 0
-            intercept = y1 - slope * x1
-            current_idx = len(df) - 1
-            projected_support = slope * current_idx + intercept
-            current_price = float(df.iloc[-1]['close'])
-            distance_pct = ((current_price - projected_support) / projected_support) * 100 if projected_support else 0
+            
+            # Map index to actual timestamps to prevent gap distortion
+            ts1 = df.index[x1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x1]['timestamp']
+            ts2 = df.index[x2] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x2]['timestamp']
+            
+            # In case timestamps are not datetime yet
+            ts1 = pd.to_datetime(ts1, utc=True)
+            ts2 = pd.to_datetime(ts2, utc=True)
 
             return {
-                'support_price': round(projected_support, 2),
-                'slope': round(slope, 6),
-                'distance_pct': round(distance_pct, 2),
+                'point1': (ts1, y1),
+                'point2': (ts2, y2),
                 'pivot_count': len(local_min_idx),
             }
         except Exception as e:
@@ -178,18 +178,18 @@ class MathEngine:
 
             x1, x2 = local_max_idx[-2], local_max_idx[-1]
             y1, y2 = float(df.iloc[x1]['high']), float(df.iloc[x2]['high'])
-
-            slope = (y2 - y1) / (x2 - x1) if x2 != x1 else 0
-            intercept = y1 - slope * x1
-            current_idx = len(df) - 1
-            projected_resistance = slope * current_idx + intercept
-            current_price = float(df.iloc[-1]['close'])
-            distance_pct = ((projected_resistance - current_price) / current_price) * 100 if current_price else 0
+            
+            # Map index to actual timestamps to prevent gap distortion
+            ts1 = df.index[x1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x1]['timestamp']
+            ts2 = df.index[x2] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x2]['timestamp']
+            
+            # In case timestamps are not datetime yet
+            ts1 = pd.to_datetime(ts1, utc=True)
+            ts2 = pd.to_datetime(ts2, utc=True)
 
             return {
-                'resistance_price': round(projected_resistance, 2),
-                'slope': round(slope, 6),
-                'distance_pct': round(distance_pct, 2),
+                'point1': (ts1, y1),
+                'point2': (ts2, y2),
                 'pivot_count': len(local_max_idx),
             }
         except Exception as e:

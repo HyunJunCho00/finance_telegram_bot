@@ -145,24 +145,27 @@ class ChartGenerator:
                 else:
                     cvd['timestamp'] = pd.to_datetime(cvd['timestamp'], utc=True).dt.floor('min')
                 cvd = cvd.set_index('timestamp')
-                # Resample CVD to match OHLCV rule
-                cvd_resampled = cvd.resample(config['resample_rule']).sum().fillna(0)
+                # Resample CVD to match OHLCV rule, but use min_count=1 to keep structural NaNs
+                cvd_resampled = cvd.resample(config['resample_rule']).sum(min_count=1)
                 # Calculate Cumulative Delta for visual trend
                 cvd_resampled['cvd_acc'] = (cvd_resampled.get('whale_buy_vol', 0) - cvd_resampled.get('whale_sell_vol', 0)).cumsum()
                 # Calculate individual bar delta
                 cvd_resampled['delta'] = cvd_resampled.get('whale_buy_vol', 0) - cvd_resampled.get('whale_sell_vol', 0)
                 
                 # Align with chart_df index
-                cvd_aligned = cvd_resampled.reindex(chart_df.index).ffill().fillna(0)
+                cvd_aligned = cvd_resampled.reindex(chart_df.index)
+                
+                # Forward fill cumulative CVD but NOT the initial NaNs before data started
+                cvd_acc_plot = cvd_aligned['cvd_acc'].ffill()
+                # Individual delta bars can be 0 when missing
+                cvd_delta_plot = cvd_aligned['delta'].fillna(0)
                 
                 # Panel 2: (Price 0, Vol 1, CVD Panel 2)
-                # 1. Cumulative CVD line
-                apds.append(mpf.make_addplot(cvd_aligned['cvd_acc'], panel=2, 
+                apds.append(mpf.make_addplot(cvd_acc_plot, panel=2, 
                                            color='#8E44AD', width=1.5, 
                                            ylabel='CVD', secondary_y=False))
-                # 2. Individual Delta bars (Green for Buy > Sell, Red for Sell > Buy)
-                colors = ['#27AE60' if d >= 0 else '#C0392B' for d in cvd_aligned['delta']]
-                apds.append(mpf.make_addplot(cvd_aligned['delta'], panel=2, 
+                colors = ['#27AE60' if d >= 0 else '#C0392B' for d in cvd_delta_plot]
+                apds.append(mpf.make_addplot(cvd_delta_plot, panel=2, 
                                            type='bar', color=colors, alpha=0.3, 
                                            secondary_y=True))
 
@@ -178,23 +181,22 @@ class ChartGenerator:
                 fnd_resampled = fnd.resample(config['resample_rule']).agg({
                     'open_interest': 'last',
                     'funding_rate': 'mean'
-                }).ffill().fillna(0)
+                })
                 
-                fnd_aligned = fnd_resampled.reindex(chart_df.index).ffill().fillna(0)
+                fnd_aligned = fnd_resampled.reindex(chart_df.index)
+                
+                fnd_oi_plot = fnd_aligned['open_interest'].ffill()
+                fnd_rate_plot = fnd_aligned['funding_rate'].fillna(0)
                 
                 # Panel 3: Open Interest
-                apds.append(mpf.make_addplot(fnd_aligned['open_interest'], panel=3,
+                apds.append(mpf.make_addplot(fnd_oi_plot, panel=3,
                                            color='#2980B9', width=1.2,
                                            ylabel='OI', secondary_y=False))
                 
                 # Funding Heat-tape (Calculated as a bar chart at the bottom of Panel 0)
-                # We'll use a specific color mapping for funding
-                # Green = Positive (Longs pay), Red = Negative (Shorts pay)
                 f_colors = ['#27AE60' if r > 0.0001 else '#C0392B' if r < -0.0001 else '#BDC3C7' 
-                           for r in fnd_aligned['funding_rate']]
-                # We plot this as a tiny bar at the bottom of the main panel or a new panel
-                # Let's put it in Panel 4 as a "Heat Tape"
-                apds.append(mpf.make_addplot(fnd_aligned['funding_rate'], panel=4,
+                           for r in fnd_rate_plot]
+                apds.append(mpf.make_addplot(fnd_rate_plot, panel=4,
                                            type='bar', color=f_colors, alpha=0.8,
                                            ylabel='Fnd', secondary_y=False))
 
@@ -473,58 +475,78 @@ class ChartGenerator:
 
     def _draw_diagonal_line(self, ax, chart_df: pd.DataFrame,
                              line_info: Optional[Dict], value_key: str, color: str):
-        """Draw diagonal support/resistance trendline.
-
-        Slope from math_engine is always in the same timeframe units as the chart
-        (1d slope for 1D chart, 1w slope for 1W chart) — unit mismatch is prevented
-        upstream by matching structure_tfs to the chart's resample_rule.
-
-        Y-clamping: prevents off-chart line endpoints from distorting matplotlib's
-        auto-scale. We draw only the visible portion and lock the y-axis afterward.
+        """Draw diagonal support/resistance trendline using exact timestamps.
+        
+        Using timestamps instead of row indices ensures that if there is an offline
+        data gap in the chart_df, the line will be drawn correctly across the gap
+        rather than being distorted by the missing rows.
         """
-        if not line_info:
+        if not line_info or 'point1' not in line_info or 'point2' not in line_info:
             return
+        
         try:
-            slope = line_info.get('slope')
-            current_value = line_info.get(value_key)
-            if slope is None or current_value is None:
+            pt1 = line_info['point1']
+            pt2 = line_info['point2']
+            
+            ts1, y1 = pt1
+            ts2, y2 = pt2
+            
+            # chart_df index is datetime
+            chart_start = chart_df.index[0]
+            chart_end = chart_df.index[-1]
+            
+            # Calculate slope in units of price per second
+            dt = (ts2 - ts1).total_seconds()
+            if dt == 0:
                 return
-
-            n = len(chart_df)
-            x = np.arange(n)
-            intercept = float(current_value) - float(slope) * (n - 1)
-            y = float(slope) * x + intercept
-
-            # Chart's actual price range (candlestick body)
+            slope_sec = (y2 - y1) / dt
+            
+            # Project line to the edges of the visible chart window
+            # Start point (left edge)
+            dt_start = (chart_start - ts1).total_seconds()
+            y_start = y1 + slope_sec * dt_start
+            
+            # End point (right edge)
+            dt_end = (chart_end - ts1).total_seconds()
+            y_end = y1 + slope_sec * dt_end
+            
+            # We want to draw a line from (chart_start, y_start) to (chart_end, y_end)
+            # using matplotlib's standard plot, but mapped to the chart_df's integer x-axis.
+            # Since mplfinance removes gaps visually, a straight line in time might 
+            # look slightly kinked if plotted over a gap. But usually drawing straight
+            # across the visual space is preferred.
+            
             y_lo = float(chart_df['low'].min())
             y_hi = float(chart_df['high'].max())
-            margin = (y_hi - y_lo) * 0.05  # 5% padding
-
-            # Skip entirely if line is completely outside the visible range
-            if np.all(y > y_hi + margin) or np.all(y < y_lo - margin):
-                return
-
-            # Clamp y to [y_lo - margin, y_hi + margin] so matplotlib won't autoscale
-            y_plot = np.clip(y, y_lo - margin, y_hi + margin)
-
-            kind = "SUP" if "support" in value_key else "RES"
+            margin = (y_hi - y_lo) * 0.05
+            
+            if max(y_start, y_end) < y_lo - margin or min(y_start, y_end) > y_hi + margin:
+                return # Out of bounds
+            
+            # To draw on the mpf axes natively, we calculate the Y value for every X position
+            # using the actual timestamp of that X position.
+            x_vals = np.arange(len(chart_df))
+            timestamps = chart_df.index
+            
+            # Calculate Y for every point based on exact timestamp
+            seconds_diff = (timestamps - ts1).total_seconds()
+            y_vals = y1 + slope_sec * seconds_diff
+            
+            # Clamp to prevent autoscaling issues
+            y_plot = np.clip(y_vals, y_lo - margin, y_hi + margin)
+            
+            kind = "SUP" if "support" in line_info.get('type', value_key) else "RES"
             label_text = f"TREND {kind}"
-            line_color = '#27AE60' if kind == "SUP" else '#C0392B'
-
-            ax.plot(x, y_plot, color=line_color, linewidth=2.0,
+            
+            ax.plot(x_vals, y_plot, color=color, linewidth=2.0,
                     linestyle='-', alpha=0.9, zorder=10)
-
-            # Labels — only where the true (un-clamped) value is in range
-            if y_lo <= y[0] <= y_hi:
-                ax.text(0.5, y[0], f' {label_text}', color=line_color,
-                        fontsize=7, fontweight='bold', va='bottom', ha='left',
-                        bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=1))
-
-            if y_lo <= y[-1] <= y_hi:
-                ax.text(n - 1.5, y[-1], f' {label_text}', color=line_color,
-                        fontsize=7, fontweight='bold', va='bottom', ha='right',
-                        bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=1))
-        except Exception:
+            
+            ax.text(x_vals[-1] - 1.5, y_vals[-1], f' {label_text}', color=color,
+                    fontsize=7, fontweight='bold', va='bottom', ha='right',
+                    bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=1))
+                    
+        except Exception as e:
+            logger.debug(f"Trendline draw error: {e}")
             return
 
     def _draw_fibonacci(self, ax, chart_df: pd.DataFrame, fib: Optional[Dict]):

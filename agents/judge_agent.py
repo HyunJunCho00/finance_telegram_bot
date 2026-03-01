@@ -71,6 +71,7 @@ Be aware of your previous decision for consistency."""
 - Market narrative from Perplexity provides the "WHY" behind moves
 - Position sizing: 10-25% of Kelly criterion (conservative)
 - Leverage: 1-3x maximum for swing trades
+- Stop Loss & Take Profit: Allow wider stops (e.g., 5-10%) to survive crypto volatility. However, you MUST maintain a minimum 1.5:1 or 2:1 Reward/Risk ratio. Manage the absolute risk by reducing `allocation_pct` and `leverage`, NOT by tightening the stop loss to unrealistic levels that will just get hunted.
 - Hold period: days to weeks"""
 
     POSITION_RULES = """Professional POSITION trading principles you should consider:
@@ -85,6 +86,7 @@ Be aware of your previous decision for consistency."""
     2. CVD Trends: OTC desks rebalancing inventory on public exchanges.
 - Position sizing: 5-15% of Kelly criterion (highly conservative, room for deep drawdowns)
 - Leverage: 1x (Spot) or maximum 1.5x. Liquidation must be nearly impossible.
+- Stop Loss & Take Profit: Stops must be wide enough to survive multi-week volatility and deep drawdowns (e.g., 10-25%), but the profit target should capture major cycle moves, aiming for 3:1 or higher Reward/Risk ratio. Risk is managed entirely via minimal leverage and small portfolio allocation.
 - Hold period: months to years"""
 
     DEBATE_APPENDIX = """
