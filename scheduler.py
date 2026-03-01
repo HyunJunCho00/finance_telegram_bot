@@ -141,7 +141,7 @@ def job_1hour_telegram():
         
         # 3. Truth Engine: Triangulate corroborated claims via Perplexity (Web)
         # Process 10 candidates per hour to manage API costs
-        light_rag.run_triangulation_worker(limit=10)
+        light_rag.run_triangulation_worker(limit=3)
     except Exception as e:
         logger.error(f"1-hour Telegram job error: {e}")
 

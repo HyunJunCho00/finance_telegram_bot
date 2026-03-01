@@ -39,7 +39,7 @@ class PerplexityCollector:
 
     def __init__(self):
         self.api_key = settings.PERPLEXITY_API_KEY
-        self.model = "sonar-pro"
+        self.default_model = settings.PERPLEXITY_MODEL_NARRATIVE
 
     def _get_coin_name(self, symbol: str) -> Tuple[str, str]:
         """BTCUSDT → ('Bitcoin', 'BTC'),  SOLUSDT → ('Solana', 'SOL')"""
@@ -47,14 +47,16 @@ class PerplexityCollector:
         coin_name = self.COIN_NAME_MAP.get(base, base)
         return coin_name, base
 
-    def _call_api(self, prompt: str, max_tokens: int = 1000) -> Tuple[str, List[str]]:
-        """공통 API 호출. (content, citations) 반환."""
+    def _call_api(self, prompt: str, max_tokens: int = 1000, model: Optional[str] = None) -> Tuple[str, List[str]]:
+        """Common API call with automatic fallback (Pro -> Base)."""
+        target_model = model or self.default_model
+        
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         payload = {
-            "model": self.model,
+            "model": target_model,
             "messages": [
                 {
                     "role": "system",
@@ -66,8 +68,20 @@ class PerplexityCollector:
             "temperature": 0.1,
             "return_citations": True,
         }
-        response = requests.post(self.BASE_URL, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
+        
+        try:
+            response = requests.post(self.BASE_URL, headers=headers, json=payload, timeout=30)
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            # Fallback Logic: If Pro fails (401/402/etc), try Base model immediately
+            if target_model == "sonar-pro" and e.response.status_code in [401, 402, 403, 429, 500]:
+                logger.warning(f"Perplexity Pro failed ({e.response.status_code}), falling back to {settings.PERPLEXITY_MODEL_TARGETED}")
+                payload["model"] = settings.PERPLEXITY_MODEL_TARGETED
+                response = requests.post(self.BASE_URL, headers=headers, json=payload, timeout=30)
+                response.raise_for_status()
+            else:
+                raise e
+
         data = response.json()
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
         citations = data.get("citations", [])
@@ -272,16 +286,14 @@ class PerplexityCollector:
         ]
         return "\n".join(lines)
 
-    def search_market_narrative(self, symbol: str = "BTC") -> Dict:
-        """Mode-aware market narrative search. Runs on each analysis cycle.
-
-        SWING mode: 1-7 day catalysts, upcoming macro events, funding extremes
-        POSITION mode: 2-8 week cycle position, structural regime shifts
-
-        Injects live market state (Fear&Greed, price, funding, macro) into the
-        prompt so Perplexity can contextualise results against current conditions.
-
-        Returns structured context compatible with format_for_agents() and persist_narrative().
+    def search_market_narrative(self, symbol: str = "BTC", is_emergency: bool = False) -> Dict:
+        """Mode-aware market narrative search. 
+        
+        Strategy:
+        1. Emergency: Search immediately using cheap model (sonar).
+        2. Scheduled: If < 12h since last search, return cached DB result to save credits.
+           (Agent will combine this with hourly LightRAG context).
+        3. Scheduled (>12h): Fresh search using Pro model (with fallback).
         """
         if not self.api_key:
             logger.warning("PERPLEXITY_API_KEY not set, skipping narrative search")
@@ -291,7 +303,30 @@ class PerplexityCollector:
 
         coin_name, base = self._get_coin_name(symbol)
         mode = settings.trading_mode
+        
+        # Budget Guard: Check last search time for non-emergency
+        if not is_emergency:
+            try:
+                # [FIX CRITICAL-BUDGET] Retrieve last successful narrative from DB
+                last_n = db.get_latest_narrative(symbol)
+                if last_n:
+                    last_ts = datetime.fromisoformat(last_n['timestamp'].replace('Z', '+00:00'))
+                    if datetime.now(timezone.utc) - last_ts < timedelta(hours=12):
+                        logger.info(f"Perplexity [{symbol}]: Within 12h window, using cached narrative.")
+                        # Ensure we return a properly formatted dict
+                        cached_result = last_n.get('raw_payload', {})
+                        if not cached_result:
+                            # Fallback if raw_payload is missing
+                            cached_result = self._empty_result(symbol)
+                            cached_result.update(last_n)
+                        return cached_result
+            except Exception as e:
+                logger.warning(f"Narrative cache check failed: {e}")
 
+        # Determine Model
+        # Emergency uses cheap model. Scheduled uses Pro (with _call_api fallback).
+        use_model = settings.PERPLEXITY_MODEL_TARGETED if is_emergency else settings.PERPLEXITY_MODEL_NARRATIVE
+        
         # Inject live market state into prompt
         state = self._gather_market_state(symbol)
 
@@ -303,7 +338,7 @@ class PerplexityCollector:
             logger.info(f"Perplexity [{coin_name}]: SWING mode search (1-7 day horizon)")
 
         try:
-            content, citations = self._call_api(prompt)
+            content, citations = self._call_api(prompt, model=use_model)
             result = self._parse_response(content, symbol)
             if citations:
                 result["sources"] = citations[:5]
@@ -409,7 +444,8 @@ Return this exact JSON:
 Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that explicitly in btc_eth_impact."""
 
         try:
-            content, citations = self._call_api(prompt, max_tokens=600)
+            # Targeted search always uses the cheaper model
+            content, citations = self._call_api(prompt, max_tokens=600, model=settings.PERPLEXITY_MODEL_TARGETED)
             result = self._parse_targeted_response(content, entity)
             if citations:
                 result["sources"] = citations[:5]

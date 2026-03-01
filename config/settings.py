@@ -56,6 +56,9 @@ class Settings(BaseSettings):
 
     # Perplexity API for market narrative search
     PERPLEXITY_API_KEY: str = ""
+    PERPLEXITY_MODEL_NARRATIVE: str = "sonar-pro"
+    PERPLEXITY_MODEL_TARGETED: str = "sonar"
+    TRIANGULATION_MAX_ATTEMPTS: int = 2
 
     # FRED API for macro regime data
     FRED_API_KEY: str = ""

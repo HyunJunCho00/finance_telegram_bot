@@ -194,11 +194,13 @@ class Neo4jGraph:
                 result = session.run("""
                     MATCH (s:Entity)-[r:RELATES_TO]->(t:Entity)
                     WHERE r.status IN ['PENDING', 'CORROBORATED']
+                    AND (r.triangulation_attempts IS NULL OR r.triangulation_attempts < $max_attempts)
                     RETURN s.name AS source, t.name AS target, r.type AS rel_type, 
-                           r.description AS description, r.status AS status, r.evidence_count AS evidence_count
+                           r.description AS description, r.status AS status, r.evidence_count AS evidence_count,
+                           coalesce(r.triangulation_attempts, 0) AS attempts
                     ORDER BY r.evidence_count DESC, r.last_seen DESC
                     LIMIT $limit
-                """, limit=limit)
+                """, limit=limit, max_attempts=settings.TRIANGULATION_MAX_ATTEMPTS)
                 return [dict(rec) for rec in result]
         except Exception as e:
             logger.error(f"Neo4j get_triangulation_candidates error: {e}")
@@ -211,7 +213,10 @@ class Neo4jGraph:
             with self.driver.session() as session:
                 session.run("""
                     MATCH (s:Entity {name: $source})-[r:RELATES_TO {type: $rel_type}]->(t:Entity {name: $target})
-                    SET r.status = $status, r.weight = r.weight + $weight_boost
+                    SET r.status = $status, 
+                        r.weight = r.weight + $weight_boost,
+                        r.triangulation_attempts = coalesce(r.triangulation_attempts, 0) + 1,
+                        r.last_triangulated = datetime()
                 """, source=source, target=target, rel_type=rel_type, status=status, weight_boost=weight_boost)
         except Exception as e:
             logger.error(f"Neo4j update_relationship_status error: {e}")
@@ -1451,7 +1456,7 @@ Rules:
 
     # Cost guardrail: max new LLM extractions per ingest cycle
     # Prevents cost explosion when VM restarts or backlog accumulates
-    INGEST_CAP_PER_CYCLE: int = 200
+    INGEST_CAP_PER_CYCLE = 50
 
     def ingest_batch(self, messages: List[Dict]) -> int:
         """Ingest a batch of telegram messages with per-cycle cost cap.

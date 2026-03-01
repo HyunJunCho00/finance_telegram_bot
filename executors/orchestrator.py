@@ -178,7 +178,8 @@ def node_context_gathering(state: AnalysisState) -> dict:
     # 1. Perplexity Search
     try:
         asset = "BTC" if "BTC" in symbol else "ETH"
-        narrative = perplexity_collector.search_market_narrative(symbol)
+        is_emergency = state.get("is_emergency", False)
+        narrative = perplexity_collector.search_market_narrative(symbol, is_emergency=is_emergency)
         narrative_text = perplexity_collector.format_for_agents(narrative)
         logger.info(f"Narrative for {asset}: {narrative.get('sentiment', '?')}")
         updates["narrative_text"] = narrative_text
