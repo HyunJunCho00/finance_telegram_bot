@@ -1,8 +1,11 @@
+import functools
 from supabase import create_client, Client
 from config.settings import settings
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta, timezone
 import pandas as pd
+import functools
+import asyncio
 from loguru import logger
 
 
