@@ -3,6 +3,7 @@ from config.database import db
 from config.settings import settings, TradingMode
 from processors.math_engine import math_engine
 from processors.chart_generator import chart_generator
+from processors.gcs_parquet import gcs_parquet_store
 from loguru import logger
 import os
 import json
@@ -18,7 +19,20 @@ class MCPTools:
                 return {"error": "No market data available"}
 
             mode = settings.trading_mode
-            analysis = math_engine.analyze_market(df, mode)
+            
+            # Load higher timeframe data from GCS for deeper indicator history
+            df_1d, df_1w = None, None
+            if gcs_parquet_store.enabled:
+                try:
+                    if mode == TradingMode.SWING:
+                        df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=18)
+                    elif mode == TradingMode.POSITION:
+                        df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=24)
+                        df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
+                except Exception as e:
+                    logger.warning(f"GCS load for analysis tool skipped: {e}")
+
+            analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w)
             compact = math_engine.format_compact(analysis)
             return {
                 "symbol": symbol,
@@ -186,21 +200,49 @@ class MCPTools:
             logger.error(f"Position status error: {e}")
             return {"error": str(e)}
 
-    def get_chart_image(self, symbol: str) -> Dict:
+    def get_chart_image(self, symbol: str, timeframe: Optional[str] = None) -> Dict:
         try:
-            df = db.get_latest_market_data(symbol, limit=settings.candle_limit)
+            # Map common timeframe aliases to TradingMode
+            mode = settings.trading_mode
+            limit = settings.candle_limit
+            
+            if timeframe:
+                tf = timeframe.lower().strip()
+                if tf in ('1d', 'd', 'p', 'position', 'w', '1w'):
+                    mode = TradingMode.POSITION
+                    limit = settings.POSITION_CANDLE_LIMIT
+                elif tf in ('4h', 'h', 's', 'swing', '1h'):
+                    mode = TradingMode.SWING
+                    limit = settings.SWING_CANDLE_LIMIT
+
+            df = db.get_latest_market_data(symbol, limit=limit)
             if df.empty:
                 return {"error": "No market data available"}
 
-            mode = settings.trading_mode
-            analysis = math_engine.analyze_market(df, mode)
-            chart_bytes = chart_generator.generate_chart(df, analysis, symbol, mode)
+            # Load higher timeframe data from GCS for deeper indicator history
+            df_1d, df_1w = None, None
+            if gcs_parquet_store.enabled:
+                try:
+                    # For custom timeframe charts, we should still provide enough context if it's a high TF
+                    m_back = 18 if mode == TradingMode.SWING else 24
+                    df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
+                    if timeframe and timeframe.lower() in ('1w', 'w') or mode == TradingMode.POSITION:
+                        df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
+                except Exception as e:
+                    logger.warning(f"GCS load for chart tool skipped: {e}")
+
+            # Get analysis and generate chart
+            analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w, timeframe=timeframe)
+            chart_bytes = chart_generator.generate_chart(df, analysis, symbol, mode, 
+                                                          df_1d=df_1d, df_1w=df_1w,
+                                                          timeframe=timeframe)
 
             if chart_bytes:
                 b64 = chart_generator.chart_to_base64(chart_bytes)
                 return {
                     "symbol": symbol,
                     "mode": mode.value,
+                    "timeframe_requested": timeframe or mode.value,
                     "chart_base64": b64,
                     "size_bytes": len(chart_bytes)
                 }

@@ -85,11 +85,11 @@ def execute_trade(symbol: str, side: str, amount: float, leverage: int = 1) -> d
 
 
 @mcp.tool()
-def get_chart_image(symbol: str) -> dict:
+def get_chart_image(symbol: str, timeframe: str = None) -> dict:
     """Generate and return a base64-encoded chart image for a symbol.
-    Chart type depends on trading mode (4h swing / 1d position)."""
-    logger.info(f"MCP tool: get_chart_image {symbol}")
-    return mcp_tools.get_chart_image(symbol)
+    Chart type depends on mode, but can be overridden by timeframe (e.g. '1d', '4h')."""
+    logger.info(f"MCP tool: get_chart_image {symbol} (tf={timeframe})")
+    return mcp_tools.get_chart_image(symbol, timeframe=timeframe)
 
 
 @mcp.tool()

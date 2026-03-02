@@ -49,23 +49,48 @@ class ChartGenerator:
 
     def generate_chart(self, df: pd.DataFrame, analysis: Dict, symbol: str,
                        mode: TradingMode = TradingMode.SWING,
+                       timeframe: Optional[str] = None,
                        liquidation_df: Optional[pd.DataFrame] = None,
                        cvd_df: Optional[pd.DataFrame] = None,
                        funding_df: Optional[pd.DataFrame] = None,
                        df_1d: Optional[pd.DataFrame] = None,
                        df_1w: Optional[pd.DataFrame] = None) -> Optional[bytes]:
-        """Generate structure chart for any mode."""
-        config = self._get_mode_config(mode)
+        """Generate structure chart for any mode or specific timeframe."""
+        config = self._get_mode_config(mode, timeframe)
         return self._generate_structure_chart(df, analysis, symbol, config, 
                                               liquidation_df, cvd_df, funding_df,
                                               df_1d=df_1d, df_1w=df_1w)
 
-    def _get_mode_config(self, mode: TradingMode) -> Dict:
-        """Per-mode chart configuration."""
+    def _get_mode_config(self, mode: TradingMode, timeframe: Optional[str] = None) -> Dict:
+        """Per-mode or per-timeframe chart configuration."""
+        if timeframe and timeframe.lower() not in ('auto', 'none'):
+            tf = timeframe.lower().strip()
+            tf_map = {
+                '1m': '1min', '3m': '3min', '5m': '5min', '15m': '15min', '30m': '30min',
+                '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h',
+                '1d': '1D', '3d': '3D', '1w': '1W-MON', '1M': '1MS',
+            }
+            rule = tf_map.get(tf, '1h')
+            # Dynamic tail calculation based on TF to show enough history
+            tail = 200
+            if tf in ('1m', '5m', '15m'): tail = 150 # Intraday needs more zoom
+            elif tf in ('1d', '1w'): tail = 200      # Macro needs context
+
+            return {
+                'resample_rule': rule,
+                'tail_candles': tail,
+                'min_candles': 20,
+                'title_suffix': tf.upper(),
+                'fib_tf': tf,
+                'structure_tfs': [tf],
+                'swing_tf': tf,
+                'is_custom': True
+            }
+
         if mode == TradingMode.POSITION:
             return {
                 'resample_rule': '1W',
-                'tail_candles': 260,   # ~5 years (Includes previous ATH for macro resistance levels)
+                'tail_candles': 260,   # ~5 years 
                 'min_candles': 20,
                 'title_suffix': '1W POSITION (Macro Cycle)',
                 'fib_tf': '1w',
@@ -75,11 +100,11 @@ class ChartGenerator:
         else:  # SWING (default)
             return {
                 'resample_rule': '1D',
-                'tail_candles': 180,   # ~6 months (Maximized visual clarity for VLM to spot recent HH/HL structure and FVGs)
+                'tail_candles': 180,   # ~6 months
                 'min_candles': 30,
                 'title_suffix': '1D SWING',
                 'fib_tf': '1d',
-                'structure_tfs': ['1d'],   # 1D chart → use 1D slope (4h slope unit mismatch 방지)
+                'structure_tfs': ['1d'],
                 'swing_tf': '1d',
             }
 
@@ -106,7 +131,8 @@ class ChartGenerator:
                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
             }).dropna()
 
-            if config['resample_rule'] == '1D' and df_1d is not None and not df_1d.empty:
+            rule_upper = str(config['resample_rule']).upper()
+            if rule_upper.startswith('1D') and df_1d is not None and not df_1d.empty:
                 hist_df = df_1d.copy()
                 # Ensure we use the 'timestamp' column for indexing, not the RangeIndex
                 hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'], utc=True)
@@ -114,7 +140,7 @@ class ChartGenerator:
                 # Combine: historical + realtime, dropping duplicates favoring realtime
                 full_resampled = pd.concat([hist_df, full_resampled])
                 full_resampled = full_resampled[~full_resampled.index.duplicated(keep='last')].sort_index()
-            elif config['resample_rule'] == '1W' and df_1w is not None and not df_1w.empty:
+            elif rule_upper.startswith('1W') and df_1w is not None and not df_1w.empty:
                 hist_df = df_1w.copy()
                 hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'], utc=True)
                 hist_df = hist_df.set_index('timestamp')
@@ -132,7 +158,10 @@ class ChartGenerator:
             import pandas_ta_classic as ta
             full_resampled['ema200'] = ta.ema(full_resampled['close'], length=min(200, len(full_resampled)-1))
 
-            # 3. Slice for VISUAL window
+            # 3. Get Trading Mode for Header context
+            trading_mode = getattr(settings, 'trading_mode', TradingMode.SWING)
+            
+            # 4. Slice for VISUAL window
             chart_df = full_resampled.tail(config['tail_candles']).copy()
             chart_df.index.name = 'Date'
 
@@ -200,18 +229,39 @@ class ChartGenerator:
                                            type='bar', color=f_colors, alpha=0.8,
                                            ylabel='Fnd', secondary_y=False))
 
-            # Upbit-style Professional Light Theme
-            mc = mpf.make_marketcolors(
-                up='#E74C3C', down='#3498DB',  # Red Up, Blue Down
-                edge='inherit', wick='inherit',
-                volume={'up': '#E74C3C44', 'down': '#3498DB44'}
-            )
-            style = mpf.make_mpf_style(
-                marketcolors=mc, 
-                gridstyle='-', gridcolor='#F2F2F2', 
-                facecolor='white', figcolor='white',
-                edgecolor='#EEEEEE'
-            )
+            # Dynamic Theme Selection
+            theme = getattr(settings, 'CHART_THEME', 'dark_premium').lower()
+            
+            if theme == 'light_premium':
+                # Professional Light Theme (TradingView / Upbit Style)
+                mc = mpf.make_marketcolors(
+                    up='#089981', down='#F23645',  # Emerald Green / Crimson Red
+                    edge='inherit', wick='inherit',
+                    volume={'up': '#08998144', 'down': '#F2364544'}
+                )
+                style = mpf.make_mpf_style(
+                    marketcolors=mc, 
+                    gridstyle='-', gridcolor='#F0F3FA', 
+                    facecolor='white', figcolor='white',
+                    edgecolor='#E0E3EB'
+                )
+                text_color = '#131722'
+                grid_color = '#F0F3FA'
+            else:
+                # Default: Professional Dark Premium (Exchange Style)
+                mc = mpf.make_marketcolors(
+                    up='#089981', down='#F23645',
+                    edge='inherit', wick='inherit',
+                    volume={'up': '#08998166', 'down': '#F2364566'}
+                )
+                style = mpf.make_mpf_style(
+                    marketcolors=mc, 
+                    gridstyle='-', gridcolor='#1E222D', 
+                    facecolor='#131722', figcolor='#131722',
+                    edgecolor='#2A2E39'
+                )
+                text_color = '#D1D4DC'
+                grid_color = '#1E222D'
 
             # Professional Font Config — Legibility Boost
             plt.rcParams['font.size'] = 10
@@ -219,10 +269,10 @@ class ChartGenerator:
             plt.rcParams['axes.labelsize'] = 10
             plt.rcParams['xtick.labelsize'] = 9
             plt.rcParams['ytick.labelsize'] = 9
-            plt.rcParams['text.color'] = '#333333'
-            plt.rcParams['axes.labelcolor'] = '#333333'
-            plt.rcParams['xtick.color'] = '#666666'
-            plt.rcParams['ytick.color'] = '#666666'
+            plt.rcParams['text.color'] = text_color
+            plt.rcParams['axes.labelcolor'] = text_color
+            plt.rcParams['xtick.color'] = '#787B86'
+            plt.rcParams['ytick.color'] = '#787B86'
 
             # Plot — Adaptive panel layout (Price 0, Vol 1, CVD 2, OI 3, Funding 4)
             num_panels = 2 # Basic: Price + Vol
@@ -253,7 +303,12 @@ class ChartGenerator:
             # ── Enhanced Title & Metadata ──
             price_ax.text(0.01, 1.05, f"{symbol} | {df['close'].iloc[-1]:.2f}",
                          transform=price_ax.transAxes, fontsize=14, fontweight='bold', 
-                         color='#2C3E50', ha='left')
+                         color=text_color, ha='left')
+
+            # ── Add Background Watermark (Big Symbol) ──
+            price_ax.text(0.5, 0.5, symbol.split('USDT')[0],
+                         transform=price_ax.transAxes, fontsize=80, fontweight='bold',
+                         color=text_color, alpha=0.03, ha='center', va='center', zorder=0)
 
             # ── Overlay 1: Pivot Points (turning points) ──
             self._draw_pivot_points(price_ax, chart_df)
@@ -269,10 +324,10 @@ class ChartGenerator:
             for tf in config['structure_tfs']:
                 self._draw_diagonal_line(price_ax, chart_df,
                                          structure.get(f'support_{tf}'),
-                                         'support_price', '#2E7D32')
+                                         'support_price', '#089981', theme, text_color)
                 self._draw_diagonal_line(price_ax, chart_df,
                                          structure.get(f'resistance_{tf}'),
-                                         'resistance_price', '#C62828')
+                                         'resistance_price', '#F23645', theme, text_color)
 
             # ── Overlay 5: Fibonacci Levels ──
             fib = (analysis.get('fibonacci', {}) or {}).get(config['fib_tf'])
@@ -310,6 +365,15 @@ class ChartGenerator:
             if cvd_df is not None:
                 div = math_engine.detect_macro_divergences(full_resampled, cvd_df)
                 self._draw_macro_alpha_markers(price_ax, chart_df, div)
+
+            # ── [PRO] Overlay 13: Header Legend ──
+            self._draw_header_legend(price_ax, chart_df, symbol, config, text_color)
+
+            # ── [PRO] Overlay 14: Session Breaks (Day-dividers) ──
+            self._draw_session_breaks(price_ax, chart_df)
+            
+            # ── [PRO] Overlay 15: Current Price Label (On Y-axis) ──
+            self._draw_current_price_label(price_ax, chart_df, text_color)
 
             # ── Lock Y-axis to candlestick range ──
             # Must happen AFTER all overlays so nothing autoscales the axis
@@ -474,7 +538,8 @@ class ChartGenerator:
             logger.debug(f"Pivot points draw error: {e}")
 
     def _draw_diagonal_line(self, ax, chart_df: pd.DataFrame,
-                             line_info: Optional[Dict], value_key: str, color: str):
+                             line_info: Optional[Dict], value_key: str, color: str,
+                             theme: str = 'dark_premium', text_color: str = '#D1D4DC'):
         """Draw diagonal support/resistance trendline using exact timestamps.
         
         Using timestamps instead of row indices ensures that if there is an offline
@@ -495,6 +560,10 @@ class ChartGenerator:
             chart_start = chart_df.index[0]
             chart_end = chart_df.index[-1]
             
+            # Ensure both are timezone aware for subtraction
+            if ts1.tzinfo is None: ts1 = ts1.replace(tzinfo=pd.Timestamp.utcnow().tzinfo)
+            if ts2.tzinfo is None: ts2 = ts2.replace(tzinfo=pd.Timestamp.utcnow().tzinfo)
+            
             # Calculate slope in units of price per second
             dt = (ts2 - ts1).total_seconds()
             if dt == 0:
@@ -503,10 +572,12 @@ class ChartGenerator:
             
             # Project line to the edges of the visible chart window
             # Start point (left edge)
+            if chart_start.tzinfo is None: chart_start = chart_start.tz_localize('UTC')
             dt_start = (chart_start - ts1).total_seconds()
             y_start = y1 + slope_sec * dt_start
             
             # End point (right edge)
+            if chart_end.tzinfo is None: chart_end = chart_end.tz_localize('UTC')
             dt_end = (chart_end - ts1).total_seconds()
             y_end = y1 + slope_sec * dt_end
             
@@ -528,6 +599,12 @@ class ChartGenerator:
             x_vals = np.arange(len(chart_df))
             timestamps = chart_df.index
             
+            # Ensure both are timezone aware for subtraction
+            if timestamps.tzinfo is None:
+                timestamps = timestamps.tz_localize('UTC')
+            if ts1.tzinfo is None:
+                ts1 = ts1.replace(tzinfo=pd.Timestamp.utcnow().tzinfo)
+            
             # Calculate Y for every point based on exact timestamp
             seconds_diff = (timestamps - ts1).total_seconds()
             y_vals = y1 + slope_sec * seconds_diff
@@ -543,7 +620,8 @@ class ChartGenerator:
             
             ax.text(x_vals[-1] - 1.5, y_vals[-1], f' {label_text}', color=color,
                     fontsize=7, fontweight='bold', va='bottom', ha='right',
-                    bbox=dict(facecolor='white', alpha=0.5, edgecolor='none', pad=1))
+                    bbox=dict(facecolor=text_color if theme == 'light_premium' else '#131722', 
+                              alpha=0.5, edgecolor='none', pad=1))
                     
         except Exception as e:
             logger.debug(f"Trendline draw error: {e}")
@@ -831,6 +909,78 @@ class ChartGenerator:
                         bbox=dict(facecolor='white', alpha=0.8, edgecolor='#27AE60', pad=2))
         except Exception as e:
             logger.debug(f"Alpha markers draw error: {e}")
+
+    def _draw_header_legend(self, ax, chart_df: pd.DataFrame, symbol: str, config: Dict, text_color: str):
+        """Draw a professional TradingView-style header legend in the top-left."""
+        try:
+            last_candle = chart_df.iloc[-1]
+            tf_str = config.get('title_suffix', '4H').split(' ')[0] # Get '15M' from '15M' or '1D' from '1D SWING'
+            
+            # 1. Main Header: SYMBOL TF EXCHANGE
+            header_text = f"{symbol} · {tf_str} · CRYPTO"
+            ax.text(0.01, 0.98, header_text, transform=ax.transAxes, 
+                    fontsize=10, fontweight='bold', color=text_color, alpha=0.9,
+                    ha='left', va='top')
+            
+            # 2. Price Info: O H L C
+            price_text = (f"O{last_candle['open']:.2f}  H{last_candle['high']:.2f}  "
+                         f"L{last_candle['low']:.2f}  C{last_candle['close']:.2f}")
+            ax.text(0.01, 0.94, price_text, transform=ax.transAxes,
+                    fontsize=8, color=text_color, alpha=0.7,
+                    ha='left', va='top')
+            
+            # 3. Indicators Legend
+            indicators = []
+            if 'ema200' in chart_df.columns:
+                ema_val = last_candle['ema200']
+                if not pd.isna(ema_val):
+                    indicators.append(f"EMA 200: {ema_val:.2f}")
+            
+            if indicators:
+                ind_text = "  /  ".join(indicators)
+                ax.text(0.01, 0.90, ind_text, transform=ax.transAxes,
+                        fontsize=8, color='#787B86', alpha=0.8,
+                        ha='left', va='top')
+        except Exception as e:
+            logger.debug(f"Header legend draw error: {e}")
+
+    def _draw_session_breaks(self, ax, chart_df: pd.DataFrame):
+        """Draw vertical dashed lines at day changes (00:00 UTC)."""
+        try:
+            # Find indices where the date changes
+            dates = chart_df.index.date
+            breaks = np.where(dates[1:] != dates[:-1])[0] + 1
+            
+            for idx in breaks:
+                ax.axvline(idx - 0.5, color='#787B86', linestyle=':', 
+                           linewidth=0.5, alpha=0.3, zorder=0)
+        except Exception as e:
+            logger.debug(f"Session breaks draw error: {e}")
+
+    def _draw_current_price_label(self, ax, chart_df: pd.DataFrame, text_color: str):
+        """Draw a highlighted price label on the right Y-axis for the current price."""
+        try:
+            last_close = float(chart_df['close'].iloc[-1])
+            prev_close = float(chart_df['close'].iloc[-2]) if len(chart_df) > 1 else last_close
+            
+            # Color based on whether latest change is positive or negative
+            bg_color = '#089981' if last_close >= prev_close else '#F23645'
+            
+            # Draw label on the right side of the axis
+            # We use ax.annotate to place it exactly at the price level on the right edge
+            ax.annotate(f"{last_close:.2f}",
+                        xy=(1, last_close), xycoords=('axes fraction', 'data'),
+                        xytext=(3, 0), textcoords='offset points',
+                        bbox=dict(boxstyle='round,pad=0.3', facecolor=bg_color, 
+                                  edgecolor=bg_color, alpha=1.0),
+                        color='white', fontsize=9, fontweight='bold',
+                        va='center', ha='left', zorder=100)
+            
+            # Draw a horizontal line matching the price label
+            ax.axhline(last_close, color=bg_color, linestyle='-', 
+                       linewidth=0.8, alpha=0.8, zorder=99)
+        except Exception as e:
+            logger.debug(f"Current price label error: {e}")
 
     # ─────────────── Utility Methods ───────────────
 

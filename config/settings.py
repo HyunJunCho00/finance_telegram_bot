@@ -177,13 +177,14 @@ class Settings(BaseSettings):
 
     # ===== Chart Image / VLM Cost Control =====
     # Smart image strategy:
-    #   SWING mode: chart sent to Judge only (512x512, ~1024 tokens)
+    #   SWING mode: chart sent to Judge only (1280x800, ~2048 tokens)
     #   SCALP mode: no images (text-only, pure speed)
     USE_CHART_IMAGES: bool = True
-    CHART_LOW_RES: bool = True  # default True for cost savings
-    CHART_IMAGE_WIDTH: int = 1200
+    CHART_LOW_RES: bool = False  # Set to False for premium quality
+    CHART_IMAGE_WIDTH: int = 1280
     CHART_IMAGE_HEIGHT: int = 800
-    CHART_IMAGE_DPI: int = 120
+    CHART_IMAGE_DPI: int = 150
+    CHART_THEME: str = "dark_premium"  # [NEW] dark_premium | light_premium
 
     # ===== Candle Limits per Mode (1m candles needed from DB) =====
     # SWING: 14400 (10 days) → for 1h/4h + needs 1d from GCS

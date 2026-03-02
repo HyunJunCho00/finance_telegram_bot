@@ -152,10 +152,13 @@ _CHAT_TOOLS = [
     },
     {
         "name": "get_chart_image",
-        "description": "현재 모드(swing/position)에 맞는 기술적 차트 이미지를 생성해 텔레그램으로 전송.",
+        "description": "기술적 차트 이미지를 생성해 텔레그램으로 전송. 특정 타임프레임(1d, 4h 등) 요청 가능.",
         "input_schema": {
             "type": "object",
-            "properties": {"symbol": {"type": "string", "description": "예: BTCUSDT"}},
+            "properties": {
+                "symbol": {"type": "string", "description": "예: BTCUSDT"},
+                "timeframe": {"type": "string", "description": "옵션: 1d(long-term), 4h(swing). 기본은 현재 모드"}
+            },
             "required": ["symbol"],
         },
     },
@@ -399,6 +402,45 @@ class TradingBot:
         state_manager.set_analysis_enabled(False)
         await update.message.reply_text("🛑 <b>AI 리포트 및 분석이 중단되었습니다.</b>\n데이터 수집은 계속되지만, 고비용 AI 호출은 발생하지 않습니다.", parse_mode='HTML')
 
+    async def cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Direct command to get a chart image: /chart [symbol] [timeframe]"""
+        args = context.args
+        if not args:
+            await update.message.reply_text("Usage: /chart BTC|ETH [1d|4h]")
+            return
+
+        base = args[0].upper()
+        if base not in settings.trading_symbols_base:
+            await update.message.reply_text(f"Invalid symbol. Use: {'|'.join(settings.trading_symbols_base)}")
+            return
+
+        symbol = base + "USDT"
+        timeframe = args[1].lower() if len(args) > 1 else None
+
+        await update.message.reply_text(f"Generating premium {timeframe or 'auto'} chart for {symbol}...")
+
+        try:
+            from mcp_server.tools import mcp_tools
+            result = mcp_tools.get_chart_image(symbol, timeframe=timeframe)
+
+            if "chart_base64" in result:
+                chart_bytes = base64.b64decode(result["chart_base64"])
+                buf = BytesIO(chart_bytes)
+                buf.name = f"{symbol}_{timeframe or 'current'}.png"
+                
+                # Send photo
+                caption = f"📊 <b>{symbol} {result.get('mode', '').upper()} CHART</b>\n"
+                if timeframe:
+                    caption += f"Timeframe: <code>{timeframe}</code> (Requested)\n"
+                caption += f"Quality: <code>Premium HD</code>"
+                
+                await update.message.reply_photo(photo=buf, caption=caption, parse_mode='HTML')
+            else:
+                await update.message.reply_text(f"Failed to generate chart: {result.get('error', 'Unknown error')}")
+        except Exception as e:
+            logger.error(f"Chart command error: {e}")
+            await update.message.reply_text(f"Error: {e}")
+
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle button clicks for deep analysis."""
         query = update.callback_query
@@ -514,7 +556,7 @@ class TradingBot:
                 "get_feedback_history":      lambda a: mcp_tools.get_feedback_history(a.get("limit", 5)),
                 "query_knowledge_graph":     lambda a: mcp_tools.query_rag(a["query"], mode=a.get("mode", "hybrid")),
                 "search_narrative":          lambda a: mcp_tools.search_market_narrative(a["symbol"]),
-                "get_chart_image":           lambda a: mcp_tools.get_chart_image(a["symbol"]),
+                "get_chart_image":           lambda a: mcp_tools.get_chart_image(a["symbol"], timeframe=a.get("timeframe")),
                 "search_web":                lambda a: mcp_tools.search_web(a["query"]),
             }
 
@@ -639,6 +681,7 @@ class TradingBot:
         app.add_handler(CommandHandler("report", self.cmd_report))
         app.add_handler(CommandHandler("report_on", self.cmd_report_on))
         app.add_handler(CommandHandler("report_off", self.cmd_report_off))
+        app.add_handler(CommandHandler("chart", self.cmd_chart))
         app.add_handler(CallbackQueryHandler(self.handle_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 

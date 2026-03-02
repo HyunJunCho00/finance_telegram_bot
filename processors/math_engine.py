@@ -67,11 +67,17 @@ class MathEngine:
             return df.copy()
 
         tf_map = {
-            '5m': '5min', '15m': '15min', '1h': '1h', '4h': '4h',
-            '1d': '1D',
+            '1min': '1min', '3min': '3min', '5min': '5min', '15min': '15min', '30min': '30min',
+            '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h',
+            '1d': '1D', '3d': '3D',
             '1w': '1W-MON',  # Week starts Monday (Upbit KST 09:00 = UTC 00:00)
+            '1M': '1MS',     # Month start
         }
-        rule = tf_map.get(timeframe)
+        # Also support short forms
+        short_map = {
+            '1m': '1min', '3m': '3min', '5m': '5min', '15m': '15min', '30m': '30min'
+        }
+        rule = tf_map.get(timeframe) or short_map.get(timeframe)
         if not rule:
             return df.copy()
 
@@ -1237,21 +1243,83 @@ class MathEngine:
             result['swing_levels']['1d'] = self.calculate_swing_levels(tf_1d)
 
         # Multi-TF confluence zones
-        result['confluence_zones'] = self.detect_confluence_zones(result)
-
         # Recent 1d candles
         if len(tf_1d) >= 3:
             result['recent_1d_candles'] = self._recent_candle_data(tf_1d, count=10)
 
         return result
 
+    def analyze_market_custom(self, df_1m: pd.DataFrame, timeframe: str,
+                              df_1d: Optional[pd.DataFrame] = None,
+                              df_1w: Optional[pd.DataFrame] = None) -> Dict:
+        """Analyze a single custom timeframe (e.g. 15m, 1h) for one-off charts."""
+        # 1. Select the base data for resampling
+        # If it's a 1d timeframe, use df_1d if available to ensure long-term indicators are accurate
+        tf_df = None
+        if timeframe.lower() in ('1d', 'd'):
+            if df_1d is not None and not df_1d.empty:
+                # Merge logic (simplified for custom TF)
+                hist_df = df_1d.copy()
+                hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'], utc=True)
+                hist_df = hist_df.set_index('timestamp')
+                
+                recent_df = self.resample_to_timeframe(df_1m, '1d')
+                tf_df = pd.concat([hist_df, recent_df])
+                tf_df = tf_df[~tf_df.index.duplicated(keep='last')].sort_index()
+                
+        elif timeframe.lower() in ('1w', 'w'):
+            if df_1w is not None and not df_1w.empty:
+                hist_df = df_1w.copy()
+                hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'], utc=True)
+                hist_df = hist_df.set_index('timestamp')
+                
+                recent_df = self.resample_to_timeframe(df_1m, '1w')
+                tf_df = pd.concat([hist_df, recent_df])
+                tf_df = tf_df[~tf_df.index.duplicated(keep='last')].sort_index()
+
+        if tf_df is None:
+            tf_df = self.resample_to_timeframe(df_1m, timeframe)
+
+        if len(tf_df) < 5:
+            return {"error": "insufficient_data", "candle_count": len(tf_df)}
+            
+        result = {
+            'mode': 'custom',
+            'timeframe': timeframe,
+            'current_price': round(float(df_1m.iloc[-1]['close']), 2),
+            'current_volume': round(float(df_1m.iloc[-1]['volume']), 2),
+            'timeframes': {timeframe: self.calculate_indicators_for_timeframe(tf_df)},
+            'structure': {
+                f'support_{timeframe}': self.calculate_diagonal_support(tf_df),
+                f'resistance_{timeframe}': self.calculate_diagonal_resistance(tf_df),
+                f'divergence_{timeframe}': self.detect_divergences(tf_df),
+            },
+            'market_structure': {timeframe: self.detect_market_structure(tf_df)},
+            'fibonacci': {timeframe: self.calculate_fibonacci_levels(tf_df)},
+            'swing_levels': {timeframe: self.calculate_swing_levels(tf_df)},
+            'confluence_zones': [],
+        }
+        
+        # Scoring
+        for t in ['support', 'resistance']:
+            key = f'{t}_{timeframe}'
+            line = result['structure'].get(key)
+            if line:
+                if 'trendline_quality' not in result: result['trendline_quality'] = {}
+                result['trendline_quality'][key] = self.score_trendline_quality(tf_df, line, t)
+                
+        return result
+
     def analyze_market(self, df_1m: pd.DataFrame, mode: TradingMode,
                        df_4h: Optional[pd.DataFrame] = None,
                        df_1d: Optional[pd.DataFrame] = None,
-                       df_1w: Optional[pd.DataFrame] = None) -> Dict:
+                       df_1w: Optional[pd.DataFrame] = None,
+                       timeframe: Optional[str] = None) -> Dict:
         """Unified entry point. Dispatches to mode-specific analysis.
-        Higher timeframe DataFrames (df_4h, df_1d, df_1w) come from GCS
-        when available, providing deeper history for EMA200 etc."""
+        If timeframe is provided, overrides mode for a single-TF custom analysis."""
+        if timeframe and timeframe not in (None, 'auto'):
+            return self.analyze_market_custom(df_1m, timeframe, df_1d=df_1d, df_1w=df_1w)
+            
         if mode == TradingMode.POSITION:
             return self.analyze_market_position(df_1m, df_1d=df_1d, df_1w=df_1w)
         return self.analyze_market_swing(df_1m, df_1d=df_1d)
