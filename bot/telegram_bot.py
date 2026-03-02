@@ -1,12 +1,15 @@
 """Telegram Bot interactive command handler.
 
 Commands:
-/start   - Welcome message
-/status  - Current position and latest decision
-/analyze - Run immediate analysis (BTC or ETH)
-/mode    - Show or switch trading mode
-/report  - Resend latest report
-/help    - List commands
+/start     - Welcome message & status overview
+/status    - Current position and latest decision
+/analyze   - Run immediate analysis (BTC or ETH)
+/mode      - Show or switch trading mode (swing/position)
+/report    - Resend latest analysis report
+/chart     - Generate premium technical chart
+/report_on - Resume automated AI analysis
+/report_off - Pause automated AI analysis (Save cost)
+/help     - List all commands
 """
 
 from telegram import Update
@@ -186,23 +189,29 @@ class TradingBot:
             f"Mode: {mode}\n"
             f"Symbols: BTC, ETH\n\n"
             f"Commands:\n"
-            f"/status  - Current position\n"
-            f"/analyze - BTC/ETH analysis\n"
-            f"/report_off - Pause AI reports (Save cost)\n"
-            f"/report_on  - Resume AI reports\n"
-            f"/mode    - Switch mode\n"
-            f"/help    - Show commands"
+            f"/status  - Current position & equity\n"
+            f"/analyze - Live analysis (BTC/ETH)\n"
+            f"/chart   - Generate HD technical chart\n"
+            f"/mode    - Switch Swing/Position\n"
+            f"/report  - Resend latest report\n"
+            f"/report_off - Pause AI (Save $)\n"
+            f"/report_on  - Resume AI\n"
+            f"/help    - Show all commands"
         )
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "/status - Current positions & latest decision\n"
-            "/analyze BTC|ETH - Run immediate analysis\n"
-            "/report_off - PAUSE automated reports & search (Save $)\n"
-            "/report_on  - RESUME automated reports & search\n"
-            "/mode - Show current mode\n"
-            "/report - Resend latest report\n"
-            "/help - Show this message"
+            "🔍 <b>Available Commands</b>\n\n"
+            "/status - Real-time positions & PnL\n"
+            "/analyze [BTC|ETH] - Trigger instant AI analysis\n"
+            "/chart [BTC|ETH] [4h|1d] - Generate premium HD chart\n"
+            "/report - Resend latest analysis report\n"
+            "/mode [swing|position] - Switch system timeframe\n"
+            "/report_off - PAUSE AI automation (Save cost)\n"
+            "/report_on  - RESUME AI automation\n"
+            "/help - Show this message\n\n"
+            "💡 <i>Tip: You can also talk to me in natural language!</i>",
+            parse_mode='HTML'
         )
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
