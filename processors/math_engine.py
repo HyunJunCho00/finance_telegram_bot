@@ -357,7 +357,7 @@ class MathEngine:
 
     def calculate_fibonacci_levels(self, df: pd.DataFrame) -> Optional[Dict]:
         """Fibonacci retracement levels from recent swing high/low.
-        Pro traders use 38.2%, 50%, 61.8% as key entry zones."""
+        Pro traders use OTE entry zones: 50%, 61.8%, 70.5%, 78.6%."""
         try:
             local_min_idx, local_max_idx = self.find_pivot_points(df, order=max(3, len(df) // 20))
             if len(local_min_idx) == 0 or len(local_max_idx) == 0:
@@ -375,10 +375,9 @@ class MathEngine:
                 levels = {
                     'swing_high': round(swing_high, 2),
                     'swing_low': round(swing_low, 2),
-                    'fib_236': round(swing_high - diff * 0.236, 2),
-                    'fib_382': round(swing_high - diff * 0.382, 2),
                     'fib_500': round(swing_high - diff * 0.500, 2),
                     'fib_618': round(swing_high - diff * 0.618, 2),
+                    'fib_705': round(swing_high - diff * 0.705, 2),
                     'fib_786': round(swing_high - diff * 0.786, 2),
                     'trend': 'up',
                 }
@@ -387,10 +386,9 @@ class MathEngine:
                 levels = {
                     'swing_high': round(swing_high, 2),
                     'swing_low': round(swing_low, 2),
-                    'fib_236': round(swing_low + diff * 0.236, 2),
-                    'fib_382': round(swing_low + diff * 0.382, 2),
                     'fib_500': round(swing_low + diff * 0.500, 2),
                     'fib_618': round(swing_low + diff * 0.618, 2),
+                    'fib_705': round(swing_low + diff * 0.705, 2),
                     'fib_786': round(swing_low + diff * 0.786, 2),
                     'trend': 'down',
                 }
@@ -700,7 +698,7 @@ class MathEngine:
 
     # ─────────────── FVG (Fair Value Gap) ───────────────
 
-    def calculate_fvg(self, df: pd.DataFrame, max_gaps: int = 5) -> List[Dict]:
+    def calculate_fvg(self, df: pd.DataFrame, max_gaps: int = 5, mode: TradingMode = TradingMode.SWING) -> List[Dict]:
         """Detect Fair Value Gaps (3-candle imbalance zones).
         FVG = gap between candle 1's wick and candle 3's wick.
         Unfilled FVGs act as magnets for price return."""
@@ -711,36 +709,43 @@ class MathEngine:
         highs = df['high'].astype(float).values
         lows = df['low'].astype(float).values
         current_price = float(df.iloc[-1]['close'])
+        
+        # In POSITION mode, filter out small FVGs (<1%)
+        min_gap_pct = 1.0 if mode == TradingMode.POSITION else 0.0
 
         for i in range(len(df) - 2):
             # Bullish FVG: candle3.low > candle1.high (gap up)
             if lows[i + 2] > highs[i]:
                 gap_low = highs[i]
                 gap_high = lows[i + 2]
-                # Check if unfilled (current price hasn't fully entered the gap)
-                filled = current_price <= gap_high and current_price >= gap_low
-                fvgs.append({
-                    'type': 'bullish',
-                    'gap_low': round(gap_low, 2),
-                    'gap_high': round(gap_high, 2),
-                    'gap_size_pct': round((gap_high - gap_low) / gap_low * 100, 4),
-                    'filled': filled,
-                    'candle_idx': i + 1,
-                })
+                gap_pct = (gap_high - gap_low) / gap_low * 100
+                if gap_pct >= min_gap_pct:
+                    # Check if unfilled (current price hasn't fully entered the gap)
+                    filled = current_price <= gap_high and current_price >= gap_low
+                    fvgs.append({
+                        'type': 'bullish',
+                        'gap_low': round(gap_low, 2),
+                        'gap_high': round(gap_high, 2),
+                        'gap_size_pct': round(gap_pct, 4),
+                        'filled': filled,
+                        'candle_idx': i + 1,
+                    })
 
             # Bearish FVG: candle3.high < candle1.low (gap down)
             if highs[i + 2] < lows[i]:
                 gap_high = lows[i]
                 gap_low = highs[i + 2]
-                filled = current_price >= gap_low and current_price <= gap_high
-                fvgs.append({
-                    'type': 'bearish',
-                    'gap_low': round(gap_low, 2),
-                    'gap_high': round(gap_high, 2),
-                    'gap_size_pct': round((gap_high - gap_low) / gap_low * 100, 4),
-                    'filled': filled,
-                    'candle_idx': i + 1,
-                })
+                gap_pct = (gap_high - gap_low) / gap_low * 100
+                if gap_pct >= min_gap_pct:
+                    filled = current_price >= gap_low and current_price <= gap_high
+                    fvgs.append({
+                        'type': 'bearish',
+                        'gap_low': round(gap_low, 2),
+                        'gap_high': round(gap_high, 2),
+                        'gap_size_pct': round(gap_pct, 4),
+                        'filled': filled,
+                        'candle_idx': i + 1,
+                    })
 
         # Return most recent unfilled gaps first
         unfilled = [g for g in fvgs if not g['filled']]
@@ -779,7 +784,7 @@ class MathEngine:
 
     # ─────────────── Market Structure (MSB / CHoCH) ───────────────
 
-    def detect_market_structure(self, df: pd.DataFrame) -> Dict:
+    def detect_market_structure(self, df: pd.DataFrame, mode: TradingMode = TradingMode.SWING) -> Dict:
         """Detect HH/HL/LH/LL sequence and Market Structure Breaks.
 
         MSB  (Market Structure Break): price breaks through last significant
@@ -793,7 +798,7 @@ class MathEngine:
             low   = df['low'].astype(float).values
             close = df['close'].astype(float).values
 
-            order = max(3, len(df) // 15)
+            order = max(10, len(df) // 10) if mode == TradingMode.POSITION else max(3, len(df) // 15)
             min_idx = argrelextrema(low,  np.less,    order=order)[0]
             max_idx = argrelextrema(high, np.greater, order=order)[0]
 
@@ -1202,10 +1207,10 @@ class MathEngine:
         # Structure on 1d
         tf_1d = timeframes.get('1d', pd.DataFrame())
         if len(tf_1d) >= 20:
-            result['structure']['support_1d']    = self.calculate_diagonal_support(tf_1d)
-            result['structure']['resistance_1d'] = self.calculate_diagonal_resistance(tf_1d)
+            result['structure']['support_1d']    = self.calculate_diagonal_support(tf_1d, mode=TradingMode.POSITION)
+            result['structure']['resistance_1d'] = self.calculate_diagonal_resistance(tf_1d, mode=TradingMode.POSITION)
             result['structure']['divergence_1d'] = self.detect_divergences(tf_1d)
-            result['market_structure']['1d']     = self.detect_market_structure(tf_1d)
+            result['market_structure']['1d']     = self.detect_market_structure(tf_1d, mode=TradingMode.POSITION)
 
             # Trendline quality scores
             sup  = result['structure'].get('support_1d')
@@ -1217,10 +1222,10 @@ class MathEngine:
 
         tf_1w = timeframes.get('1w', pd.DataFrame())
         if len(tf_1w) >= 10:
-            result['market_structure']['1w'] = self.detect_market_structure(tf_1w)
+            result['market_structure']['1w'] = self.detect_market_structure(tf_1w, mode=TradingMode.POSITION)
             # Structure on 1w (chart overlay: POSITION chart draws 1W candles)
-            result['structure']['support_1w']    = self.calculate_diagonal_support(tf_1w)
-            result['structure']['resistance_1w'] = self.calculate_diagonal_resistance(tf_1w)
+            result['structure']['support_1w']    = self.calculate_diagonal_support(tf_1w, mode=TradingMode.POSITION)
+            result['structure']['resistance_1w'] = self.calculate_diagonal_resistance(tf_1w, mode=TradingMode.POSITION)
             sup_1w = result['structure'].get('support_1w')
             res_1w = result['structure'].get('resistance_1w')
             if sup_1w:

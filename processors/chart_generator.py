@@ -615,10 +615,11 @@ class ChartGenerator:
             y_plot = np.clip(y_vals, y_lo - margin, y_hi + margin)
             
             kind = "SUP" if "support" in line_info.get('type', value_key) else "RES"
-            label_text = f"TREND {kind}"
+            label_text = f"TREND LIQ" # Rebranded as Trendline Liquidity Pools
             
-            ax.plot(x_vals, y_plot, color=color, linewidth=2.0,
-                    linestyle='-', alpha=0.9, zorder=10)
+            # Draw as dashed lines to indicate liquidity pools rather than solid hard boundaries
+            ax.plot(x_vals, y_plot, color=color, linewidth=1.5,
+                    linestyle='--', alpha=0.6, zorder=10)
             
             ax.text(x_vals[-1] - 1.5, y_vals[-1], f' {label_text}', color=color,
                     fontsize=7, fontweight='bold', va='bottom', ha='right',
@@ -635,10 +636,9 @@ class ChartGenerator:
             return
 
         fib_styles = {
-            'fib_236': ('#95A5A6', 0.3, 'FIB 23.6%'),
-            'fib_382': ('#95A5A6', 0.4, 'FIB 38.2%'),
             'fib_500': ('#34495E', 0.5, 'FIB 50%'),
             'fib_618': ('#95A5A6', 0.4, 'FIB 61.8%'),
+            'fib_705': ('#95A5A6', 0.4, 'FIB 70.5%'),
             'fib_786': ('#95A5A6', 0.3, 'FIB 78.6%'),
         }
 
