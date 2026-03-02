@@ -49,10 +49,15 @@ class MathEngine:
         
         # Ensure UTC and datetime
         df_main = df_main.copy()
+        if 'timestamp' not in df_main.columns and isinstance(df_main.index, pd.DatetimeIndex):
+            df_main['timestamp'] = df_main.index
         df_main['timestamp'] = pd.to_datetime(df_main['timestamp'], utc=True)
         
         df_history = df_history.copy()
-        df_history['timestamp'] = pd.to_datetime(df_history['timestamp'], utc=True)
+        if df_history is not None and not df_history.empty:
+            if 'timestamp' not in df_history.columns and isinstance(df_history.index, pd.DatetimeIndex):
+                df_history['timestamp'] = df_history.index
+            df_history['timestamp'] = pd.to_datetime(df_history['timestamp'], utc=True)
         
         # Combine
         combined = pd.concat([df_history, df_main], ignore_index=True)
@@ -88,7 +93,6 @@ class MathEngine:
             'high': 'max',
             'low': 'min',
             'close': 'last',
-            'volume': 'sum'
         }).dropna().reset_index()
 
         return resampled
@@ -1263,9 +1267,10 @@ class MathEngine:
                 hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'], utc=True)
                 hist_df = hist_df.set_index('timestamp')
                 
-                recent_df = self.resample_to_timeframe(df_1m, '1d')
+                recent_df = self.resample_to_timeframe(df_1m, '1d').set_index('timestamp')
                 tf_df = pd.concat([hist_df, recent_df])
-                tf_df = tf_df[~tf_df.index.duplicated(keep='last')].sort_index()
+                tf_df = tf_df[~tf_df.index.duplicated(keep='last')]
+                tf_df = tf_df.sort_index()
                 
         elif timeframe.lower() in ('1w', 'w'):
             if df_1w is not None and not df_1w.empty:
@@ -1273,9 +1278,10 @@ class MathEngine:
                 hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'], utc=True)
                 hist_df = hist_df.set_index('timestamp')
                 
-                recent_df = self.resample_to_timeframe(df_1m, '1w')
+                recent_df = self.resample_to_timeframe(df_1m, '1w').set_index('timestamp')
                 tf_df = pd.concat([hist_df, recent_df])
-                tf_df = tf_df[~tf_df.index.duplicated(keep='last')].sort_index()
+                tf_df = tf_df[~tf_df.index.duplicated(keep='last')]
+                tf_df = tf_df.sort_index()
 
         if tf_df is None:
             tf_df = self.resample_to_timeframe(df_1m, timeframe)
