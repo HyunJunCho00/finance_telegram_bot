@@ -20,9 +20,6 @@ from datetime import datetime, timezone, timedelta
 from loguru import logger
 import json
 import os
-from .tavily_collector import tavily_collector
-from .serper_collector import serper_collector
-
 
 class PerplexityCollector:
     BASE_URL = "https://api.perplexity.ai/chat/completions"
@@ -409,6 +406,7 @@ class PerplexityCollector:
         """
         # [V12.2] Prioritize Tavily (budget: 33/day). Reserve Perplexity for Reports only.
         if settings.TAVILY_API_KEY and not force_perplexity:
+            from .tavily_collector import tavily_collector
             if self._check_tavily_budget(daily_limit=33):
                 logger.info(f"Using Tavily ({search_depth}) for targeted search: [{entity}]")
                 try:
@@ -421,6 +419,7 @@ class PerplexityCollector:
 
         # [V12.3] Secondary Fallback: Serper (Google SERP) - High precision for links
         if settings.SERPER_API_KEY and not force_perplexity:
+            from .serper_collector import serper_collector
             logger.info(f"Using Serper for targeted link verification: [{entity}]")
             try:
                 serper_data = serper_collector.verify_news(f"{entity} {context}")
