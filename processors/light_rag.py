@@ -1230,20 +1230,28 @@ CRITICAL RULES:
         known = {
             'btc', 'bitcoin', 'eth', 'ethereum', 'sol', 'solana', 'xrp',
             'bnb', 'doge', 'ada', 'avax', 'link', 'dot', 'matic', 'uni',
-            'binance', 'coinbase', 'bybit', 'okx', 'upbit', 'kraken',
+            'binance', 'coinbase', 'bybit', 'okx', 'upbit', 'kraken', 'bithumb',
             'sec', 'cftc', 'fed', 'blackrock', 'grayscale', 'microstrategy',
             'tether', 'usdc', 'usdt', 'etf', 'halving', 'defi',
             'whale', 'liquidation', 'hack', 'exploit',
             'cpi', 'fomc', 'inflation', 'rate',
+            'knc', 'kyber', 'arb', 'arbitrum', 'op', 'optimism', 'tia', 'celestia',
+            'sei', 'sui', 'apt', 'aptos', 'ldo', 'lido', 'pendle', 'ena',
         }
         text_lower = text.lower()
         found = set()
         for entity in known:
-            if entity in text_lower:
+            # Word boundary check for symbols
+            pattern = rf'\b{re.escape(entity)}\b'
+            if re.search(pattern, text_lower):
                 found.add(entity)
-                etype = "coin" if entity in {'btc','bitcoin','eth','ethereum','sol','xrp','bnb','doge','ada','avax','link','dot','matic','uni'} else \
-                         "exchange" if entity in {'binance','coinbase','bybit','okx','upbit','kraken'} else \
-                         "org" if entity in {'sec','cftc','fed','blackrock','grayscale','microstrategy','tether'} else "event"
+                etype = "coin" if entity in {
+                    'btc','bitcoin','eth','ethereum','sol','solana','xrp','bnb','doge','ada','avax','link','dot',
+                    'matic','uni','knc','kyber','arb','arbitrum','op','optimism','tia','celestia','sei','sui',
+                    'apt','aptos','ldo','lido','pendle','ena','tether','usdc','usdt'
+                } else \
+                         "exchange" if entity in {'binance','coinbase','bybit','okx','upbit','kraken','bithumb'} else \
+                         "org" if entity in {'sec','cftc','fed','blackrock','grayscale','microstrategy'} else "event"
                 entities.append({"name": entity, "type": etype, "description": ""})
 
         # Co-occurrence relationships
