@@ -539,7 +539,7 @@ class TradingBot:
 
         try:
             import asyncio
-            from agents.claude_client import claude_client as ai_client
+            from agents.ai_router import ai_client
             from google.genai import types as gtypes
             from mcp_server.tools import mcp_tools
 

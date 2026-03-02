@@ -21,6 +21,7 @@ from loguru import logger
 import json
 import os
 from collectors.tavily_collector import tavily_collector
+from collectors.serper_collector import serper_collector
 
 
 class PerplexityCollector:
@@ -411,18 +412,36 @@ class PerplexityCollector:
             if self._check_tavily_budget(daily_limit=33):
                 logger.info(f"Using Tavily ({search_depth}) for targeted search: [{entity}]")
                 try:
+                    # [Alpha Choice] For targeted entity updates, use compat wrapper
                     result = tavily_collector.search_targeted_compat(entity, context, search_depth=search_depth)
                     if result.get("status") == "ok":
                         return result
-                    logger.warning(f"Tavily search failed for [{entity}], skipping Perplexity fallback to save cost.")
-                    return self._empty_targeted_result(entity)
                 except Exception as e:
                     logger.error(f"Tavily search error for [{entity}]: {e}")
-            else:
-                logger.info(f"Tavily daily budget reached. Skipping Perplexity fallback for non-report search: [{entity}]")
-                return self._empty_targeted_result(entity)
 
-        # Original Perplexity Logic (as fallback or high-quality)
+        # [V12.3] Secondary Fallback: Serper (Google SERP) - High precision for links
+        if settings.SERPER_API_KEY and not force_perplexity:
+            logger.info(f"Using Serper for targeted link verification: [{entity}]")
+            try:
+                serper_data = serper_collector.verify_news(f"{entity} {context}")
+                if serper_data.get("status") == "ok" and serper_data.get("results"):
+                    # Convert Serper format to targeted schema
+                    organic = serper_data["results"]
+                    return {
+                        "entity": entity,
+                        "status": "ok",
+                        "summary": f"Google Search Results for {entity}: " + organic[0].get("snippet", ""),
+                        "confidence_score": 70,
+                        "btc_eth_impact": "Verification via Google SERP.",
+                        "key_facts": [f"{r.get('title')}: {r.get('link')}" for r in organic[:3]],
+                        "market_relevance": "Detected via Google Search sniping.",
+                        "sources": [r.get("link") for r in organic[:5]],
+                        "trust_score": 75
+                    }
+            except Exception as e:
+                logger.error(f"Serper search error for [{entity}]: {e}")
+
+        # Final Fallback to Perplexity (Reserve for High Importance or if forced)
         if not self.api_key:
             logger.warning("PERPLEXITY_API_KEY not set, skipping targeted search")
             return self._empty_targeted_result(entity)

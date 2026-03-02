@@ -12,6 +12,7 @@ from executors.orchestrator import orchestrator
 from evalutors.feedback_generator import feedback_generator
 from processors.light_rag import light_rag
 from processors.gcs_archive import gcs_archive_exporter
+from agents.market_monitor_agent import market_monitor_agent
 from config.settings import settings, TradingMode
 from config.database import db
 from executors.order_manager import execution_desk
@@ -140,6 +141,29 @@ def job_analysis():
         orchestrator.run_scheduled_analysis()
     except Exception as e:
         logger.error(f"Analysis job error: {e}")
+
+def job_routine_market_status():
+    """V13.3: Routine Market Status check (Free-First)."""
+    try:
+        logger.info("Running routine market status check (Free-First)")
+        # In a real scenario, we'd fetch actual indicators from DB/Collectors
+        # For now, we'll simulate the call with current state
+        indicators = {
+            "btc_price": collector.get_last_price("BTCUSDT"),
+            "funding_rate": funding_collector.get_last_rate("BTCUSDT"),
+            "volatility": volatility_monitor.get_current_volatility()
+        }
+        summary = market_monitor_agent.summarize_current_status(indicators)
+        logger.success(f"Market Summary Generated:\n{summary}")
+        
+        # Optionally send to Telegram
+        from bot.telegram_bot import trading_bot
+        if trading_bot:
+            import asyncio
+            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"📊 *Routine Market Update*\n\n{summary}"))
+            
+    except Exception as e:
+        logger.error(f"Routine market status job error: {e}")
 
 
 def job_24hour_evaluation():
@@ -322,6 +346,15 @@ def main():
         job_analysis,
         _build_analysis_trigger(mode),
         id='job_analysis',
+        max_instances=1
+    )
+
+    # V13.3: Routine Market Status (Free-First) - every 1 hour (daily free tiers refresh 2026)
+    scheduler.add_job(
+        job_routine_market_status,
+        'interval',
+        hours=1,
+        id='job_market_status',
         max_instances=1
     )
 

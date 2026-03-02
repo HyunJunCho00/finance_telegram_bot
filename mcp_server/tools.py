@@ -7,6 +7,8 @@ from processors.gcs_parquet import gcs_parquet_store
 from loguru import logger
 import os
 import json
+from math import nan # for serialization safety
+from agents.market_monitor_agent import market_monitor_agent
 
 
 class MCPTools:
@@ -326,6 +328,31 @@ class MCPTools:
         except Exception as e:
             logger.error(f"Feedback history error: {e}")
             return {"error": str(e)}
-
+    def get_market_summary(self, symbol: str) -> Dict:
+        """Get a concise market summary (Sentiment, Anomalies, Outlook) via Free-First AI."""
+        try:
+            # 1. Fetch raw data similar to scheduler job
+            from collectors.price_collector import collector
+            from collectors.funding_collector import funding_collector
+            from collectors.volatility_monitor import volatility_monitor
+            
+            indicators = {
+                "btc_price": collector.get_last_price(symbol),
+                "funding_rate": funding_collector.get_last_rate(symbol),
+                "volatility": volatility_monitor.get_current_volatility()
+            }
+            
+            # 2. Use MarketMonitorAgent (Free-First Routing)
+            summary = market_monitor_agent.summarize_current_status(indicators)
+            
+            return {
+                "symbol": symbol,
+                "summary": summary,
+                "indicators_snapshot": indicators,
+                "provider": "Free-First AI (Groq/WorkersAI)"
+            }
+        except Exception as e:
+            logger.error(f"Market summary tool error: {e}")
+            return {"error": str(e)}
 
 mcp_tools = MCPTools()

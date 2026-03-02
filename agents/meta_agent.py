@@ -1,4 +1,4 @@
-from agents.claude_client import claude_client
+from agents.ai_router import ai_client
 from config.settings import settings, TradingMode
 from typing import Dict, Optional
 from loguru import logger

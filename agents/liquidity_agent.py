@@ -1,5 +1,5 @@
 import json
-from agents.claude_client import claude_client
+from agents.ai_router import ai_client
 from loguru import logger
 
 class LiquidityAgent:

@@ -639,17 +639,90 @@ class CloudflareReranker:
             resp = self._session.post(url, json=payload, timeout=self._TIMEOUT_S)
             resp.raise_for_status()
             data = resp.json()
-            results = data.get("result", [])
-            # results: [{"id": 0, "score": 0.92}, ...] ordered by id
+            results = data.get("result")
+            
+            # Cloudflare AI can return either:
+            # 1. List of floats: [0.93, 0.01, ...]
+            # 2. List of dicts: [{"index": 0, "score": 0.93}, ...]
+            # 3. List of dicts with 'id': [{"id": 0, "score": 0.93}, ...]
+            
+            if not isinstance(results, list):
+                logger.warning(f"CloudflareReranker: unexpected result type {type(results)}")
+                return None
+
             scores = [0.0] * len(contexts)
-            for item in results:
-                idx = item.get("id", -1)
-                if 0 <= idx < len(scores):
-                    scores[idx] = float(item.get("score", 0.0))
+            for i, item in enumerate(results):
+                if isinstance(item, (int, float)):
+                    if i < len(scores):
+                        scores[i] = float(item)
+                elif isinstance(item, dict):
+                    idx = item.get("index", item.get("id", i))
+                    if 0 <= idx < len(scores):
+                        scores[idx] = float(item.get("score", 0.0))
+                else:
+                    logger.debug(f"CloudflareReranker: skipping unexpected item type {type(item)}")
+            
             return scores
         except Exception as e:
             logger.warning(f"CloudflareReranker.rerank() failed (falling back to cosine): {e}")
             return None
+
+class CloudflareTriage:
+    """Cloudflare Workers AI Llama 3 8B — Zero-cost triage for Telegram triggers.
+    
+    10,000 neurons/day free tier. ~1,800 messages/day.
+    """
+    _URL_TEMPLATE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/meta/llama-3-8b-instruct-awq"
+    _PROMPT = """You are a High-Frequency Crypto News Triage agent.
+Identify if the message contains a time-sensitive market-moving TRIGGER.
+TRIGGER Categories: Listing, Hack, Partnership, Regulation, ETF, Mainnet/Upgrade.
+Discard: Generic price updates, ads, emotional chatter, old news.
+
+Return EXACTLY JSON: {{ "is_trigger": bool, "category": "string", "confidence": float }}
+Message: {text}
+"""
+
+    def __init__(self):
+        self._account_id = ""
+        self._api_key = ""
+        self._enabled = False
+        self._session = None
+
+    def _init(self):
+        if self._enabled: return
+        try:
+            from config.settings import settings
+            self._account_id = getattr(settings, "CLOUDFLARE_ACCOUNT_ID", "")
+            self._api_key = getattr(settings, "CLOUDFLARE_AI_API_KEY", "")
+            self._enabled = bool(self._account_id and self._api_key)
+        except: pass
+
+    def classify(self, text: str) -> Dict:
+        """Categorize message as trigger or junk."""
+        self._init()
+        if not self._enabled: return {"is_trigger": True, "category": "unknown", "confidence": 1.0} # Fallback to pass through
+
+        import requests
+        url = self._URL_TEMPLATE.format(account_id=self._account_id)
+        payload = {"messages": [{"role": "user", "content": self._PROMPT.format(text=text[:500])}]}
+        
+        try:
+            if self._session is None:
+                self._session = requests.Session()
+                self._session.headers.update({"Authorization": f"Bearer {self._api_key}"})
+            
+            resp = self._session.post(url, json=payload, timeout=4.0)
+            resp.raise_for_status()
+            content = resp.json().get("result", {}).get("response", "")
+            
+            # Extract JSON from potential Llama conversational wrapper
+            if "{" in content:
+                json_str = content[content.find("{"):content.rfind("}")+1]
+                return json.loads(json_str)
+            return {"is_trigger": False, "category": "junk", "confidence": 0.0}
+        except Exception as e:
+            logger.warning(f"CloudflareTriage failed: {e}")
+            return {"is_trigger": True, "category": "error_fallback", "confidence": 0.5}
 
 
 # Module-level singleton — shared across all ingest_message calls
@@ -1072,7 +1145,7 @@ CRITICAL RULES:
         """Lazy-load AI client for LLM-based extraction."""
         if self._ai_client is None:
             try:
-                from agents.claude_client import claude_client
+                from agents.ai_router import ai_client
                 self._ai_client = claude_client
             except Exception as e:
                 logger.error(f"AI client init for RAG failed: {e}")
@@ -1667,6 +1740,20 @@ CRITICAL RULES:
 
         result = '\n'.join(lines)
         return result[:max_length] if result else "RAG Context: No data available"
+
+    def triage_message(self, text: str) -> bool:
+        """Zero-cost triage using Workers AI Llama 3."""
+        if not hasattr(self, '_triage_engine'):
+            self._triage_engine = CloudflareTriage()
+        
+        # Don't triage very short messages
+        if len(text) < 20: return False
+        
+        result = self._triage_engine.classify(text)
+        is_trigger = result.get("is_trigger", False)
+        if is_trigger:
+            logger.info(f"Triage: SIGNAL DETECTED [{result.get('category', 'unknown')}] (conf: {result.get('confidence', 0):.2f})")
+        return is_trigger
 
     def get_stats(self) -> Dict:
         """Return current RAG stats."""

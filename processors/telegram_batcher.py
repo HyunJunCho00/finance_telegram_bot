@@ -21,7 +21,7 @@ from typing import List, Dict, Optional
 
 from config.settings import settings
 from config.database import db
-from agents.claude_client import claude_client
+from agents.ai_router import ai_client
 from processors.light_rag import light_rag
 
 logger = logging.getLogger(__name__)

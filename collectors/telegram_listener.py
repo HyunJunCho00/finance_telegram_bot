@@ -11,7 +11,7 @@ from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from config.settings import settings
 from config.database import db
-from agents.claude_client import claude_client
+from agents.ai_router import ai_client
 from processors.light_rag import light_rag
 from utils.text_sanitizer import clean_telegram_text
 from config.local_state import state_manager
@@ -346,11 +346,23 @@ class TelegramListener:
         if not filtered_batch:
             return
 
-        sources = list(set([m['source'] for m in filtered_batch]))
-        full_text = "\n---\n".join([f"[{m['source']}]: {m['text']}" for m in filtered_batch])
+        # 2. Workers AI Triage (Zero-cost filter)
+        # We triage each message to see if it's a market-moving trigger.
+        # This prevents Claude (expensive) from seeing routine price chatter.
+        triggered_batch = []
+        for msg in filtered_batch:
+            if light_rag.triage_message(msg['text']):
+                triggered_batch.append(msg)
+        
+        if not triggered_batch:
+            logger.debug(f"Batch ({len(filtered_batch)} msgs) contained no triggers. Skipping extraction.")
+            return
+
+        sources = list(set([m['source'] for m in triggered_batch]))
+        full_text = "\n---\n".join([f"[{m['source']}]: {m['text']}" for m in triggered_batch])
         try:
             extraction = await asyncio.to_thread(
-                claude_client.generate_response,
+                ai_client.generate_response,
                 system_prompt=ALPHA_EXTRACTION_PROMPT.format(sources=", ".join(sources), signal_type="REAL-TIME_ALPHA"),
                 user_message=f"Current market alerts:\n\n{full_text}",
                 role="rag_extraction", temperature=0.1

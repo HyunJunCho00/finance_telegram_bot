@@ -1,5 +1,5 @@
 from typing import Dict, Optional
-from agents.claude_client import claude_client
+from agents.ai_router import ai_client
 from config.database import db
 from datetime import datetime, timezone
 from loguru import logger

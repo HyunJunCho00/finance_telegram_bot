@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     VOYAGE_API_KEY: str = ""
     GEMINI_API_KEY: str = ""
+    GROQ_API_KEY: str = ""
 
     BINANCE_API_KEY: str = ""
     BINANCE_API_SECRET: str = ""
@@ -59,6 +60,8 @@ class Settings(BaseSettings):
     PERPLEXITY_MODEL_NARRATIVE: str = "sonar-pro"
     PERPLEXITY_MODEL_TARGETED: str = "sonar"
     TAVILY_API_KEY: str = ""
+    SERPER_API_KEY: str = ""
+    EXA_API_KEY: str = ""
     TRIANGULATION_MAX_ATTEMPTS: int = 2
 
     # FRED API for macro regime data
@@ -351,6 +354,7 @@ class SecretManager:
             "GCS_ARCHIVE_BUCKET",
             "ENABLE_GCS_ARCHIVE",
             "DUNE_API_KEY",
+            "GROQ_API_KEY",
         ]
 
         for name in secret_names:

@@ -102,4 +102,35 @@ class TavilyCollector:
             "trust_score": trust_score
         }
 
+    def verify_telegram_message(self, message_text: str) -> Dict[str, Any]:
+        """Verify real-time Telegram alerts using Tavily's precision.
+        
+        Focuses on finding if the 'rumor' is backed by trusted domains.
+        """
+        # Search query optimized for crypto fact-checking
+        query = f"verify crypto news: {message_text}"
+        
+        # Use advanced depth for better Alpha, but note it costs more credits (2 per call)
+        # For Telegram noise, we'll try basic first to save credits.
+        data = self.search(query, search_depth="basic", max_results=5)
+        
+        if data["status"] != "ok":
+            return {"status": "error", "message": "Verification failed"}
+
+        results = data.get("results", [])
+        trusted_sources = []
+        for r in results:
+            url = r.get("url", "")
+            if any(domain in url for domain in settings.TRUSTED_NEWS_DOMAINS):
+                trusted_sources.append(r)
+
+        return {
+            "status": "ok",
+            "is_verified": len(trusted_sources) > 0,
+            "trusted_count": len(trusted_sources),
+            "summary": data.get("answer", ""),
+            "top_sources": [r.get("url") for r in trusted_sources[:3]],
+            "raw_results_count": len(results)
+        }
+
 tavily_collector = TavilyCollector()
