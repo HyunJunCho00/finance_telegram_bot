@@ -9,7 +9,7 @@ from collectors.macro_collector import macro_collector
 from collectors.deribit_collector import deribit_collector
 from collectors.fear_greed_collector import fear_greed_collector
 from executors.orchestrator import orchestrator
-from evalutors.feedback_generator import feedback_generator
+from evaluators.feedback_generator import feedback_generator
 from processors.light_rag import light_rag
 from processors.gcs_archive import gcs_archive_exporter
 from agents.market_monitor_agent import market_monitor_agent

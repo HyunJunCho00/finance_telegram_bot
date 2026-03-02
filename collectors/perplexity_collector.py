@@ -20,8 +20,8 @@ from datetime import datetime, timezone, timedelta
 from loguru import logger
 import json
 import os
-from collectors.tavily_collector import tavily_collector
-from collectors.serper_collector import serper_collector
+from .tavily_collector import tavily_collector
+from .serper_collector import serper_collector
 
 
 class PerplexityCollector:

@@ -24,17 +24,35 @@ class MCPTools:
             
             # Load higher timeframe data from GCS for deeper indicator history
             df_1d, df_1w = None, None
+            cvd_df, funding_df, liq_df = None, None, None
+
             if gcs_parquet_store.enabled:
                 try:
-                    if mode == TradingMode.SWING:
-                        df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=18)
-                    elif mode == TradingMode.POSITION:
-                        df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=24)
+                    m_back = 18 if mode == TradingMode.SWING else 24
+                    df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
+                    if mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
+                    
+                    # Also load CVD/Funding history for a complete analysis
+                    cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
+                    fnd_hist = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
+                    
+                    # Merge with recent DB data
+                    cvd_recent = db.get_cvd_data(symbol, limit=settings.data_lookback_hours * 60)
+                    if not cvd_hist.empty:
+                        cvd_df = pd.concat([cvd_hist, cvd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                    else:
+                        cvd_df = cvd_recent
+
+                    fnd_recent = db.get_funding_history(symbol, limit=settings.data_lookback_hours * 60)
+                    if not fnd_hist.empty:
+                        funding_df = pd.concat([fnd_hist, fnd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                    else:
+                        funding_df = fnd_recent
                 except Exception as e:
                     logger.warning(f"GCS load for analysis tool skipped: {e}")
 
-            analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w)
+            analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w, cvd_df=cvd_df)
             compact = math_engine.format_compact(analysis)
             return {
                 "symbol": symbol,
@@ -223,6 +241,8 @@ class MCPTools:
 
             # Load higher timeframe data from GCS for deeper indicator history
             df_1d, df_1w = None, None
+            cvd_df, funding_df, liq_df = None, None, None
+            
             if gcs_parquet_store.enabled:
                 try:
                     # For custom timeframe charts, we should still provide enough context if it's a high TF
@@ -230,13 +250,37 @@ class MCPTools:
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
                     if timeframe and timeframe.lower() in ('1w', 'w') or mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
+                    
+                    # Detailed auxiliary data (CVD, Funding, Liquidations)
+                    # 1. CVD
+                    cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=6)
+                    cvd_recent = db.get_cvd_data(symbol, limit=settings.data_lookback_hours * 60)
+                    if not cvd_hist.empty:
+                        cvd_df = pd.concat([cvd_hist, cvd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                    else:
+                        cvd_df = cvd_recent
+                    
+                    # 2. Funding / OI
+                    fnd_hist = gcs_parquet_store.load_timeseries("funding", symbol, months_back=6)
+                    fnd_recent = db.get_funding_history(symbol, limit=settings.data_lookback_hours * 60)
+                    if not fnd_hist.empty:
+                        funding_df = pd.concat([fnd_hist, fnd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                    else:
+                        funding_df = fnd_recent
+                    
+                    # 3. Liquidations
+                    liq_df = db.get_liquidation_data(symbol, limit=settings.data_lookback_hours * 60)
                 except Exception as e:
                     logger.warning(f"GCS load for chart tool skipped: {e}")
 
             # Get analysis and generate chart
-            analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w, timeframe=timeframe)
+            analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w, 
+                                                   cvd_df=cvd_df, timeframe=timeframe)
             chart_bytes = chart_generator.generate_chart(df, analysis, symbol, mode, 
                                                           df_1d=df_1d, df_1w=df_1w,
+                                                          cvd_df=cvd_df, 
+                                                          funding_df=funding_df,
+                                                          liquidation_df=liq_df,
                                                           timeframe=timeframe)
 
             if chart_bytes:
