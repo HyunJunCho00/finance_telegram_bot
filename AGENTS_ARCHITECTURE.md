@@ -205,7 +205,7 @@ Retrieval (`retrieve_similar_memories`):
 
 ## Shared Infrastructure
 
-### AIClient (`agents/claude_client.py`)
+### AIClient (`agents/ai_client.py`)
 Multi-LLM router. Dispatches to Gemini, Claude, or GPT based on `model_id` prefix.
 
 **Role → Model routing** (`_get_role_model_and_cap`):

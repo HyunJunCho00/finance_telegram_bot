@@ -1,4 +1,4 @@
-from agents.ai_router import ai_client
+from .ai_router import ai_client
 from config.settings import settings, TradingMode
 from typing import Dict, Optional
 from config.database import db
@@ -197,7 +197,7 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
         try:
             # Judge uses the best model (Opus)
             # Only Judge gets the chart image (SWING mode only)
-            response = claude_client.generate_response(
+            response = ai_client.generate_response(
                 system_prompt=prompt,
                 user_message=user_message,
                 temperature=0.2,

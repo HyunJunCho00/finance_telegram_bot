@@ -1,5 +1,5 @@
 import json
-from agents.ai_router import ai_client
+from .ai_router import ai_client
 from loguru import logger
 
 class VLMGeometricAgent:
@@ -50,7 +50,7 @@ Schema:
             "Analyze every panel of this chart. Extract all visible price levels precisely. Return JSON only."
         )
         try:
-            response = claude_client.generate_response(
+            response = ai_client.generate_response(
                 system_prompt=self.SYSTEM_PROMPT,
                 user_message=user_message,
                 temperature=0.1,

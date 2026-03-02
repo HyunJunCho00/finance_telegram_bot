@@ -1,6 +1,6 @@
 import json
 from loguru import logger
-from agents.ai_router import ai_client
+from .ai_router import ai_client
 
 class RiskManagerAgent:
     """The Chief Risk Officer (CRO).
@@ -107,7 +107,7 @@ Please execute your Risk Management oversight and output the final, safe JSON.""
         try:
             # [FIX MEDIUM-14] CRO uses GPT-5.2 via role="macro" routing.
             # GPT-5.2 excels at rule enforcement and macro risk analysis.
-            response = claude_client.generate_response(
+            response = ai_client.generate_response(
                 system_prompt=self.SYSTEM_PROMPT,
                 user_message=user_message,
                 temperature=0.1,  # Very strict, less creative

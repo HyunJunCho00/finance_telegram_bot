@@ -46,7 +46,7 @@ Produce a structured 'CASE STUDY' for our internal Knowledge Graph:
 Focus strictly on objective analysis. No filler."""
 
     try:
-        response = claude_client.generate_response(
+        response = ai_client.generate_response(
             system_prompt="You are a strict, objective quantitative analyst specializing in Case Study documentation.",
             user_message=prompt,
             temperature=0.2,

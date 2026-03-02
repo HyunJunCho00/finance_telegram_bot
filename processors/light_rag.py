@@ -1146,7 +1146,7 @@ CRITICAL RULES:
         if self._ai_client is None:
             try:
                 from agents.ai_router import ai_client
-                self._ai_client = claude_client
+                self._ai_client = ai_client
             except Exception as e:
                 logger.error(f"AI client init for RAG failed: {e}")
         return self._ai_client

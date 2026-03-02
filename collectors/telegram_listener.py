@@ -379,7 +379,7 @@ class TelegramListener:
             if not image_bytes or len(image_bytes) < 2000: return ""
             image_b64 = base64.b64encode(image_bytes).decode("utf-8")
             result = await asyncio.to_thread(
-                claude_client.generate_response,
+                ai_client.generate_response,
                 system_prompt=VLM_SYSTEM_PROMPT,
                 user_message=VLM_USER_TEMPLATE.format(channel=channel_name, caption=caption[:400]),
                 max_tokens=120, temperature=0.0, chart_image_b64=image_b64, role="vlm_telegram_chart"

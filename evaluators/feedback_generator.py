@@ -45,7 +45,7 @@ Analyze what went wrong and provide:
 3. Lesson Learned (specific rule to follow next time)"""
 
         try:
-            response = claude_client.generate_response(
+            response = ai_client.generate_response(
                 system_prompt=self.system_prompt,
                 user_message=user_message,
                 temperature=0.3,

@@ -58,7 +58,7 @@ CHECKS = [
     },
     {
         "name": "OOM safety via input trimming",
-        "file": "agents/claude_client.py",
+        "file": "agents/ai_client.py",
         "needles": [
             "def _trim_input",
             "[TRUNCATED",

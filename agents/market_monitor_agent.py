@@ -1,5 +1,5 @@
 import json
-from agents.ai_router import ai_client
+from .ai_router import ai_client
 from loguru import logger
 from datetime import datetime
 from config.database import db

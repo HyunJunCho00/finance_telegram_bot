@@ -184,7 +184,7 @@ If relevant content exists, output a single dense paragraph starting with "NEWS 
             for chunk_idx, chunk in enumerate(chunks):
                 full_text = "\n---\n".join(chunk)
                 try:
-                    summary = claude_client.generate_response(
+                    summary = ai_client.generate_response(
                         system_prompt=self.PROMPTS[cat],
                         user_message=(
                             f"Messages from last {lookback_hours} hours "

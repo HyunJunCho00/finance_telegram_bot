@@ -1,4 +1,4 @@
-from agents.ai_router import ai_client
+from .ai_router import ai_client
 from config.settings import settings, TradingMode
 from typing import Dict, Optional
 from loguru import logger
@@ -69,7 +69,7 @@ Analyze the data and classify the current Market Regime. Provide a clear rationa
 
         try:
             # Meta-Agent uses Gemini 3.1 Flash for cost-effective but intelligent classification
-            response = claude_client.generate_response(
+            response = ai_client.generate_response(
                 system_prompt=self.SYSTEM_PROMPT,
                 user_message=user_message,
                 temperature=0.2,

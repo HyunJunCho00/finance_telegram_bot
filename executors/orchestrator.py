@@ -515,7 +515,7 @@ def node_blackboard_synthesis(state: AnalysisState) -> dict:
     )
 
     try:
-        response = claude_client.generate_response(
+        response = ai_client.generate_response(
             system_prompt=system_prompt,
             user_message=user_message,
             temperature=0.1,

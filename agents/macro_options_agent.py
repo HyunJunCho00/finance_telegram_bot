@@ -1,5 +1,5 @@
 import json
-from agents.ai_router import ai_client
+from .ai_router import ai_client
 from loguru import logger
 
 class MacroOptionsAgent:
@@ -25,7 +25,7 @@ Schema:
     def analyze(self, deribit_context: str, macro_context: str, mode: str = "SWING") -> dict:
         user_message = f"Trading Mode: {mode}\n\nDeribit Context:\n{deribit_context}\n\nMacro Context:\n{macro_context}\n\nAnalyze and return JSON."
         try:
-            response = claude_client.generate_response(
+            response = ai_client.generate_response(
                 system_prompt=self.SYSTEM_PROMPT,
                 user_message=user_message,
                 temperature=0.2,
