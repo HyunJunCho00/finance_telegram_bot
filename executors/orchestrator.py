@@ -52,6 +52,10 @@ import json
 # Cleared at the start of each analysis in run_analysis()
 _df_cache: dict = {}        # {symbol: DataFrame}
 _market_data_cache: dict = {}  # {symbol: market_data_dict}
+_cvd_cache: dict = {}       # {symbol: DataFrame}
+_liq_cache: dict = {}       # {symbol: DataFrame}
+_funding_cache: dict = {}   # {symbol: DataFrame}
+
 
 try:
     from langgraph.graph import StateGraph, END
@@ -60,6 +64,13 @@ except ImportError:
     LANGGRAPH_AVAILABLE = False
     logger.warning("langgraph not available, using sequential fallback")
 
+
+import operator
+
+def merge_dicts(a: dict, b: dict) -> dict:
+    out = a.copy() if a else {}
+    if b: out.update(b)
+    return out
 
 # ── State definition (LangGraph TypedDict) ──
 
@@ -89,7 +100,7 @@ class AnalysisState(TypedDict):
     budget: int
     turn_count: int
     anomalies: list
-    blackboard: Dict[str, dict]
+    blackboard: Annotated[Dict[str, dict], merge_dicts]
     conviction_score: float
     raw_funding: dict  # [FIX] Cached from node_funding_context for report reuse
 
@@ -104,7 +115,8 @@ class AnalysisState(TypedDict):
     report: Optional[Dict]
 
     # Error tracking
-    errors: list
+    errors: Annotated[list, operator.add]
+
 
 
 # ── Node functions ──
@@ -168,113 +180,123 @@ def node_collect_data(state: AnalysisState) -> dict:
     }
 def node_context_gathering(state: AnalysisState) -> dict:
     """Consolidated node to gather all external context (Perplexity, RAG, DB, etc.)
-    to avoid LangGraph recursion limit (25).
+    Uses ThreadPoolExecutor to run expensive I/O operations in parallel.
     """
+    import concurrent.futures
     updates = {}
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
-    
-    # 1. Perplexity Search
-    try:
-        asset = "BTC" if "BTC" in symbol else "ETH"
-        is_emergency = state.get("is_emergency", False)
-        narrative = perplexity_collector.search_market_narrative(symbol, is_emergency=is_emergency)
-        narrative_text = perplexity_collector.format_for_agents(narrative)
-        logger.info(f"Narrative for {asset}: {narrative.get('sentiment', '?')}")
-        updates["narrative_text"] = narrative_text
-    except Exception as e:
-        logger.error(f"Perplexity error: {e}")
-        updates["narrative_text"] = "Market Narrative: Unavailable"
+    is_emergency = state.get("is_emergency", False)
+    asset = "BTC" if "BTC" in symbol else "ETH"
+    coin_name = "Bitcoin BTC" if "BTC" in symbol else "Ethereum ETH"
 
-    # 2. RAG Ingest
-    try:
-        n_text = updates.get("narrative_text", "")
-        if n_text and "Unavailable" not in n_text and len(n_text) > 50:
-            import hashlib
-            from datetime import datetime, timezone
-            ts = datetime.now(timezone.utc).isoformat()
-            doc_id = hashlib.md5(f"perplexity:{symbol}:{ts[:13]}".encode()).hexdigest()
-            light_rag.ingest_message(text=n_text, channel=f"perplexity_{symbol}", timestamp=ts, message_id=doc_id)
-            logger.info(f"RAG: Perplexity narrative ingested for {symbol}")
-    except Exception as e:
-        logger.error(f"RAG Perplexity ingestion error: {e}")
+    def fetch_perplexity():
+        perp_updates = {}
+        try:
+            narrative = perplexity_collector.search_market_narrative(symbol, is_emergency=is_emergency)
+            narrative_text = perplexity_collector.format_for_agents(narrative)
+            logger.info(f"Narrative for {asset}: {narrative.get('sentiment', '?')}")
+            perp_updates["narrative_text"] = narrative_text
+            
+            # RAG Ingest
+            if narrative_text and "Unavailable" not in narrative_text and len(narrative_text) > 50:
+                import hashlib
+                from datetime import datetime, timezone
+                ts = datetime.now(timezone.utc).isoformat()
+                doc_id = hashlib.md5(f"perplexity:{symbol}:{ts[:13]}".encode()).hexdigest()
+                light_rag.ingest_message(text=narrative_text, channel=f"perplexity_{symbol}", timestamp=ts, message_id=doc_id)
+                logger.info(f"RAG: Perplexity narrative ingested for {symbol}")
+        except Exception as e:
+            logger.error(f"Perplexity error: {e}")
+            perp_updates["narrative_text"] = "Market Narrative: Unavailable"
+        return perp_updates
 
-    # 3. Funding Context
-    try:
-        res = db.client.table("funding_data").select("*").eq("symbol", symbol).order("timestamp", desc=True).limit(1).execute()
-        raw_funding = res.data[0] if res.data else {}
-        funding_data = math_engine.analyze_funding_context(raw_funding) if raw_funding else {}
-        if raw_funding:
-            for k in ['oi_binance', 'oi_bybit', 'oi_okx']: funding_data[k] = raw_funding.get(k, 0)
-        updates["funding_context"] = json.dumps(funding_data, default=str) if funding_data else "No funding data."
-        updates["raw_funding"] = raw_funding
-    except Exception as e:
-        logger.error(f"Funding context error: {e}")
+    def fetch_rag():
+        try:
+            return {"rag_context": light_rag.format_context_for_agents(light_rag.query(coin_name), max_length=1500)}
+        except Exception as e:
+            logger.error(f"RAG query error: {e}")
+            return {}
 
-    # 4. CVD Context
-    try:
-        cvd_df = db.get_cvd_data(symbol, limit=settings.data_lookback_hours * 60)
-        if not cvd_df.empty:
-            t_delta = float(cvd_df['volume_delta'].sum())
-            r_delta = float(cvd_df.tail(60)['volume_delta'].sum())
-            parts = [f"[CVD] {settings.data_lookback_hours}H Delta={t_delta:.2f} | 1H Delta={r_delta:.2f} | CVD={float(cvd_df['cvd'].iloc[-1]):.2f}"]
-            if 'whale_cvd' in cvd_df.columns:
-                w_buy = cvd_df['whale_buy_vol'].sum()
-                w_sell = cvd_df['whale_sell_vol'].sum()
-                parts.append(f"[WHALE_CVD] Buy=${w_buy:,.0f} Sell=${w_sell:,.0f} Ratio={w_buy/max(w_sell,1):.2f}")
-            updates["cvd_context"] = " | ".join(parts)
-    except Exception as e: logger.error(f"CVD error: {e}")
+    def fetch_db_contexts():
+        db_updates = {}
+        # 3. Funding Context
+        try:
+            res = db.client.table("funding_data").select("*").eq("symbol", symbol).order("timestamp", desc=True).limit(1).execute()
+            raw_funding = res.data[0] if res.data else {}
+            funding_data = math_engine.analyze_funding_context(raw_funding) if raw_funding else {}
+            if raw_funding:
+                for k in ['oi_binance', 'oi_bybit', 'oi_okx']: funding_data[k] = raw_funding.get(k, 0)
+            db_updates["funding_context"] = json.dumps(funding_data, default=str) if funding_data else "No funding data."
+            db_updates["raw_funding"] = raw_funding
+        except Exception as e:
+            logger.error(f"Funding context error: {e}")
 
-    # 5. Liquidation Context
-    try:
-        liq_df = db.get_liquidation_data(symbol, limit=settings.data_lookback_hours * 60)
-        if not liq_df.empty:
-            t_long, t_short = float(liq_df['long_liq_usd'].sum()), float(liq_df['short_liq_usd'].sum())
-            updates["liquidation_context"] = f"[LIQUIDATION] Total=${t_long+t_short:,.0f} (Long=${t_long:,.0f}, Short=${t_short:,.0f})"
-    except Exception as e: logger.error(f"Liq error: {e}")
+        # 4. CVD Context
+        try:
+            cvd_df = db.get_cvd_data(symbol, limit=settings.data_lookback_hours * 60)
+            _cvd_cache[symbol] = cvd_df  # Cache for chart generation
+            if not cvd_df.empty:
+                t_delta = float(cvd_df['volume_delta'].sum())
+                r_delta = float(cvd_df.tail(60)['volume_delta'].sum())
+                parts = [f"[CVD] {settings.data_lookback_hours}H Delta={t_delta:.2f} | 1H Delta={r_delta:.2f} | CVD={float(cvd_df['cvd'].iloc[-1]):.2f}"]
+                if 'whale_cvd' in cvd_df.columns:
+                    w_buy = cvd_df['whale_buy_vol'].sum()
+                    w_sell = cvd_df['whale_sell_vol'].sum()
+                    parts.append(f"[WHALE_CVD] Buy=${w_buy:,.0f} Sell=${w_sell:,.0f} Ratio={w_buy/max(w_sell,1):.2f}")
+                db_updates["cvd_context"] = " | ".join(parts)
+        except Exception as e: logger.error(f"CVD error: {e}")
 
-    # 6. RAG Query
-    try:
-        coin_name = "Bitcoin BTC" if "BTC" in symbol else "Ethereum ETH"
-        updates["rag_context"] = light_rag.format_context_for_agents(light_rag.query(coin_name), max_length=1500)
-    except Exception as e: logger.error(f"RAG query error: {e}")
+        # 5. Liquidation Context
+        try:
+            liq_df = db.get_liquidation_data(symbol, limit=settings.data_lookback_hours * 60)
+            _liq_cache[symbol] = liq_df  # Cache for chart generation
+            if not liq_df.empty:
+                t_long, t_short = float(liq_df['long_liq_usd'].sum()), float(liq_df['short_liq_usd'].sum())
+                db_updates["liquidation_context"] = f"[LIQUIDATION] Total=${t_long+t_short:,.0f} (Long=${t_long:,.0f}, Short=${t_short:,.0f})"
+        except Exception as e: logger.error(f"Liq error: {e}")
 
-    # 7. Telegram News
-    try:
-        news = db.get_recent_telegram_messages(hours=1 if state.get("is_emergency") else 4)
-        updates["telegram_news"] = "\n".join([f"[{m['channel']}] {m['text'][:200]}" for m in news[:10]]) if news else "No news."
-    except Exception as e: logger.error(f"Telegram news error: {e}")
 
-    # 8. Self Correction
-    try:
-        fb = db.get_feedback_history(limit=5)
-        if fb: updates["feedback_text"] = "\n\n[PAST MISTAKES]\n" + "\n".join([f"- {f.get('mistake_summary', 'N/A')[:150]}" for f in fb[:3]])
-    except Exception as e: logger.error(f"Self-correction error: {e}")
+        # 7. Telegram News
+        try:
+            news = db.get_recent_telegram_messages(hours=1 if is_emergency else 4)
+            db_updates["telegram_news"] = "\n".join([f"[{m['channel']}] {m['text'][:200]}" for m in news[:10]]) if news else "No news."
+        except Exception as e: logger.error(f"Telegram news error: {e}")
 
-    # 9. Microstructure Context
-    try:
-        snap = db.get_latest_microstructure(symbol)
-        if snap: updates["microstructure_context"] = f"[MICRO] spread={snap.get('spread_bps', 0):.2f}bps imbalance={snap.get('orderbook_imbalance', 0):.4f}"
-    except Exception as e: logger.error(f"Micro error: {e}")
+        # 8-12. Other DB Contexts
+        try:
+            fb = db.get_feedback_history(limit=5)
+            if fb: db_updates["feedback_text"] = "\n\n[PAST MISTAKES]\n" + "\n".join([f"- {f.get('mistake_summary', 'N/A')[:150]}" for f in fb[:3]])
+        except Exception: pass
+        try:
+            snap = db.get_latest_microstructure(symbol)
+            if snap: db_updates["microstructure_context"] = f"[MICRO] spread={snap.get('spread_bps', 0):.2f}bps imbalance={snap.get('orderbook_imbalance', 0):.4f}"
+        except Exception: pass
+        try:
+            m = db.get_latest_macro_data()
+            if m: db_updates["macro_context"] = f"[MACRO] DGS10={m.get('dgs10', 'N/A')} DXY={m.get('dxy', 'N/A')} NASDAQ={m.get('nasdaq', 'N/A')}"
+        except Exception: pass
+        try:
+            currency = symbol[:-4] if symbol.endswith('USDT') else symbol
+            d = db.get_latest_deribit_data(currency)
+            if d: db_updates["deribit_context"] = f"[DERIBIT {currency}] DVOL={d.get('dvol')} PCR={d.get('pcr_oi')}"
+        except Exception: pass
+        try:
+            fg = db.get_latest_fear_greed()
+            if fg: db_updates["fear_greed_context"] = f"[FEAR&GREED] {fg.get('value')}/100"
+        except Exception: pass
 
-    # 10. Macro Context
-    try:
-        m = db.get_latest_macro_data()
-        if m: updates["macro_context"] = f"[MACRO] DGS10={m.get('dgs10', 'N/A')} DXY={m.get('dxy', 'N/A')} NASDAQ={m.get('nasdaq', 'N/A')}"
-    except Exception as e: logger.error(f"Macro error: {e}")
+        return db_updates
 
-    # 11. Deribit Context
-    try:
-        currency = symbol[:-4] if symbol.endswith('USDT') else symbol
-        d = db.get_latest_deribit_data(currency)
-        if d: updates["deribit_context"] = f"[DERIBIT {currency}] DVOL={d.get('dvol')} PCR={d.get('pcr_oi')}"
-    except Exception as e: logger.error(f"Deribit error: {e}")
-
-    # 12. Fear & Greed
-    try:
-        fg = db.get_latest_fear_greed()
-        if fg: updates["fear_greed_context"] = f"[FEAR&GREED] {fg.get('value')}/100"
-    except Exception as e: logger.error(f"F&G error: {e}")
+    # Run network/DB calls in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        f_perp = executor.submit(fetch_perplexity)
+        f_rag = executor.submit(fetch_rag)
+        f_db = executor.submit(fetch_db_contexts)
+        
+        updates.update(f_perp.result())
+        updates.update(f_rag.result())
+        updates.update(f_db.result())
 
     return updates
 
@@ -397,15 +419,12 @@ def node_triage(state: AnalysisState) -> dict:
         anomalies.append("manual_emergency_trigger")
 
     return {
-        "budget": 100,
-        "turn_count": 0,
         "anomalies": list(set(anomalies)), # deduplicate
     }
 
 def node_liquidity_expert(state: AnalysisState) -> dict:
     """Run Liquidity Agent."""
     bb = state.get("blackboard", {})
-    if state.get("budget", 0) <= 0: return {}
     
     result = liquidity_agent.analyze(
         state.get("cvd_context", ""),
@@ -413,24 +432,22 @@ def node_liquidity_expert(state: AnalysisState) -> dict:
         mode=state.get("mode", "SWING").upper()
     )
     bb["liquidity"] = result
-    return {"blackboard": bb, "budget": state["budget"] - 20, "turn_count": state.get("turn_count", 0) + 1}
+    return {"blackboard": bb}
 
 def node_microstructure_expert(state: AnalysisState) -> dict:
     """Run Microstructure Agent."""
     bb = state.get("blackboard", {})
-    if state.get("budget", 0) <= 0: return {}
     
     result = microstructure_agent.analyze(
         state.get("microstructure_context", ""),
         mode=state.get("mode", "SWING").upper()
     )
     bb["microstructure"] = result
-    return {"blackboard": bb, "budget": state["budget"] - 15, "turn_count": state.get("turn_count", 0) + 1}
+    return {"blackboard": bb}
 
 def node_macro_options_expert(state: AnalysisState) -> dict:
     """Run Macro Options Agent."""
     bb = state.get("blackboard", {})
-    if state.get("budget", 0) <= 0: return {}
     
     result = macro_options_agent.analyze(
         state.get("deribit_context", ""),
@@ -438,7 +455,7 @@ def node_macro_options_expert(state: AnalysisState) -> dict:
         mode=state.get("mode", "SWING").upper()
     )
     bb["macro"] = result
-    return {"blackboard": bb, "budget": state["budget"] - 15, "turn_count": state.get("turn_count", 0) + 1}
+    return {"blackboard": bb}
 
 def node_vlm_geometric_expert(state: AnalysisState) -> dict:
     """Run VLM Geometric visual analysis. Sole agent that receives the raw chart image.
@@ -452,8 +469,7 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
 
     result = vlm_geometric_agent.analyze(chart, mode=state.get("mode", "SWING").upper())
     bb["vlm_geometry"] = result
-    return {"blackboard": bb, "budget": state.get("budget", 100) - 25,
-            "turn_count": state.get("turn_count", 0) + 1}
+    return {"blackboard": bb}
 
 
 def node_blackboard_synthesis(state: AnalysisState) -> dict:
@@ -553,9 +569,11 @@ def node_generate_chart(state: AnalysisState) -> dict:
     # Load CVD (Volume Delta) data for chart sync
     cvd_df = None
     try:
-        # Fetch 1m CVD data matching the candle lookback
-        cvd_limit = settings.data_lookback_hours * 60
-        cvd_df = db.get_cvd_data(symbol, limit=cvd_limit)
+        # Fetch 1m CVD data matching the candle lookback (from cache if available)
+        cvd_df = _cvd_cache.get(symbol)
+        if cvd_df is None:
+            cvd_limit = settings.data_lookback_hours * 60
+            cvd_df = db.get_cvd_data(symbol, limit=cvd_limit)
         
         # [NEW] Merge with GCS historical CVD for long-term charts
         from processors.gcs_parquet import gcs_parquet_store
@@ -563,16 +581,21 @@ def node_generate_chart(state: AnalysisState) -> dict:
             m_back = 6 if mode == TradingMode.SWING else 12
             hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
             if not hist_cvd.empty:
-                hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'], utc=True)
-                cvd_df = pd.concat([hist_cvd, cvd_df]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
+                if cvd_df is not None and not cvd_df.empty:
+                    cvd_df = pd.concat([hist_cvd, cvd_df]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                else:
+                    cvd_df = hist_cvd
     except Exception as e:
         logger.warning(f"CVD data load for chart skipped/merged: {e}")
 
     # Load liquidation data for chart markers
     liquidation_df = None
     try:
-        liq_limit = settings.data_lookback_hours * 60
-        liquidation_df = db.get_liquidation_data(symbol, limit=liq_limit)
+        liquidation_df = _liq_cache.get(symbol)
+        if liquidation_df is None:
+            liq_limit = settings.data_lookback_hours * 60
+            liquidation_df = db.get_liquidation_data(symbol, limit=liq_limit)
     except Exception:
         pass
 
@@ -589,10 +612,14 @@ def node_generate_chart(state: AnalysisState) -> dict:
             m_back = 6 if mode == TradingMode.SWING else 12
             hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
             if not hist_fnd.empty:
-                hist_fnd['timestamp'] = pd.to_datetime(hist_fnd['timestamp'], utc=True)
-                funding_df = pd.concat([hist_fnd, funding_df]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                hist_fnd['timestamp'] = pd.to_datetime(hist_fnd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
+                if funding_df is not None and not funding_df.empty:
+                    funding_df = pd.concat([hist_fnd, funding_df]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                else:
+                    funding_df = hist_fnd
     except Exception as e:
         logger.warning(f"Funding/OI data load for chart skipped/merged: {e}")
+
 
     chart_bytes = chart_generator.generate_chart(df, market_data, symbol, mode,
                                                   liquidation_df=liquidation_df,
@@ -841,54 +868,10 @@ def _build_full_context(state: AnalysisState) -> str:
     ]
     return "\n\n".join(p for p in parts if p)
 
-
-# ── Conditional edge ──
-
-# ── Conditional edge ──
-
-def route_triage(state: AnalysisState) -> str:
-    """Always run the full Expert Swarm (liquidity → microstructure → macro).
-
-    Previous bug: returned 'generate_chart' when no anomalies detected, silently
-    skipping all three domain experts. In quiet trending markets this meant Judge
-    made decisions with zero expert input — defeating the purpose of the swarm.
-
-    Fix: always start from liquidity_expert. route_swarm fills remaining experts.
-    Anomaly context is embedded in state fields (cvd_context, deribit_context etc.)
-    so experts are fully informed regardless of entry point.
-    MetaAgent trust_directive handles regime-based expert weighting at Judge level.
-    """
-    return "liquidity_expert"
-
-def route_swarm(state: AnalysisState) -> str:
-    budget = state.get("budget", 0)
-    turns = state.get("turn_count", 0)
-    
-    if budget <= 0 or turns >= 5:
-        return "generate_chart"
-        
-    bb = state.get("blackboard", {})
-    
-    # If all text experts have spoken, go to chart generation and then VLM
-    if "liquidity" in bb and "microstructure" in bb and "macro" in bb:
-        return "generate_chart"
-        
-    if "microstructure" not in bb:
-        return "microstructure_expert"
-    if "macro" not in bb:
-        return "macro_expert"
-        
-    return "generate_chart"
-
-def route_vlm(state: AnalysisState) -> str:
-    """Route to VLM Expert after chart is generated, then Judge."""
-    return "vlm_expert"
-
-
 # ── Build the LangGraph StateGraph ──
 
 def build_analysis_graph():
-    """Build the multi-agent analysis graph."""
+    """Build the multi-agent analysis graph with parallel execution."""
     graph = StateGraph(AnalysisState)
 
     # Add nodes
@@ -914,35 +897,27 @@ def build_analysis_graph():
 
     graph.set_entry_point("collect_data")
 
+    # Sequential preprocessing
     graph.add_edge("collect_data", "context_gathering")
     graph.add_edge("context_gathering", "meta_agent")
     graph.add_edge("meta_agent", "triage")
 
-    graph.add_conditional_edges("triage", route_triage, {
-        "liquidity_expert": "liquidity_expert",
-        "microstructure_expert": "microstructure_expert",
-        "macro_expert": "macro_expert",
-        "generate_chart": "generate_chart",
-        # [FIX SILENT-1] Removed dead "generate_report" — route_triage no longer returns it
-    })
+    # FAN OUT: Run all experts and chart generation in PARALLEL
+    graph.add_edge("triage", "liquidity_expert")
+    graph.add_edge("triage", "microstructure_expert")
+    graph.add_edge("triage", "macro_expert")
+    graph.add_edge("triage", "generate_chart")
     
-    graph.add_conditional_edges("liquidity_expert", route_swarm, {
-        "microstructure_expert": "microstructure_expert",
-        "macro_expert": "macro_expert",
-        "generate_chart": "generate_chart"
-    })
-    
-    graph.add_conditional_edges("microstructure_expert", route_swarm, {
-        "macro_expert": "macro_expert",
-        "generate_chart": "generate_chart"
-    })
-    
-    graph.add_conditional_edges("macro_expert", route_swarm, {
-        "generate_chart": "generate_chart"
-    })
-
+    # VLM expert waits for the chart
     graph.add_edge("generate_chart", "vlm_expert")
-    graph.add_edge("vlm_expert", "blackboard_synthesis")
+
+    # FAN IN: Synthesis waits for all text experts + VLM expert
+    graph.add_edge(
+        ["liquidity_expert", "microstructure_expert", "macro_expert", "vlm_expert"], 
+        "blackboard_synthesis"
+    )
+
+    # Sequential finalization
     graph.add_edge("blackboard_synthesis", "judge_agent")
     graph.add_edge("judge_agent", "risk_manager")
     graph.add_edge("risk_manager", "portfolio_leverage_guard")
@@ -952,6 +927,7 @@ def build_analysis_graph():
     graph.add_edge("data_synthesis", END)
 
     return graph.compile()
+
 
 
 # ── Orchestrator class (maintains backward compatibility) ──
@@ -983,6 +959,9 @@ class Orchestrator:
         # [FIX CRASH-2] Clear per-symbol cache at the start of each analysis
         _df_cache.pop(symbol, None)
         _market_data_cache.pop(symbol, None)
+        _cvd_cache.pop(symbol, None)
+        _liq_cache.pop(symbol, None)
+        _funding_cache.pop(symbol, None)
 
         if self.graph:
             return self._run_with_langgraph(symbol, mode, is_emergency)

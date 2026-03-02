@@ -51,19 +51,36 @@ class DatabaseClient:
             data_list, on_conflict="timestamp,symbol,exchange"
         ).execute()
 
+    def _fetch_paginated(self, table: str, limit: int, order_col: str, **eq_filters) -> List[Dict]:
+        """Helper to bypass Supabase 1000 row max limit using pagination."""
+        all_rows = []
+        fetched = 0
+        page_size = 1000
+        while fetched < limit:
+            fetch_size = min(page_size, limit - fetched)
+            start = fetched
+            end = fetched + fetch_size - 1
+            
+            query = self.client.table(table).select("*")
+            for k, v in eq_filters.items():
+                query = query.eq(k, v)
+                
+            response = query.order(order_col, desc=True).range(start, end).execute()
+            rows = response.data if response.data else []
+            if not rows:
+                break
+            all_rows.extend(rows)
+            fetched += len(rows)
+            if len(rows) < fetch_size:
+                break
+        return all_rows
+
     @reconnect_on_error
     def get_latest_market_data(self, symbol: str, limit: int = 1000, exchange: str = "binance") -> pd.DataFrame:
-        response = self.client.table("market_data")\
-            .select("*")\
-            .eq("symbol", symbol)\
-            .eq("exchange", exchange)\
-            .order("timestamp", desc=True)\
-            .limit(limit)\
-            .execute()
-
-        if response.data:
-            df = pd.DataFrame(response.data)
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        rows = self._fetch_paginated("market_data", limit, "timestamp", symbol=symbol, exchange=exchange)
+        if rows:
+            df = pd.DataFrame(rows)
+            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
             return df.sort_values('timestamp').reset_index(drop=True)
         return pd.DataFrame()
 
@@ -79,16 +96,10 @@ class DatabaseClient:
     @reconnect_on_error
     def get_cvd_data(self, symbol: str, limit: int = 240) -> pd.DataFrame:
         """Get recent CVD data for a symbol. Default 240 = 4 hours of 1m data."""
-        response = self.client.table("cvd_data")\
-            .select("*")\
-            .eq("symbol", symbol)\
-            .order("timestamp", desc=True)\
-            .limit(limit)\
-            .execute()
-
-        if response.data:
-            df = pd.DataFrame(response.data)
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        rows = self._fetch_paginated("cvd_data", limit, "timestamp", symbol=symbol)
+        if rows:
+            df = pd.DataFrame(rows)
+            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
             df = df.sort_values('timestamp').reset_index(drop=True)
             # Calculate cumulative volume delta
             df['cvd'] = df['volume_delta'].cumsum()
@@ -124,16 +135,10 @@ class DatabaseClient:
     @reconnect_on_error
     def get_liquidation_data(self, symbol: str, limit: int = 240) -> pd.DataFrame:
         """Get recent liquidation data. Default 240 = 4 hours of 1m data."""
-        response = self.client.table("liquidations")\
-            .select("*")\
-            .eq("symbol", symbol)\
-            .order("timestamp", desc=True)\
-            .limit(limit)\
-            .execute()
-
-        if response.data:
-            df = pd.DataFrame(response.data)
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        rows = self._fetch_paginated("liquidations", limit, "timestamp", symbol=symbol)
+        if rows:
+            df = pd.DataFrame(rows)
+            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
             return df.sort_values('timestamp').reset_index(drop=True)
         return pd.DataFrame()
 
@@ -351,16 +356,10 @@ class DatabaseClient:
     # ─────────────── Funding History ───────────────
 
     def get_funding_history(self, symbol: str, limit: int = 100) -> pd.DataFrame:
-        response = self.client.table("funding_data")\
-            .select("*")\
-            .eq("symbol", symbol)\
-            .order("timestamp", desc=True)\
-            .limit(limit)\
-            .execute()
-
-        if response.data:
-            df = pd.DataFrame(response.data)
-            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+        rows = self._fetch_paginated("funding_data", limit, "timestamp", symbol=symbol)
+        if rows:
+            df = pd.DataFrame(rows)
+            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
             return df.sort_values('timestamp').reset_index(drop=True)
         return pd.DataFrame()
 

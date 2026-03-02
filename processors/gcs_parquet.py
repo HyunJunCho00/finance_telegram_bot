@@ -212,8 +212,9 @@ class GCSParquetStore:
         if pd.api.types.is_numeric_dtype(result["timestamp"]):
             result["timestamp"] = pd.to_datetime(result["timestamp"], unit='ms', utc=True)
         else:
-            result["timestamp"] = pd.to_datetime(result["timestamp"], utc=True)
+            result["timestamp"] = pd.to_datetime(result["timestamp"].astype(str), format='mixed', utc=True, errors='coerce').bfill()
         result = result.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+
         return result
 
     def load_timeseries(self, prefix: str, symbol: str,
@@ -240,7 +241,7 @@ class GCSParquetStore:
         if pd.api.types.is_numeric_dtype(result[time_col]):
             result[time_col] = pd.to_datetime(result[time_col], unit='ms', utc=True)
         else:
-            result[time_col] = pd.to_datetime(result[time_col], utc=True)
+            result[time_col] = pd.to_datetime(result[time_col].astype(str), format='mixed', utc=True, errors='coerce').bfill()
             
         return result.sort_values(time_col).reset_index(drop=True)
 
