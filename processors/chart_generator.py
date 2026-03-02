@@ -435,30 +435,32 @@ class ChartGenerator:
             # Label swing highs: HH or LH
             for i, idx in enumerate(max_idx):
                 if i == 0:
-                    label = 'H'
+                    label = 'S_H' # STRUCTURE_HIGH
                 else:
                     prev = high[max_idx[i - 1]]
-                    label = 'HH' if high[idx] > prev else 'LH'
+                    label = 'S_HH' if high[idx] > prev else 'S_LH'
                 ax.annotate(label,
                             xy=(idx, high[idx]),
-                            xytext=(0, 6), textcoords='offset points',
-                            fontsize=7, color='#E74C3C', ha='center',
-                            va='bottom', fontweight='bold', alpha=0.8,
-                            annotation_clip=True)
+                            xytext=(0, 7), textcoords='offset points',
+                            fontsize=8, color='#E74C3C', ha='center',
+                            va='bottom', fontweight='bold', alpha=0.9,
+                            annotation_clip=True,
+                            bbox=dict(facecolor='black', alpha=0.4, edgecolor='none', pad=0.5))
 
             # Label swing lows: HL or LL
             for i, idx in enumerate(min_idx):
                 if i == 0:
-                    label = 'L'
+                    label = 'S_L'
                 else:
                     prev = low[min_idx[i - 1]]
-                    label = 'HL' if low[idx] > prev else 'LL'
+                    label = 'S_HL' if low[idx] > prev else 'S_LL'
                 ax.annotate(label,
                             xy=(idx, low[idx]),
-                            xytext=(0, -6), textcoords='offset points',
-                            fontsize=7, color='#3498DB', ha='center',
-                            va='top', fontweight='bold', alpha=0.8,
-                            annotation_clip=True)
+                            xytext=(0, -7), textcoords='offset points',
+                            fontsize=8, color='#3498DB', ha='center',
+                            va='top', fontweight='bold', alpha=0.9,
+                            annotation_clip=True,
+                            bbox=dict(facecolor='black', alpha=0.4, edgecolor='none', pad=0.5))
         except Exception as e:
             logger.debug(f"Market structure labels error: {e}")
 
@@ -941,6 +943,23 @@ class ChartGenerator:
                 ax.text(0.01, 0.90, ind_text, transform=ax.transAxes,
                         fontsize=8, color='#787B86', alpha=0.8,
                         ha='left', va='top')
+            
+            # 4. [VLM OPT] Analytical Overlay Guide (Rosetta Stone)
+            # This helps VLM map visual colors to semantic concepts
+            overlay_guide = ("LEGEND: [Green Box=Bull FVG/OB] [Red Box=Bear FVG/OB] "
+                            "[Yellow Line=AVWAP] [Blue X=Structure Low] [Red X=Structure High]")
+            ax.text(0.01, 0.02, overlay_guide, transform=ax.transAxes,
+                    fontsize=7, color=text_color, alpha=0.5,
+                    ha='left', va='bottom', fontweight='bold',
+                    bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
+            
+            # 5. [TIME ANCHOR] Force X-axis to show the latest timestamp
+            # We do this by ensuring the last tick is explicitly labeled
+            last_ts = chart_df.index[-1].strftime('%Y-%m-%d %H:%M')
+            ax.annotate(f"LAST: {last_ts}", xy=(len(chart_df)-1, 0), xycoords=('data', 'axes fraction'),
+                        xytext=(0, -25), textcoords='offset points',
+                        rotation=45, fontsize=7, color=text_color, fontweight='bold',
+                        ha='right', va='top', alpha=0.9)
         except Exception as e:
             logger.debug(f"Header legend draw error: {e}")
 
