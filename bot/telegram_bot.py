@@ -11,7 +11,7 @@ Commands:
 /report_off - Pause automated AI analysis (Save cost)
 /help     - List all commands
 """
-
+from typing import List, Optional, Dict
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from config.settings import settings, TradingMode

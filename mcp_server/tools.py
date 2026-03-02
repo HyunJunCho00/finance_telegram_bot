@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, Optional, List
 from config.database import db
 from config.settings import settings, TradingMode
 from processors.math_engine import math_engine
