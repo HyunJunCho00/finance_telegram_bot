@@ -255,18 +255,22 @@ class MCPTools:
                     # Detailed auxiliary data (CVD, Funding, Liquidations)
                     # 1. CVD
                     cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=6)
-                    cvd_recent = db.get_cvd_data(symbol, limit=settings.data_lookback_hours * 60)
                     if not cvd_hist.empty:
+                        since_cvd = cvd_hist['timestamp'].max()
+                        cvd_recent = db.get_cvd_data(symbol, limit=50000, since=since_cvd)
                         cvd_df = pd.concat([cvd_hist, cvd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
                     else:
+                        cvd_recent = db.get_cvd_data(symbol, limit=settings.data_lookback_hours * 60)
                         cvd_df = cvd_recent
                     
                     # 2. Funding / OI
                     fnd_hist = gcs_parquet_store.load_timeseries("funding", symbol, months_back=6)
-                    fnd_recent = db.get_funding_history(symbol, limit=settings.data_lookback_hours * 60)
                     if not fnd_hist.empty:
+                        since_fnd = fnd_hist['timestamp'].max()
+                        fnd_recent = db.get_funding_history(symbol, limit=50000, since=since_fnd)
                         funding_df = pd.concat([fnd_hist, fnd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
                     else:
+                        fnd_recent = db.get_funding_history(symbol, limit=settings.data_lookback_hours * 60)
                         funding_df = fnd_recent
                     
                     # 3. Liquidations

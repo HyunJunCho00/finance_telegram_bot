@@ -582,10 +582,14 @@ def node_generate_chart(state: AnalysisState) -> dict:
             hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
             if not hist_cvd.empty:
                 hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-                if cvd_df is not None and not cvd_df.empty:
-                    cvd_df = pd.concat([hist_cvd, cvd_df]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-                else:
-                    cvd_df = hist_cvd
+                since_cvd = hist_cvd['timestamp'].max()
+                bridge_cvd = db.get_cvd_data(symbol, limit=50000, since=since_cvd)
+                
+                dfs = [hist_cvd]
+                if not bridge_cvd.empty: dfs.append(bridge_cvd)
+                if cvd_df is not None and not cvd_df.empty: dfs.append(cvd_df)
+                
+                cvd_df = pd.concat(dfs).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
     except Exception as e:
         logger.warning(f"CVD data load for chart skipped/merged: {e}")
 
@@ -613,10 +617,16 @@ def node_generate_chart(state: AnalysisState) -> dict:
             hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
             if not hist_fnd.empty:
                 hist_fnd['timestamp'] = pd.to_datetime(hist_fnd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-                if funding_df is not None and not funding_df.empty:
-                    funding_df = pd.concat([hist_fnd, funding_df]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-                else:
-                    funding_df = hist_fnd
+                since_fnd = hist_fnd['timestamp'].max()
+                bridge_fnd = db.get_funding_history(symbol, limit=50000, since=since_fnd)
+                
+                dfs = [hist_fnd]
+                if not bridge_fnd.empty: dfs.append(bridge_fnd)
+                if funding_df is not None and not funding_df.empty: dfs.append(funding_df)
+                
+                funding_df = pd.concat(dfs).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+            else:
+                funding_df = hist_fnd
     except Exception as e:
         logger.warning(f"Funding/OI data load for chart skipped/merged: {e}")
 
