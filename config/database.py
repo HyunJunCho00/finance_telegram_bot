@@ -24,9 +24,12 @@ class DatabaseClient:
                 return func(self, *args, **kwargs)
             except Exception as e:
                 err_msg = str(e).lower()
-                if "disconnected" in err_msg or "closed" in err_msg or "connection" in err_msg:
-                    logger.warning(f"Database disconnected during {func.__name__}, reconnecting: {e}")
+                # Catch closed connections, SSL/EOF protocol violations, and general connection errors
+                if any(x in err_msg for x in ["disconnected", "closed", "connection", "eof", "protocol"]):
+                    logger.warning(f"Database error ({err_msg}) during {func.__name__}, reconnecting...")
                     try:
+                        import time
+                        time.sleep(1) # Brief pause for network stabilization
                         self.client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
                         return func(self, *args, **kwargs)
                     except Exception as retry_e:
