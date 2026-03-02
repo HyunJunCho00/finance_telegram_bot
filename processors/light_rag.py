@@ -1746,13 +1746,18 @@ CRITICAL RULES:
         if not hasattr(self, '_triage_engine'):
             self._triage_engine = CloudflareTriage()
         
-        # Don't triage very short messages
-        if len(text) < 20: return False
+        # Don't triage extremely short messages (e.g. just a coin name)
+        # Lowered from 20 to 12 to catch "$BTC UP 10%" or "SEC HACKED"
+        if len(text) < 12: 
+            logger.debug(f"Triage: Message too short ({len(text)} chars). Skipping.")
+            return False
         
         result = self._triage_engine.classify(text)
         is_trigger = result.get("is_trigger", False)
         if is_trigger:
             logger.info(f"Triage: SIGNAL DETECTED [{result.get('category', 'unknown')}] (conf: {result.get('confidence', 0):.2f})")
+        else:
+            logger.debug(f"Triage: No signal detected [{result.get('category', 'junk')}]")
         return is_trigger
 
     def get_stats(self) -> Dict:

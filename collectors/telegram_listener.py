@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration & Constants ---
 VISUAL_CHANNELS = {"CryptoQuant", "Glassnode", "Lookonchain"}
+PRIORITY_CHANNELS = {"WalterBloomberg", "Tree_News", "Binance_Announcements", "Whale_Alert"}
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SESSION_DIR = os.path.join(_PROJECT_ROOT, 'data')
@@ -192,6 +193,7 @@ class TelegramListener:
         self.api_hash = settings.TELEGRAM_API_HASH
         self.client: Optional[TelegramClient] = None
         self._message_buffer: List[Dict] = []
+        self._triggered_buffer: List[Dict] = [] # Messages that passed triage
         self._buffer_lock = asyncio.Lock()
         self._running = False
         self.channels = {
@@ -292,16 +294,43 @@ class TelegramListener:
                 clean_text = f"{clean_text}\n[CHART] {analysis}" if clean_text else f"[CHART] {analysis}"
 
         if not clean_text: return
-
-        # Persistence (V13.8 Refactor: use resilient wrapper)
+        
+        msg_payload = {
+            "source": sender_name, 
+            "text": clean_text, 
+            "message_id": message.id,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # 1. Immediate Persistence (V13.8 Refactor)
         db.upsert_telegram_message({
             "channel": sender_name, "text": clean_text, "message_id": message.id,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": msg_payload["timestamp"]
         })
 
-        # Buffer for Alpha
+        # 2. IMMEDIATE TRIAGE (Zero-cost Cloudflare)
+        # We triage every single message immediately to maximize 10k/day neurons usage.
+        is_trigger = light_rag.triage_message(clean_text)
+        
+        if is_trigger:
+            async with self._buffer_lock:
+                self._triggered_buffer.append(msg_payload)
+            
+            # Priority Trigger: If it's a critical source, flush extraction immediately
+            if sender_name in PRIORITY_CHANNELS:
+                logger.info(f"🚀 PRIORITY EXTRACTION: Immediate trigger for [{sender_name}]")
+                asyncio.create_task(self._process_triggered_now())
+        else:
+            # Still buffer for "Routine Alpha" if we want, but usually junk is just junk.
+            # We'll skip adding junk messages to any extraction buffer to save AI costs.
+            pass
+
+    async def _process_triggered_now(self):
+        """Flush triggered messages for extraction immediately."""
         async with self._buffer_lock:
-            self._message_buffer.append({"source": sender_name, "text": clean_text, "timestamp": datetime.now(timezone.utc).isoformat()})
+            if not self._triggered_buffer: return
+            batch, self._triggered_buffer = self._triggered_buffer, []
+        await self._process_batch(batch)
 
     async def _batch_processor_loop(self):
         last_flush = datetime.now(timezone.utc)
@@ -309,24 +338,25 @@ class TelegramListener:
             await asyncio.sleep(10) # High-resolution state check
             
             is_panic = state_manager.is_panic_mode()
-            threshold = 60 if is_panic else 900
+            threshold = 30 if is_panic else 300 # 30s in Panic, 5m in Routine
             
             elapsed = (datetime.now(timezone.utc) - last_flush).total_seconds()
             if elapsed < threshold:
                 continue
 
             async with self._buffer_lock:
-                if not self._message_buffer: 
+                if not self._triggered_buffer: 
                     last_flush = datetime.now(timezone.utc)
                     continue
-                batch, self._message_buffer = self._message_buffer, []
+                batch, self._triggered_buffer = self._triggered_buffer, []
             
-            logger.info(f"Flushing Telegram batch ({len(batch)} messages, Mode: {'PANIC' if is_panic else 'ROUTINE'})")
+            logger.info(f"Flushing Triggered Telegram batch ({len(batch)} messages, Mode: {'PANIC' if is_panic else 'ROUTINE'})")
             await self._process_batch(batch)
             last_flush = datetime.now(timezone.utc)
 
     async def _process_batch(self, batch: List[Dict]):
-        # 1. Basic Junk Filter (Spam/Redundancy)
+        # [V14.1 Update] Batch now only contains messages that already passed Cloudflare triage.
+        # We perform one final junk filter before hitting Groq/Gemini extraction.
         filtered_batch = []
         seen_texts = set()
         
@@ -335,10 +365,9 @@ class TelegramListener:
             if text_low in seen_texts: continue
             seen_texts.add(text_low)
             
-            # Only skip blatant spam. Routine price updates are now 
-            # handed to the LLM for "Smart" evaluation because they 
-            # might contain context a rule would miss.
-            if any(nkw in text_low for nkw in NOISE_KEYWORDS):
+            spam_hit = next((nkw for nkw in NOISE_KEYWORDS if nkw in text_low), None)
+            if spam_hit:
+                logger.debug(f"Junk Filter: Skipped triggered msg from {msg.get('source')} due to keyword [{spam_hit}]")
                 continue
                 
             filtered_batch.append(msg)
@@ -346,19 +375,7 @@ class TelegramListener:
         if not filtered_batch:
             return
 
-        # 2. Workers AI Triage (Zero-cost filter)
-        # We triage each message to see if it's a market-moving trigger.
-        # This prevents Claude (expensive) from seeing routine price chatter.
-        triggered_batch = []
-        for msg in filtered_batch:
-            if light_rag.triage_message(msg['text']):
-                triggered_batch.append(msg)
-        
-        if not triggered_batch:
-            logger.debug(f"Batch ({len(filtered_batch)} msgs) contained no triggers. Skipping extraction.")
-            return
-
-        sources = list(set([m['source'] for m in triggered_batch]))
+        sources = list(set([m['source'] for m in filtered_batch]))
         full_text = "\n---\n".join([f"[{m['source']}]: {m['text']}" for m in triggered_batch])
         try:
             extraction = await asyncio.to_thread(
