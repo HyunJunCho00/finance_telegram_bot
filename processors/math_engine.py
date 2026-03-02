@@ -463,6 +463,10 @@ class MathEngine:
         if not isinstance(df.index, pd.DatetimeIndex):
             if 'timestamp' in df.columns:
                 df = df.set_index('timestamp')
+                
+        # [FIX] pandas_ta has issues with timezone-aware datetime indexes in some indicators (like MFI/VWAP)
+        if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
             
         close = df['close'].astype('float64')
         high = df['high'].astype('float64')
@@ -539,9 +543,12 @@ class MathEngine:
                 r['stoch_rsi_k'] = self._safe_val(stoch[cols[0]])
                 r['stoch_rsi_d'] = self._safe_val(stoch[cols[1]])
 
-            r['williams_r'] = self._safe_val(ta.willr(high, low, close, length=14))
-            r['cci'] = self._safe_val(ta.cci(high, low, close, length=20))
-            r['mfi'] = self._safe_val(ta.mfi(high, low, close, volume, length=14))
+            try:
+                r['williams_r'] = self._safe_val(ta.willr(high, low, close, length=14))
+                r['cci'] = self._safe_val(ta.cci(high, low, close, length=20))
+                r['mfi'] = self._safe_val(ta.mfi(high, low, close, volume, length=14))
+            except Exception as e:
+                logger.warning(f"Error calculating willr/cci/mfi: {e}")
 
             # Bollinger Bands
             bb = ta.bbands(close, length=20, std=2.0)
@@ -557,9 +564,12 @@ class MathEngine:
             r['atr'] = self._safe_val(ta.atr(high, low, close, length=14))
 
             # Volume indicators
-            r['obv'] = self._safe_val(ta.obv(close, volume))
-            r['vwap'] = self._safe_val(ta.vwap(high, low, close, volume))
-            r['cmf'] = self._safe_val(ta.cmf(high, low, close, volume, length=20))
+            try:
+                r['obv'] = self._safe_val(ta.obv(close, volume))
+                r['vwap'] = self._safe_val(ta.vwap(high, low, close, volume))
+                r['cmf'] = self._safe_val(ta.cmf(high, low, close, volume, length=20))
+            except Exception as e:
+                logger.warning(f"Error calculating volume indicators (obv/vwap/cmf): {e}")
 
             # HMA (Hull Moving Average) — 빠른 MA, EMA보다 노이즈 적음
             r['hma_9'] = self._safe_val(ta.hma(close, length=9))

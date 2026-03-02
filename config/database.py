@@ -51,7 +51,7 @@ class DatabaseClient:
             data_list, on_conflict="timestamp,symbol,exchange"
         ).execute()
 
-    def _fetch_paginated(self, table: str, limit: int, order_col: str, **eq_filters) -> List[Dict]:
+    def _fetch_paginated(self, table: str, limit: int, order_col: str, since: Optional[datetime] = None, **eq_filters) -> List[Dict]:
         """Helper to bypass Supabase 1000 row max limit using pagination."""
         all_rows = []
         fetched = 0
@@ -64,6 +64,9 @@ class DatabaseClient:
             query = self.client.table(table).select("*")
             for k, v in eq_filters.items():
                 query = query.eq(k, v)
+                
+            if since:
+                query = query.gte("timestamp", since.isoformat())
                 
             response = query.order(order_col, desc=True).range(start, end).execute()
             rows = response.data if response.data else []
@@ -94,9 +97,9 @@ class DatabaseClient:
         ).execute()
 
     @reconnect_on_error
-    def get_cvd_data(self, symbol: str, limit: int = 240) -> pd.DataFrame:
+    def get_cvd_data(self, symbol: str, limit: int = 240, since: Optional[datetime] = None) -> pd.DataFrame:
         """Get recent CVD data for a symbol. Default 240 = 4 hours of 1m data."""
-        rows = self._fetch_paginated("cvd_data", limit, "timestamp", symbol=symbol)
+        rows = self._fetch_paginated("cvd_data", limit, "timestamp", since=since, symbol=symbol)
         if rows:
             df = pd.DataFrame(rows)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
@@ -133,9 +136,9 @@ class DatabaseClient:
         ).execute()
 
     @reconnect_on_error
-    def get_liquidation_data(self, symbol: str, limit: int = 240) -> pd.DataFrame:
+    def get_liquidation_data(self, symbol: str, limit: int = 240, since: Optional[datetime] = None) -> pd.DataFrame:
         """Get recent liquidation data. Default 240 = 4 hours of 1m data."""
-        rows = self._fetch_paginated("liquidations", limit, "timestamp", symbol=symbol)
+        rows = self._fetch_paginated("liquidations", limit, "timestamp", since=since, symbol=symbol)
         if rows:
             df = pd.DataFrame(rows)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
@@ -355,8 +358,8 @@ class DatabaseClient:
 
     # ─────────────── Funding History ───────────────
 
-    def get_funding_history(self, symbol: str, limit: int = 100) -> pd.DataFrame:
-        rows = self._fetch_paginated("funding_data", limit, "timestamp", symbol=symbol)
+    def get_funding_history(self, symbol: str, limit: int = 100, since: Optional[datetime] = None) -> pd.DataFrame:
+        rows = self._fetch_paginated("funding_data", limit, "timestamp", since=since, symbol=symbol)
         if rows:
             df = pd.DataFrame(rows)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
