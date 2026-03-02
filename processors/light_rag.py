@@ -977,7 +977,7 @@ class LightRAGEngine:
 
 TEXT: {text}
 
-Return JSON only (no markdown):
+Return STRICT JSON only (no markdown):
 {{
   "entities": [
     {{"name": "entity_name", "type": "person|org|coin|event|indicator|exchange", "description": "brief description"}}
@@ -987,13 +987,12 @@ Return JSON only (no markdown):
   ]
 }}
 
-Rules:
+CRITICAL RULES:
+- Ensure all JSON objects in lists are SEPARATED BY COMMAS.
+- Do NOT include any text before or after the JSON.
 - Entity names should be lowercase, canonical (e.g. "bitcoin" not "BTC/USDT")
-- Common entity types: coin, exchange, person, org, event, indicator, regulation
-- Common relationship types: affects, trades_on, regulates, invested_in, partnered_with, listed_on, caused, leads_to, correlated_with
-- Only extract clearly stated facts, not speculation
 - Maximum 8 entities and 6 relationships per text
-- If no clear entities/relationships, return empty arrays"""
+- If no result, return empty arrays: {{"entities": [], "relationships": []}}"""
 
     def __init__(self):
         # Embedding model (lazy init)
@@ -1166,6 +1165,17 @@ Rules:
                 return None
         return None
 
+    def _repair_json(self, text: str) -> str:
+        """Helper to repair common LLM JSON errors like missing commas between objects."""
+        if not text:
+            return ""
+        # 1. Fix missing commas between objects: } {  ->  }, {
+        text = re.sub(r'}\s*{', '}, {', text)
+        # 2. Fix trailing commas before closing brackets: , ]  ->  ]  or , }  ->  }
+        text = re.sub(r',\s*]', ']', text)
+        text = re.sub(r',\s*}', '}', text)
+        return text.strip()
+
     def _extract_with_llm(self, text: str) -> Dict:
         """LLM-based entity and relationship extraction (Gemini Flash).
 
@@ -1197,11 +1207,17 @@ Rules:
             start = text_clean.find('{')
             end = text_clean.rfind('}') + 1
             if start >= 0 and end > start:
+                raw_json = text_clean[start:end]
                 try:
-                    return json.loads(text_clean[start:end])
-                except json.JSONDecodeError as decode_err:
-                    logger.warning(f"LLM extraction JSONDecodeError: {decode_err} on string: {text_clean[start:end]}")
-                    return {"entities": [], "relationships": []}
+                    return json.loads(raw_json)
+                except json.JSONDecodeError:
+                    # Attempt repair
+                    repaired = self._repair_json(raw_json)
+                    try:
+                        return json.loads(repaired)
+                    except json.JSONDecodeError as decode_err:
+                        logger.warning(f"LLM extraction JSONDecodeError (even after repair): {decode_err} on string: {repaired}")
+                        return {"entities": [], "relationships": []}
 
             return {"entities": [], "relationships": []}
         except Exception as e:

@@ -918,8 +918,9 @@ class ChartGenerator:
             last_candle = chart_df.iloc[-1]
             tf_str = config.get('title_suffix', '4H').split(' ')[0] # Get '15M' from '15M' or '1D' from '1D SWING'
             
-            # 1. Main Header: SYMBOL TF EXCHANGE
-            header_text = f"{symbol} · {tf_str} · CRYPTO"
+            # 1. Main Header: SYMBOL TF EXCHANGE (Data up to: TIMESTAMP)
+            last_ts_str = chart_df.index[-1].strftime('%Y-%m-%d %H:%M')
+            header_text = f"{symbol} · {tf_str} · CRYPTO (Data up to: {last_ts_str})"
             ax.text(0.01, 0.98, header_text, transform=ax.transAxes, 
                     fontsize=10, fontweight='bold', color=text_color, alpha=0.9,
                     ha='left', va='top')
@@ -952,14 +953,6 @@ class ChartGenerator:
                     fontsize=7, color=text_color, alpha=0.5,
                     ha='left', va='bottom', fontweight='bold',
                     bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
-            
-            # 5. [TIME ANCHOR] Force X-axis to show the latest timestamp
-            # We do this by ensuring the last tick is explicitly labeled
-            last_ts = chart_df.index[-1].strftime('%Y-%m-%d %H:%M')
-            ax.annotate(f"LAST: {last_ts}", xy=(len(chart_df)-1, 0), xycoords=('data', 'axes fraction'),
-                        xytext=(0, -25), textcoords='offset points',
-                        rotation=45, fontsize=7, color=text_color, fontweight='bold',
-                        ha='right', va='top', alpha=0.9)
         except Exception as e:
             logger.debug(f"Header legend draw error: {e}")
 
