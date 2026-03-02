@@ -7,6 +7,7 @@ from processors.gcs_parquet import gcs_parquet_store
 from loguru import logger
 import os
 import json
+import pandas as pd
 from math import nan # for serialization safety
 from agents.market_monitor_agent import market_monitor_agent
 
@@ -275,7 +276,7 @@ class MCPTools:
 
             # Get analysis and generate chart
             analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w, 
-                                                   cvd_df=cvd_df, timeframe=timeframe)
+                                                   timeframe=timeframe)
             chart_bytes = chart_generator.generate_chart(df, analysis, symbol, mode, 
                                                           df_1d=df_1d, df_1w=df_1w,
                                                           cvd_df=cvd_df, 
