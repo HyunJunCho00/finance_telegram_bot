@@ -20,6 +20,9 @@ Cost:
 
 import re
 import hashlib
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import numpy as np
 import threading
 from datetime import datetime, timezone, timedelta, date as _date
@@ -581,7 +584,7 @@ class CloudflareReranker:
         "https://api.cloudflare.com/client/v4/accounts/{account_id}"
         "/ai/run/@cf/baai/bge-reranker-base"
     )
-    _TIMEOUT_S = 3.0  # tight timeout: don't hold up streaming ingestion
+    _TIMEOUT_S = 5.0  # increased from 3.0 to handle API latency
 
     def __init__(self):
         self._account_id: str = ""
@@ -633,6 +636,15 @@ class CloudflareReranker:
         try:
             if self._session is None:
                 self._session = requests.Session()
+                # Use retry strategy for transient errors / timeouts
+                retry_strategy = Retry(
+                    total=2,
+                    backoff_factor=1,
+                    status_forcelist=[429, 500, 502, 503, 504],
+                    allowed_methods=["POST"]
+                )
+                adapter = HTTPAdapter(max_retries=retry_strategy)
+                self._session.mount("https://", adapter)
                 self._session.headers.update(
                     {"Authorization": f"Bearer {self._api_key}",
                      "Content-Type": "application/json"}
@@ -651,7 +663,8 @@ class CloudflareReranker:
             if isinstance(results, dict):
                 # Try known wrapper keys before giving up
                 results = (
-                    results.get("scores")
+                    results.get("response")
+                    or results.get("scores")
                     or results.get("data")
                     or results.get("result")
                     or results.get("results")
@@ -756,9 +769,18 @@ Message: {text}
         try:
             if self._session is None:
                 self._session = requests.Session()
+                # Use retry strategy for transient errors / timeouts (e.g. Read Timeout)
+                retry_strategy = Retry(
+                    total=2,
+                    backoff_factor=1,
+                    status_forcelist=[429, 500, 502, 503, 504],
+                    allowed_methods=["POST"]
+                )
+                adapter = HTTPAdapter(max_retries=retry_strategy)
+                self._session.mount("https://", adapter)
                 self._session.headers.update({"Authorization": f"Bearer {self._api_key}"})
 
-            resp = self._session.post(url, json=payload, timeout=4.0)
+            resp = self._session.post(url, json=payload, timeout=8.0)
 
             if resp.status_code == 429:
                 logger.warning(
