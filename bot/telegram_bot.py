@@ -188,6 +188,12 @@ class TradingBot:
         bot = Bot(token=self.bot_token)
         await bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
 
+    async def send_photo(self, chat_id: str, photo_bytes: bytes, caption: str = ""):
+        """Send a photo via the bot API (stateless)."""
+        from telegram import Bot
+        bot = Bot(token=self.bot_token)
+        await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=caption, parse_mode='HTML')
+
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode = settings.trading_mode.value.upper()
         await update.message.reply_text(

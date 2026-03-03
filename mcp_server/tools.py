@@ -53,7 +53,7 @@ class MCPTools:
                 except Exception as e:
                     logger.warning(f"GCS load for analysis tool skipped: {e}")
 
-            analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w, cvd_df=cvd_df)
+            analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w)
             compact = math_engine.format_compact(analysis)
             return {
                 "symbol": symbol,
@@ -352,7 +352,8 @@ class MCPTools:
                     # 3. Liquidations (Increase limit to cover gaps)
                     liq_df = db.get_liquidation_data(symbol, limit=db_limit)
                 except Exception as e:
-                    logger.warning(f"GCS load for chart tool skipped: {e}")
+                    import traceback
+                    logger.warning(f"GCS load for chart tool skipped: {e}\n{traceback.format_exc()}")
 
             # Get analysis and generate chart
             analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w, 

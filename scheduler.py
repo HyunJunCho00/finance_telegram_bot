@@ -172,9 +172,10 @@ def job_routine_market_status():
         # Telegram Intel (Last 1 hour)
         telegram_intel = "No recent significant news."
         try:
-            recent_insights = db.client.table("ai_insights").select("insight_text").order("created_at", desc=True).limit(5).execute()
-            if hasattr(recent_insights, "data") and recent_insights.data:
-                telegram_intel = "\n".join([row["insight_text"] for row in recent_insights.data])
+            from mcp_server.tools import mcp_tools
+            news_res = mcp_tools.get_telegram_summary(hours=1)
+            if "summary" in news_res and news_res["summary"]:
+                telegram_intel = news_res["summary"]
         except Exception as e:
             logger.warning(f"Failed to fetch Telegram intel for routine update: {e}")
             
@@ -187,7 +188,25 @@ def job_routine_market_status():
         from bot.telegram_bot import trading_bot
         if trading_bot:
             import asyncio
+            import base64
+            from mcp_server.tools import mcp_tools
+            
+            # 1. Send Text Summary
             asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"📊 *Routine Market Update*\n\n{summary}"))
+            
+            # 2. Send Light Charts (4h) for all symbols
+            for symbol in settings.trading_symbols:
+                try:
+                    chart_res = mcp_tools.get_chart_image(symbol, timeframe="4h")
+                    if "chart_base64" in chart_res:
+                        photo_bytes = base64.b64decode(chart_res["chart_base64"])
+                        asyncio.run(trading_bot.send_photo(
+                            settings.TELEGRAM_CHAT_ID, 
+                            photo_bytes, 
+                            caption=f"📈 <b>{symbol} 4h Trend</b>"
+                        ))
+                except Exception as chart_err:
+                    logger.warning(f"Failed to send routine chart for {symbol}: {chart_err}")
 
     except Exception as e:
         logger.error(f"Routine market status job error: {e}")
