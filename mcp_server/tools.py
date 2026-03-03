@@ -252,15 +252,20 @@ class MCPTools:
                     if timeframe and timeframe.lower() in ('1w', 'w') or mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
                     
-                    # Detailed auxiliary data (CVD, Funding, Liquidations)
+                    m_back_timeseries = 6 if mode == TradingMode.SWING else 12
                     # 1. CVD
-                    cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=6)
+                    cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back_timeseries)
                     if not cvd_hist.empty:
                         # [FIX CRITICAL] Map historical columns to live schema for chart_generator
                         cvd_hist = cvd_hist.rename(columns={
                             'taker_buy_volume': 'whale_buy_vol',
                             'taker_sell_volume': 'whale_sell_vol'
                         })
+                        # [FIX SCALE] Convert historical Coin volume to USD volume to match live DB
+                        current_price = df['close'].iloc[-1] if not df.empty else (60000 if 'BTC' in symbol else 3000)
+                        cvd_hist['whale_buy_vol'] = cvd_hist['whale_buy_vol'] * current_price
+                        cvd_hist['whale_sell_vol'] = cvd_hist['whale_sell_vol'] * current_price
+                        
                         since_cvd = cvd_hist['timestamp'].max()
                         cvd_recent = db.get_cvd_data(symbol, limit=50000, since=since_cvd)
                         cvd_df = pd.concat([cvd_hist, cvd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
@@ -269,7 +274,7 @@ class MCPTools:
                         cvd_df = cvd_recent
                     
                     # 2. Funding / OI
-                    fnd_hist = gcs_parquet_store.load_timeseries("funding", symbol, months_back=6)
+                    fnd_hist = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back_timeseries)
                     if not fnd_hist.empty:
                         # [FIX CRITICAL] Map historical columns to live schema for chart_generator
                         fnd_hist = fnd_hist.rename(columns={

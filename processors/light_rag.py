@@ -21,7 +21,8 @@ Cost:
 import re
 import hashlib
 import numpy as np
-from datetime import datetime, timezone, timedelta
+import threading
+from datetime import datetime, timezone, timedelta, date as _date
 from typing import Dict, List, Tuple, Optional, Set
 from collections import defaultdict
 from loguru import logger
@@ -682,11 +683,30 @@ Return EXACTLY JSON: {{ "is_trigger": bool, "category": "string", "confidence": 
 Message: {text}
 """
 
+    DAILY_LIMIT = 1700  # free tier ~1,800/day; 100 safety buffer
+
     def __init__(self):
         self._account_id = ""
         self._api_key = ""
         self._enabled = False
         self._session = None
+        self._lock = threading.Lock()
+        self._call_count = 0
+        self._call_date: Optional[_date] = None
+        self._limit_warned = False
+
+    def _acquire_quota(self) -> bool:
+        """Thread-safe daily quota check. Resets automatically at midnight."""
+        today = _date.today()
+        with self._lock:
+            if self._call_date != today:
+                self._call_count = 0
+                self._call_date = today
+                self._limit_warned = False
+            if self._call_count >= self.DAILY_LIMIT:
+                return False
+            self._call_count += 1
+            return True
 
     def _init(self):
         if self._enabled: return
@@ -700,21 +720,41 @@ Message: {text}
     def classify(self, text: str) -> Dict:
         """Categorize message as trigger or junk."""
         self._init()
-        if not self._enabled: return {"is_trigger": True, "category": "unknown", "confidence": 1.0} # Fallback to pass through
+        if not self._enabled:
+            return {"is_trigger": True, "category": "unknown", "confidence": 1.0}  # Fallback to pass through
+
+        if not self._acquire_quota():
+            if not self._limit_warned:
+                logger.warning(
+                    f"CloudflareTriage: daily quota {self.DAILY_LIMIT} reached — "
+                    "passing all messages through for remainder of day"
+                )
+                self._limit_warned = True
+            return {"is_trigger": True, "category": "rate_limited", "confidence": 0.5}
 
         import requests
         url = self._URL_TEMPLATE.format(account_id=self._account_id)
         payload = {"messages": [{"role": "user", "content": self._PROMPT.format(text=text[:500])}]}
-        
+
         try:
             if self._session is None:
                 self._session = requests.Session()
                 self._session.headers.update({"Authorization": f"Bearer {self._api_key}"})
-            
+
             resp = self._session.post(url, json=payload, timeout=4.0)
+
+            if resp.status_code == 429:
+                logger.warning(
+                    f"CloudflareTriage: HTTP 429 received ({self._call_count}/{self.DAILY_LIMIT} used) "
+                    "— exhausting remaining daily quota"
+                )
+                with self._lock:
+                    self._call_count = self.DAILY_LIMIT
+                return {"is_trigger": True, "category": "rate_limited", "confidence": 0.5}
+
             resp.raise_for_status()
             content = resp.json().get("result", {}).get("response", "")
-            
+
             # Extract JSON from potential Llama conversational wrapper
             if "{" in content:
                 json_str = content[content.find("{"):content.rfind("}")+1]

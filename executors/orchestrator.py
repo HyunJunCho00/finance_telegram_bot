@@ -586,6 +586,11 @@ def node_generate_chart(state: AnalysisState) -> dict:
                     'taker_buy_volume': 'whale_buy_vol',
                     'taker_sell_volume': 'whale_sell_vol'
                 })
+                # [FIX SCALE] Convert historical Coin volume to USD volume to match live DB
+                current_price = df['close'].iloc[-1] if not df.empty else (60000 if 'BTC' in symbol else 3000)
+                hist_cvd['whale_buy_vol'] = hist_cvd['whale_buy_vol'] * current_price
+                hist_cvd['whale_sell_vol'] = hist_cvd['whale_sell_vol'] * current_price
+                
                 hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
                 since_cvd = hist_cvd['timestamp'].max()
                 bridge_cvd = db.get_cvd_data(symbol, limit=50000, since=since_cvd)
