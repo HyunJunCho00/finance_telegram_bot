@@ -289,6 +289,7 @@ class MCPTools:
                             price_map = df_1d.copy()
                             price_map['timestamp'] = pd.to_datetime(price_map['timestamp'], utc=True).dt.floor('D')
                             price_map = price_map.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
+                            price_map = price_map[~price_map.index.duplicated(keep='last')]
                             ts_col = pd.to_datetime(cvd_hist['timestamp'], utc=True).dt.floor('D')
                             daily_prices = ts_col.map(price_map).ffill().bfill().fillna(float(df['close'].iloc[-1]))
                         else:
