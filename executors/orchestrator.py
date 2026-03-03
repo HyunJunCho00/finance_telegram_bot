@@ -608,6 +608,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
                     price_map = df_1d.copy()
                     price_map['timestamp'] = pd.to_datetime(price_map['timestamp'], utc=True).dt.floor('D')
                     price_map = price_map.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
+                    price_map = price_map[~price_map.index.duplicated(keep='last')]
                     daily_prices = merged_cvd['timestamp'].dt.floor('D').map(price_map).ffill().bfill()
                     if daily_prices.isna().any():
                         daily_prices = daily_prices.fillna(df['close'].iloc[-1] if not df.empty else 60000)
