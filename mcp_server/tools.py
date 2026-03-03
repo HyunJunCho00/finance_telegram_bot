@@ -266,7 +266,7 @@ class MCPTools:
                     # ── 1. CVD ──
                     # Load historical months from GCS cache (past months only, always skips current)
                     cvd_hist_dfs = []
-                    now_utc = pd.Timestamp.utcnow().tz_localize('UTC')
+                    now_utc = pd.Timestamp.now(tz='UTC')
                     current_month_str = now_utc.strftime("%Y-%m")
                     for m in range(1, m_back_timeseries + 1):  # start from 1 to SKIP current month
                         month_str = (now_utc - pd.DateOffset(months=m)).strftime("%Y-%m")
