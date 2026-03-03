@@ -300,13 +300,9 @@ class MCPTools:
                     else:
                         earliest_hist = None
                     
-                    cvd_recent = db.get_cvd_data(symbol, limit=db_limit)
-                    
                     if cvd_recent is not None and not cvd_recent.empty:
-                        # [V14.5 Fix] SCALE recent CVD to USD (Recent DB returns COIN vol)
-                        current_price = float(df['close'].iloc[-1]) if not df.empty else 60000.0
-                        cvd_recent['whale_buy_vol'] = cvd_recent['whale_buy_vol'] * current_price
-                        cvd_recent['whale_sell_vol'] = cvd_recent['whale_sell_vol'] * current_price
+                        # [V14.7 Fix] Collector already stores whale_buy_vol in USD. 
+                        # No scaling needed for recent data.
                         cvd_recent['timestamp'] = pd.to_datetime(cvd_recent['timestamp'], utc=True)
                     
                     if not cvd_hist.empty and cvd_recent is not None and not cvd_recent.empty:
