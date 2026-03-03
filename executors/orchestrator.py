@@ -471,7 +471,7 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
 
     # Extract current price from cached market_data for prompt context
     market_data = _market_data_cache.get(symbol, {})
-    current_price = market_data.get('close', None)
+    current_price = market_data.get('current_price', None)
 
     result = vlm_geometric_agent.analyze(
         chart, 

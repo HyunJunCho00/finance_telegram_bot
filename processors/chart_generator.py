@@ -411,7 +411,10 @@ class ChartGenerator:
             self._draw_fair_value_gaps(price_ax, chart_df)
 
             # ── [NEW] Overlay 10: Macro Order Blocks (OB) ──
-            macro_obs = math_engine.calculate_macro_order_blocks(full_resampled, count=2)
+            # count=4 → returns up to 8 candidates (obs[:count*2])
+            # Ensures enough pool to guarantee 1 above + 1 below current price
+            # even in strongly trending markets where recent OBs cluster on one side
+            macro_obs = math_engine.calculate_macro_order_blocks(full_resampled, count=4)
             self._draw_macro_order_blocks(price_ax, chart_df, macro_obs)
 
             # ── [NEW] Overlay 11: Anchored VWAP ──
@@ -488,13 +491,29 @@ class ChartGenerator:
             min_idx = argrelextrema(low, np.less, order=order)[0]
             max_idx = argrelextrema(high, np.greater, order=order)[0]
 
-            # Label swing highs: HH or LH
+            # Build full label history first (full history needed for correct HH/LH classification)
+            # Then render only the LAST 3 swing highs and lows — enough to read current structure
+            # (e.g. HH→HH→LH signals potential trend break; HL→HL→LL signals continuation of downtrend)
+            all_high_labels = []
             for i, idx in enumerate(max_idx):
                 if i == 0:
-                    label = 'S_H' # STRUCTURE_HIGH
+                    label = 'S_H'
                 else:
                     prev = high[max_idx[i - 1]]
                     label = 'S_HH' if high[idx] > prev else 'S_LH'
+                all_high_labels.append((idx, label))
+
+            all_low_labels = []
+            for i, idx in enumerate(min_idx):
+                if i == 0:
+                    label = 'S_L'
+                else:
+                    prev = low[min_idx[i - 1]]
+                    label = 'S_HL' if low[idx] > prev else 'S_LL'
+                all_low_labels.append((idx, label))
+
+            # Draw only the most recent 3 swing highs
+            for idx, label in all_high_labels[-3:]:
                 ax.annotate(label,
                             xy=(idx, high[idx]),
                             xytext=(0, 7), textcoords='offset points',
@@ -503,13 +522,8 @@ class ChartGenerator:
                             annotation_clip=True,
                             bbox=dict(facecolor='black', alpha=0.4, edgecolor='none', pad=0.5))
 
-            # Label swing lows: HL or LL
-            for i, idx in enumerate(min_idx):
-                if i == 0:
-                    label = 'S_L'
-                else:
-                    prev = low[min_idx[i - 1]]
-                    label = 'S_HL' if low[idx] > prev else 'S_LL'
+            # Draw only the most recent 3 swing lows
+            for idx, label in all_low_labels[-3:]:
                 ax.annotate(label,
                             xy=(idx, low[idx]),
                             xytext=(0, -7), textcoords='offset points',
@@ -687,7 +701,10 @@ class ChartGenerator:
             return
 
     def _draw_fibonacci(self, ax, chart_df: pd.DataFrame, fib: Optional[Dict]):
-        """Draw Fibonacci retracement horizontal lines."""
+        """Draw Fibonacci retracement horizontal lines with anchor markers.
+        Anchor markers are critical: VLM schema now requires explicit anchor_high/anchor_low,
+        so the anchors must be visually identifiable in the chart image.
+        """
         if not fib:
             return
 
@@ -707,8 +724,25 @@ class ChartGenerator:
                            alpha=alpha + 0.3, zorder=2)
                 # Move text slightly left of the edge to ensure it's on-canvas
                 ax.text(n - 0.5, val, f' {label}',
-                        color=color, fontsize=7, va='center', ha='left', 
+                        color=color, fontsize=7, va='center', ha='left',
                         alpha=0.9, fontweight='bold')
+
+        # Draw anchor markers so VLM can identify exact swing_high / swing_low used for Fib
+        # Without these markers, VLM must guess anchors → fibonacci_context.anchor_high/low unreliable
+        anchor_high = fib.get('swing_high')
+        anchor_low = fib.get('swing_low')
+        if isinstance(anchor_high, (int, float)):
+            ax.axhline(anchor_high, color='#F39C12', linestyle='-', linewidth=1.0,
+                       alpha=0.5, zorder=3)
+            ax.text(1, anchor_high, ' FIB HIGH ▲',
+                    color='#F39C12', fontsize=7, va='bottom', ha='left',
+                    fontweight='bold', alpha=0.9)
+        if isinstance(anchor_low, (int, float)):
+            ax.axhline(anchor_low, color='#F39C12', linestyle='-', linewidth=1.0,
+                       alpha=0.5, zorder=3)
+            ax.text(1, anchor_low, ' FIB LOW ▼',
+                    color='#F39C12', fontsize=7, va='top', ha='left',
+                    fontweight='bold', alpha=0.9)
 
     def _draw_swing_levels(self, ax, chart_df: pd.DataFrame, swing: Optional[Dict]):
         """Draw horizontal lines and shaded zones at swing highs/lows (liquidity pools)."""

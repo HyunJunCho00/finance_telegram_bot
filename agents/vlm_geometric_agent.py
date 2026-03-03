@@ -1,4 +1,5 @@
 import json
+from typing import Optional
 from .ai_router import ai_client
 from loguru import logger
 
@@ -78,11 +79,21 @@ Schema:
             "anomaly": "none",
             "directional_bias": "NEUTRAL",
             "confidence": 0,
-            "key_levels": {},
-            "fibonacci_context": "No chart provided",
+            "key_levels": {
+                "nearest_order_block": None,
+                "nearest_unmitigated_fvg": None,
+                "liquidation_pool_above": None,
+                "liquidation_pool_below": None,
+                "volume_poc": None,
+            },
+            "fibonacci_context": {
+                "test_level": "unknown",
+                "anchor_high": None,
+                "anchor_low": None,
+                "confluence": "No chart provided",
+            },
             "pattern": "none",
             "cvd_signal": "neutral",
-            "funding_visual": "neutral",
             "rationale": "Analysis failed or no chart provided",
         }
 
