@@ -462,12 +462,23 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
     Judge reads VLM's structured text output only — no raw chart forwarded to Judge."""
     bb = state.get("blackboard", {})
     chart = state.get("chart_image_b64", "")
+    symbol = state.get("symbol", "BTCUSDT")
+    
     if not chart:
         bb["vlm_geometry"] = {"anomaly": "none", "directional_bias": "NEUTRAL",
                                "confidence": 0, "rationale": "No chart available"}
         return {"blackboard": bb}
 
-    result = vlm_geometric_agent.analyze(chart, mode=state.get("mode", "SWING").upper())
+    # Extract current price from cached market_data for prompt context
+    market_data = _market_data_cache.get(symbol, {})
+    current_price = market_data.get('close', None)
+
+    result = vlm_geometric_agent.analyze(
+        chart, 
+        mode=state.get("mode", "SWING").upper(),
+        symbol=symbol,
+        current_price=current_price
+    )
     bb["vlm_geometry"] = result
     return {"blackboard": bb}
 

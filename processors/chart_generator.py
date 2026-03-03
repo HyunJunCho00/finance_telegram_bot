@@ -57,6 +57,10 @@ class ChartGenerator:
                        df_1w: Optional[pd.DataFrame] = None) -> Optional[bytes]:
         """Generate structure chart for any mode or specific timeframe."""
         config = self._get_mode_config(mode, timeframe)
+        # Filter analysis data for visual clarity (active elements only)
+        current_price = float(df['close'].iloc[-1])
+        analysis = self._filter_active_elements(current_price, analysis)
+        
         return self._generate_structure_chart(df, analysis, symbol, config, 
                                               liquidation_df, cvd_df, funding_df,
                                               df_1d=df_1d, df_1w=df_1w)
@@ -107,6 +111,37 @@ class ChartGenerator:
                 'structure_tfs': ['1d'],
                 'swing_tf': '1d',
             }
+
+    def _filter_active_elements(self, current_price: float, analysis: Dict) -> Dict:
+        """Filter analysis data to keep only elements relevant to current price action.
+        Reduces visual noise and prevents VLM 'encyclopedia' overexposure.
+        """
+        if not analysis:
+            return {}
+        
+        filtered = analysis.copy()
+        
+        # 1. Filter Swing Levels (Liquidity Pools)
+        # Keep only levels near current price (e.g., within 5%) or the closest 2 above/below
+        if 'swing_levels' in filtered:
+            new_swing = {}
+            for tf, levels in filtered['swing_levels'].items():
+                if not levels: continue
+                sh = sorted(levels.get('swing_highs', []), reverse=False)
+                sl = sorted(levels.get('swing_lows', []), reverse=True)
+                
+                # Keep 2 nearest resistance (above) and 2 nearest support (below)
+                active_sh = [h for h in sh if h > current_price][:2]
+                active_sl = [l for l in sl if l < current_price][:2]
+                
+                new_swing[tf] = {'swing_highs': active_sh, 'swing_lows': active_sl}
+            filtered['swing_levels'] = new_swing
+
+        # 2. Structure Labels (HH/HL/LH/LL)
+        # Usually handled by the drafting logic itself, but we can prune history if needed
+        # (Already handled in _draw_market_structure_labels via 'order' and visual slicing)
+        
+        return filtered
 
     def _generate_structure_chart(self, df: pd.DataFrame, analysis: Dict,
                                    symbol: str, config: Dict,
@@ -753,6 +788,8 @@ class ChartGenerator:
         try:
             high = chart_df['high'].astype(float).values
             low = chart_df['low'].astype(float).values
+            close = chart_df['close'].astype(float).values
+            current_price = close[-1]
             n = len(chart_df)
             if n < 3:
                 return
@@ -763,10 +800,25 @@ class ChartGenerator:
             for i in range(1, n - 1):
                 # Bullish FVG
                 if low[i + 1] > high[i - 1]:
-                    bull_gaps.append({'idx': i, 'top': low[i + 1], 'bottom': high[i - 1]})
+                    # [VLM OPT] Only show UNMITIGATED gaps (Price has not returned to fill them)
+                    top = low[i + 1]
+                    bottom = high[i - 1]
+                    # Mitigation check: Has any candle since i+1 entered this zone?
+                    post_gap_lows = low[i + 2:]
+                    is_mitigated = (post_gap_lows < top).any() if len(post_gap_lows) > 0 else False
+                    
+                    if not is_mitigated:
+                        bull_gaps.append({'idx': i, 'top': top, 'bottom': bottom})
+                
                 # Bearish FVG
                 elif high[i + 1] < low[i - 1]:
-                    bear_gaps.append({'idx': i, 'top': low[i - 1], 'bottom': high[i + 1]})
+                    top = low[i - 1]
+                    bottom = high[i + 1]
+                    post_gap_highs = high[i + 2:]
+                    is_mitigated = (post_gap_highs > bottom).any() if len(post_gap_highs) > 0 else False
+                    
+                    if not is_mitigated:
+                        bear_gaps.append({'idx': i, 'top': top, 'bottom': bottom})
 
             # ── Merge and Draw Bullish Gaps ──
             if bull_gaps:
@@ -864,8 +916,19 @@ class ChartGenerator:
         try:
             if not obs: return
             
+            current_price = float(chart_df['close'].iloc[-1])
             n = len(chart_df)
-            for ob in obs:
+            
+            # [VLM OPT] Keep only the nearest order blocks to current price
+            # 1 nearest above (Resistance), 1 nearest below (Support)
+            obs_above = sorted([ob for ob in obs if ob['bottom'] > current_price], key=lambda x: x['bottom'])
+            obs_below = sorted([ob for ob in obs if ob['top'] < current_price], key=lambda x: x['top'], reverse=True)
+            
+            active_obs = []
+            if obs_above: active_obs.append(obs_above[0])
+            if obs_below: active_obs.append(obs_below[0])
+
+            for ob in active_obs:
                 # Find if OB is within or near visible range
                 color = '#27AE60' if ob['type'] == 'BULLISH' else '#C0392B'
                 label = "MACRO BULL OB" if ob['type'] == 'BULLISH' else "MACRO BEAR OB"
@@ -1020,8 +1083,11 @@ class ChartGenerator:
     def chart_to_base64(self, chart_bytes: bytes) -> str:
         return base64.b64encode(chart_bytes).decode('utf-8')
 
-    def resize_for_low_res(self, chart_bytes: bytes, max_dim: int = 512) -> bytes:
-        """Resize to 512x512 for VLM (~1024 tokens)."""
+    def resize_for_low_res(self, chart_bytes: bytes, max_dim: int = 768) -> bytes:
+        """Resize for VLM analysis. 
+        2026 SOTA models like Gemini 3.1 Pro handle 768px-1024px with perfect precision.
+        Using 768px as default balance between cost and visual fidelity.
+        """
         try:
             from PIL import Image
             img = Image.open(BytesIO(chart_bytes))

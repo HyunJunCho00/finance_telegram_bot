@@ -11,14 +11,13 @@ class VLMGeometricAgent:
 You are the ONLY agent that sees the chart. Your structured output is what the Judge uses for all visual context.
 Be precise with price levels — vague descriptions are useless to a decision-making system.
 
-The chart contains: price action (candlesticks), technical overlays (Fibonacci, EMAs, volume profile),
-CVD (Cumulative Volume Delta), funding rate, and a liquidation heatmap.
+The chart contains: price action (candlesticks), technical overlays (FVGs, Order Blocks, Fibonacci),
+CVD (Cumulative Volume Delta), funding rate, and Open Interest.
 
-Keep the Current Trading Mode in mind:
-- SWING: Multi-day patterns. Fibonacci retracements and swing highs/lows matter most.
-- POSITION: Multi-week/month patterns. ATH boundaries, macro trend channels, and long-term POC.
+Your task is to answer specific questions based on the visual evidence.
+Prioritize 'ACTIVE' levels (unmitigated gaps, nearest order blocks, current price contact points).
 
-Output strictly JSON with no markdown. All price fields must be actual numbers from the chart (not null, not 0 unless price is literally at 0).
+Output strictly JSON with no markdown. All price fields must be actual numbers from the chart.
 
 Schema:
 {
@@ -26,35 +25,44 @@ Schema:
   "directional_bias": "BULLISH | BEARISH | NEUTRAL",
   "confidence": float (0.0 to 1.0),
   "key_levels": {
-    "immediate_support": float,
-    "immediate_resistance": float,
-    "major_support": float,
-    "major_resistance": float,
+    "nearest_order_block": float,
+    "nearest_unmitigated_fvg": float,
     "liquidation_pool_above": float,
     "liquidation_pool_below": float,
     "volume_poc": float
   },
-  "fibonacci_context": "e.g. Price testing 61.8% retracement at $X, confluence with EMA200",
+  "fibonacci_context": {
+    "test_level": "e.g. 61.8%",
+    "anchor_high": float,
+    "anchor_low": float,
+    "confluence": "string"
+  },
   "pattern": "H&S | inv_H&S | double_top | double_bottom | bull_flag | bear_flag | ascending_triangle | wedge | none | other",
   "cvd_signal": "divergence_bullish | divergence_bearish | confirming | neutral",
-  "funding_visual": "extreme_positive | high_positive | neutral | negative | extreme_negative",
-  "rationale": "Concrete explanation with specific price levels and why they matter"
+  "rationale": "Concrete explanation answering: 1. Is price inside/above/below the nearest OB? 2. Is the nearest FVG active? 3. Are Fib anchors logical?"
 }"""
 
-    def analyze(self, chart_image_b64: str, mode: str = "SWING") -> dict:
+    def analyze(self, chart_image_b64: str, mode: str = "SWING", symbol: str = "UNKNOWN", current_price: Optional[float] = None) -> dict:
         if not chart_image_b64:
             return self._default()
 
         user_message = (
-            f"Trading Mode: {mode}\n"
-            "Analyze every panel of this chart. Extract all visible price levels precisely. Return JSON only."
+            f"Symbol: {symbol}\n"
+            f"Current Price: {current_price if current_price else 'See Chart'}\n"
+            f"Trading Mode: {mode}\n\n"
+            "Analyze every panel. Answer these specific questions in your rationale:\n"
+            "1. Is current price INSIDE, ABOVE, or BELOW the nearest highlighted Order Block?\n"
+            "2. Which visible Fair Value Gaps (FVG) are UNMITIGATED (price has not returned to fill them)?\n"
+            "3. What are the exact anchor points (High/Low) for the drawn Fibonacci levels?\n"
+            "4. Does CVD show a clear divergence at the recent swing extreme?\n"
+            "\nReturn JSON only."
         )
         try:
             response = ai_client.generate_response(
                 system_prompt=self.SYSTEM_PROMPT,
                 user_message=user_message,
                 temperature=0.1,
-                max_tokens=900,
+                max_tokens=1024,
                 chart_image_b64=chart_image_b64,
                 role="vlm_geometric",
             )
