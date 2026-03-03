@@ -182,6 +182,12 @@ class TradingBot:
         self.bot_token = settings.TELEGRAM_BOT_TOKEN
         self.chat_id = settings.TELEGRAM_CHAT_ID
 
+    async def send_message(self, chat_id: str, text: str):
+        """Send a message via the bot API (stateless)."""
+        from telegram import Bot
+        bot = Bot(token=self.bot_token)
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         mode = settings.trading_mode.value.upper()
         await update.message.reply_text(

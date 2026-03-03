@@ -147,11 +147,11 @@ class AIClient:
         # It's faster and free (rate-limited).
         if settings.GROQ_API_KEY:
             model_map = {
-                "liquidity": "groq/llama-3.1-70b-versatile",
-                "microstructure": "groq/llama-3.1-70b-versatile",
-                "macro": "groq/llama-3.1-70b-versatile",
-                "rag_extraction": "groq/llama-3.1-70b-versatile",
-                "chat": "groq/llama-3.1-8b-instant"
+                "liquidity": "groq/llama-3.3-70b-versatile",
+                "microstructure": "groq/llama-3.3-70b-versatile",
+                "macro": "groq/llama-3.3-70b-versatile",
+                "rag_extraction": "groq/llama-3.3-70b-versatile",
+                "chat": "groq/llama-3.3-70b-versatile"
             }
             if role in model_map:
                 return model_map[role], getattr(settings, f"MAX_INPUT_CHARS_{role.upper()}", 15000)
