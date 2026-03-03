@@ -660,8 +660,14 @@ def node_generate_chart(state: AnalysisState) -> dict:
     with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
         future = executor.submit(
             chart_generator.generate_chart, 
-            df, market_data, symbol, mode,
-            liquidation_df, cvd_df, funding_df, df_1d, df_1w
+            df, market_data, symbol,
+            mode=mode,
+            timeframe=None,
+            liquidation_df=liquidation_df,
+            cvd_df=cvd_df,
+            funding_df=funding_df,
+            df_1d=df_1d,
+            df_1w=df_1w
         )
         chart_bytes = future.result()
 

@@ -93,6 +93,7 @@ class MathEngine:
             'high': 'max',
             'low': 'min',
             'close': 'last',
+            'volume': 'sum'
         }).dropna().reset_index()
 
         return resampled
