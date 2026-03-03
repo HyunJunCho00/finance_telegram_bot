@@ -157,6 +157,7 @@ class AIClient:
                 return model_map[role], getattr(settings, f"MAX_INPUT_CHARS_{role.upper()}", 15000)
 
         # Fallback to Workers AI (Daily Neuron cap) if Groq fails or is absent
+        self._cf_generator._init()
         if self._cf_generator._enabled:
              # Workers AI is slightly slower than Groq/Gemini but "Totally Free" neurons
              if role in ("liquidity", "microstructure", "macro"):
@@ -416,8 +417,6 @@ class AIClient:
             }
             if not model_id.startswith("o"):
                 kwargs["temperature"] = temperature
-                kwargs["max_tokens"] = max_tokens
-
                 kwargs["max_tokens"] = max_tokens
 
             response = client.chat.completions.create(**kwargs)

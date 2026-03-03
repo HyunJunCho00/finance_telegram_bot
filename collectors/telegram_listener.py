@@ -45,6 +45,17 @@ SOURCE_CREDIBILITY = {
     "Cointelegraph": 0.6,
 }
 
+# Keywords that indicate a chart caption carries actionable on-chain signal.
+# Used in _extract_chart_analysis() to skip low-value images (logos, banners, etc.)
+SIGNAL_KEYWORDS = {
+    "btc", "bitcoin", "eth", "ethereum",
+    "exchange", "inflow", "outflow", "flow",
+    "whale", "holder", "miner", "staking",
+    "nupl", "mvrv", "sopr", "nvt", "puell",
+    "oi", "funding", "liquidat", "leverage",
+    "price", "volume", "reserve", "supply",
+}
+
 # Routine NOISE Patterns to ignore for LLM Extraction (High-confidence spam/ads)
 NOISE_KEYWORDS = {
     "referral", "sign up", "join now", "exclusive offer", "maintenance",
@@ -376,7 +387,7 @@ class TelegramListener:
             return
 
         sources = list(set([m['source'] for m in filtered_batch]))
-        full_text = "\n---\n".join([f"[{m['source']}]: {m['text']}" for m in triggered_batch])
+        full_text = "\n---\n".join([f"[{m['source']}]: {m['text']}" for m in filtered_batch])
         try:
             extraction = await asyncio.to_thread(
                 ai_client.generate_response,

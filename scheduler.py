@@ -146,22 +146,42 @@ def job_routine_market_status():
     """V13.3: Routine Market Status check (Free-First)."""
     try:
         logger.info("Running routine market status check (Free-First)")
-        # In a real scenario, we'd fetch actual indicators from DB/Collectors
-        # For now, we'll simulate the call with current state
+
+        # BTC 가격: DB에서 최신 1분봉 close 사용
+        btc_price = None
+        try:
+            btc_df = db.get_latest_market_data("BTCUSDT", limit=1)
+            if not btc_df.empty and "close" in btc_df.columns:
+                btc_price = float(btc_df["close"].iloc[-1])
+        except Exception:
+            pass
+
+        # 펀딩율: DB에서 최신 funding_rate 사용
+        funding_rate = None
+        try:
+            f_df = db.get_funding_history("BTCUSDT", limit=1)
+            if not f_df.empty and "funding_rate" in f_df.columns:
+                funding_rate = float(f_df["funding_rate"].iloc[-1])
+        except Exception:
+            pass
+
+        # 변동성: VolatilityMonitor의 calculate_price_change() 사용
+        volatility = volatility_monitor.calculate_price_change("BTCUSDT")
+
         indicators = {
-            "btc_price": collector.get_last_price("BTCUSDT"),
-            "funding_rate": funding_collector.get_last_rate("BTCUSDT"),
-            "volatility": volatility_monitor.get_current_volatility()
+            "btc_price": btc_price,
+            "funding_rate": funding_rate,
+            "volatility": volatility,
         }
         summary = market_monitor_agent.summarize_current_status(indicators)
         logger.success(f"Market Summary Generated:\n{summary}")
-        
+
         # Optionally send to Telegram
         from bot.telegram_bot import trading_bot
         if trading_bot:
             import asyncio
             asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"📊 *Routine Market Update*\n\n{summary}"))
-            
+
     except Exception as e:
         logger.error(f"Routine market status job error: {e}")
 
@@ -229,8 +249,6 @@ def _build_analysis_trigger(mode: TradingMode):
     - SWING: every 4 hours
     - POSITION: once daily at 00:00 UTC (= 09:00 KST, Upbit daily open)
     """
-    interval = settings.analysis_interval_hours
-
     if mode == TradingMode.POSITION:
         # Once daily at 00:00 UTC = 09:00 KST (Upbit new day)
         return CronTrigger(hour=0, minute=0)
