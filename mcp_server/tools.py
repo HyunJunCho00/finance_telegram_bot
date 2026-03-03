@@ -262,6 +262,7 @@ class MCPTools:
 
                     # Bridge GCS gap: 45,000 rows covers ~31 days of 1m data
                     db_limit = 45000
+                    cvd_recent = db.get_cvd_data(symbol, limit=db_limit)
 
                     # ── 1. CVD ──
                     # Load historical months from GCS cache (past months only, always skips current)
