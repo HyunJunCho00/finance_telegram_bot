@@ -261,10 +261,19 @@ class MCPTools:
                             'taker_buy_volume': 'whale_buy_vol',
                             'taker_sell_volume': 'whale_sell_vol'
                         })
-                        # [FIX SCALE] Convert historical Coin volume to USD volume to match live DB
-                        current_price = df['close'].iloc[-1] if not df.empty else (60000 if 'BTC' in symbol else 3000)
-                        cvd_hist['whale_buy_vol'] = cvd_hist['whale_buy_vol'] * current_price
-                        cvd_hist['whale_sell_vol'] = cvd_hist['whale_sell_vol'] * current_price
+                        # [FIX SCALE] Convert historical Coin volume to USD volume using precise historical daily prices
+                        if df_1d is not None and not df_1d.empty:
+                            price_map = df_1d.copy()
+                            price_map['timestamp'] = pd.to_datetime(price_map['timestamp'], utc=True).dt.floor('D')
+                            price_map = price_map.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
+                            daily_prices = cvd_hist['timestamp'].dt.floor('D').map(price_map).ffill().bfill()
+                            if daily_prices.isna().any():
+                                daily_prices = daily_prices.fillna(df['close'].iloc[-1] if not df.empty else 60000)
+                        else:
+                            daily_prices = df['close'].iloc[-1] if not df.empty else 60000
+                            
+                        cvd_hist['whale_buy_vol'] = cvd_hist['whale_buy_vol'] * daily_prices
+                        cvd_hist['whale_sell_vol'] = cvd_hist['whale_sell_vol'] * daily_prices
                         
                         since_cvd = cvd_hist['timestamp'].max()
                         cvd_recent = db.get_cvd_data(symbol, limit=50000, since=since_cvd)
