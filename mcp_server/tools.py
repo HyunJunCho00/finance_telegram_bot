@@ -231,10 +231,14 @@ class MCPTools:
                 tf = timeframe.lower().strip()
                 if tf in ('1d', 'd', 'p', 'position', 'w', '1w'):
                     mode = TradingMode.POSITION
-                    limit = settings.POSITION_CANDLE_LIMIT
+                    # [V14.4] 1D/1W charts need at least 30 days of cold DB data to bridge GCS gap
+                    limit = 45000 
                 elif tf in ('4h', 'h', 's', 'swing', '1h'):
                     mode = TradingMode.SWING
-                    limit = settings.SWING_CANDLE_LIMIT
+                    # [V14.4] 4h charts need ~7 days of data
+                    limit = 10000 
+                else:
+                    limit = 1000  # Default low-res/fast
 
             df = db.get_latest_market_data(symbol, limit=limit)
             if df.empty:
@@ -252,52 +256,101 @@ class MCPTools:
                     if timeframe and timeframe.lower() in ('1w', 'w') or mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
                     
-                    m_back_timeseries = 6 if mode == TradingMode.SWING else 12
-                    # 1. CVD
-                    cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back_timeseries)
+            # [V14.5 Fix] Synchronize lookback with OHLCV (24 months)
+            # This ensures indicators don't stop at Nov 2025 like in previous bug.
+            m_back_timeseries = m_back
+            
+            # Bridge GCS gap: 45,000 rows covers ~31 days of 1m data
+            db_limit = 45000 
+                    
+                    # ── 1. CVD ──
+                    # Load historical months from GCS cache (past months only, always skips current)
+                    cvd_hist_dfs = []
+                    now_utc = pd.Timestamp.utcnow().tz_localize('UTC')
+                    current_month_str = now_utc.strftime("%Y-%m")
+                    for m in range(1, m_back_timeseries + 1):  # start from 1 to SKIP current month
+                        month_str = (now_utc - pd.DateOffset(months=m)).strftime("%Y-%m")
+                        path = f"cvd/{symbol}/{month_str}.parquet"
+                        df_part = gcs_parquet_store._download_parquet(path)
+                        if df_part is not None:
+                            cvd_hist_dfs.append(df_part)
+                    
+                    cvd_hist = pd.concat(cvd_hist_dfs, ignore_index=True) if cvd_hist_dfs else pd.DataFrame()
+                    
                     if not cvd_hist.empty:
-                        # [FIX CRITICAL] Map historical columns to live schema for chart_generator
-                        cvd_hist = cvd_hist.rename(columns={
+                        cvd_hist.rename(columns={
                             'taker_buy_volume': 'whale_buy_vol',
                             'taker_sell_volume': 'whale_sell_vol'
-                        })
-                        # [FIX SCALE] Convert historical Coin volume to USD volume using precise historical daily prices
+                        }, inplace=True)
+                        
+                        # Convert coin volume → USD using historical daily prices
                         if df_1d is not None and not df_1d.empty:
                             price_map = df_1d.copy()
                             price_map['timestamp'] = pd.to_datetime(price_map['timestamp'], utc=True).dt.floor('D')
                             price_map = price_map.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
-                            daily_prices = cvd_hist['timestamp'].dt.floor('D').map(price_map).ffill().bfill()
-                            if daily_prices.isna().any():
-                                daily_prices = daily_prices.fillna(df['close'].iloc[-1] if not df.empty else 60000)
+                            ts_col = pd.to_datetime(cvd_hist['timestamp'], utc=True).dt.floor('D')
+                            daily_prices = ts_col.map(price_map).ffill().bfill().fillna(float(df['close'].iloc[-1]))
                         else:
-                            daily_prices = df['close'].iloc[-1] if not df.empty else 60000
-                            
+                            daily_prices = float(df['close'].iloc[-1]) if not df.empty else 60000.0
+                        
                         cvd_hist['whale_buy_vol'] = cvd_hist['whale_buy_vol'] * daily_prices
                         cvd_hist['whale_sell_vol'] = cvd_hist['whale_sell_vol'] * daily_prices
-                        
-                        since_cvd = cvd_hist['timestamp'].max()
-                        cvd_recent = db.get_cvd_data(symbol, limit=50000, since=since_cvd)
-                        cvd_df = pd.concat([cvd_hist, cvd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                        cvd_hist['timestamp'] = pd.to_datetime(cvd_hist['timestamp'], utc=True)
+                        earliest_hist = cvd_hist['timestamp'].min()
                     else:
-                        cvd_recent = db.get_cvd_data(symbol, limit=settings.data_lookback_hours * 60)
+                        earliest_hist = None
+                    
+                    cvd_recent = db.get_cvd_data(symbol, limit=db_limit)
+                    
+                    if cvd_recent is not None and not cvd_recent.empty:
+                        # [V14.5 Fix] SCALE recent CVD to USD (Recent DB returns COIN vol)
+                        current_price = float(df['close'].iloc[-1]) if not df.empty else 60000.0
+                        cvd_recent['whale_buy_vol'] = cvd_recent['whale_buy_vol'] * current_price
+                        cvd_recent['whale_sell_vol'] = cvd_recent['whale_sell_vol'] * current_price
+                        cvd_recent['timestamp'] = pd.to_datetime(cvd_recent['timestamp'], utc=True)
+                    
+                    if not cvd_hist.empty and cvd_recent is not None and not cvd_recent.empty:
+                        cvd_df = pd.concat([cvd_hist, cvd_recent], ignore_index=True)\
+                                   .drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                    elif not cvd_hist.empty:
+                        cvd_df = cvd_hist
+                    else:
                         cvd_df = cvd_recent
                     
-                    # 2. Funding / OI
-                    fnd_hist = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back_timeseries)
-                    if not fnd_hist.empty:
-                        # [FIX CRITICAL] Map historical columns to live schema for chart_generator
-                        fnd_hist = fnd_hist.rename(columns={
-                            'open_interest_value': 'open_interest'
-                        })
-                        since_fnd = fnd_hist['timestamp'].max()
-                        fnd_recent = db.get_funding_history(symbol, limit=50000, since=since_fnd)
-                        funding_df = pd.concat([fnd_hist, fnd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-                    else:
-                        fnd_recent = db.get_funding_history(symbol, limit=settings.data_lookback_hours * 60)
-                        funding_df = fnd_recent
+                    # ── 2. Funding / OI ──
+                    fnd_hist_dfs = []
+                    for m in range(1, m_back_timeseries + 1):  # start from 1 to SKIP current month
+                        month_str = (now_utc - pd.DateOffset(months=m)).strftime("%Y-%m")
+                        path = f"funding/{symbol}/{month_str}.parquet"
+                        df_part = gcs_parquet_store._download_parquet(path)
+                        if df_part is not None:
+                            fnd_hist_dfs.append(df_part)
                     
-                    # 3. Liquidations
-                    liq_df = db.get_liquidation_data(symbol, limit=settings.data_lookback_hours * 60)
+                    fnd_hist = pd.concat(fnd_hist_dfs, ignore_index=True) if fnd_hist_dfs else pd.DataFrame()
+                    
+                    if not fnd_hist.empty:
+                        # [V14.5 Fix] Standardize OI to USD value
+                        fnd_hist.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
+                        fnd_hist['timestamp'] = pd.to_datetime(fnd_hist['timestamp'], utc=True)
+                        
+                        fnd_recent = db.get_funding_history(symbol, limit=db_limit)
+                        if fnd_recent is not None and not fnd_recent.empty:
+                            # [V14.5 Fix] Use Global USD value from DB (not just Binance contract count)
+                            fnd_recent.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
+                            fnd_recent['timestamp'] = pd.to_datetime(fnd_recent['timestamp'], utc=True)
+                            
+                            funding_df = pd.concat([fnd_hist, fnd_recent], ignore_index=True)\
+                                           .drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                        else:
+                            funding_df = fnd_hist
+                    else:
+                        funding_df = db.get_funding_history(symbol, limit=db_limit)
+                        if not funding_df.empty:
+                            funding_df.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
+                            funding_df['timestamp'] = pd.to_datetime(funding_df['timestamp'], utc=True)
+                    
+                    # 3. Liquidations (Increase limit to cover gaps)
+                    liq_df = db.get_liquidation_data(symbol, limit=db_limit)
                 except Exception as e:
                     logger.warning(f"GCS load for chart tool skipped: {e}")
 

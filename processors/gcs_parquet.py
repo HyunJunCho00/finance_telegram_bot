@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Dict, List, Optional, Tuple
+from pathlib import Path
 
 import pandas as pd
 from loguru import logger
@@ -38,6 +39,10 @@ class GCSParquetStore:
         self.bucket_name = settings.GCS_ARCHIVE_BUCKET
         self.enabled = bool(settings.ENABLE_GCS_ARCHIVE and self.bucket_name)
         self._client = None
+        
+        # Local cache directory for immutable GCS parquet files
+        self.cache_dir = Path("cache/gcs_parquet")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def storage_client(self):
@@ -166,15 +171,45 @@ class GCSParquetStore:
     # ─────────────── Read Operations ───────────────
 
     def _download_parquet(self, object_path: str) -> Optional[pd.DataFrame]:
-        """Download a Parquet file from GCS. Returns None if not found."""
+        """Download a Parquet file from GCS or Local Cache. Returns None if not found."""
         try:
+            # 1. Check local disk cache first
+            # Safe caching: A file is only "immutable" if it belongs to a month 
+            # that has passed AND the retention buffer (30 days) has cleared it from DB.
+            now_utc = datetime.now(timezone.utc)
+            current_month_dt = now_utc.strftime("%Y-%m")
+            # Also skip caching for the PREVIOUS month, as it may still be receiving 
+            # archived rows from the 30-day retention buffer.
+            prev_month_dt = (now_utc - timedelta(days=32)).strftime("%Y-%m")
+            
+            is_mutable = (current_month_dt in object_path) or (prev_month_dt in object_path)
+            
+            safe_name = object_path.replace("/", "_").replace("\\", "_")
+            cache_path = self.cache_dir / safe_name
+            
+            if cache_path.exists() and not is_mutable:
+                # Return immediately from blazing fast local SSD for deep history
+                return pd.read_parquet(cache_path, engine="pyarrow")
+                
+            # 2. Not in cache (or is mutable), fetch from GCS
             blob = self.bucket.blob(object_path)
             if not blob.exists():
                 return None
-            buf = BytesIO(blob.download_as_bytes())
-            return pd.read_parquet(buf, engine="pyarrow")
+                
+            payload = blob.download_as_bytes()
+            buf = BytesIO(payload)
+            df = pd.read_parquet(buf, engine="pyarrow")
+            
+            # 3. Save to local cache if it is a rigid historical file (older than current+prev month)
+            if not is_mutable and not df.empty:
+                try:
+                    cache_path.write_bytes(payload)
+                except Exception as e:
+                    logger.debug(f"Failed to write GCS cache to disk: {e}")
+                    
+            return df
         except Exception as e:
-            logger.debug(f"Parquet download failed ({object_path}): {e}")
+            logger.debug(f"Parquet load failed ({object_path}): {e}")
             return None
 
     def load_ohlcv(self, timeframe: str, symbol: str,
@@ -235,13 +270,19 @@ class GCSParquetStore:
         if not dfs:
             return pd.DataFrame()
 
-        result = pd.concat(dfs, ignore_index=True)
+        # Fast path concat
+        result = pd.concat(dfs, ignore_index=True, copy=False)
+        
         # Handle numeric timestamps (ms) if they somehow got stored that way
         time_col = 'timestamp' if 'timestamp' in result.columns else result.columns[0]
+        
+        # Super-fast datetime conversion using to_datetime with pre-known formats
         if pd.api.types.is_numeric_dtype(result[time_col]):
             result[time_col] = pd.to_datetime(result[time_col], unit='ms', utc=True)
         else:
-            result[time_col] = pd.to_datetime(result[time_col].astype(str), format='mixed', utc=True, errors='coerce').bfill()
+            # Parquet usually retains datetime64[ns, UTC], only string-cast if necessary
+            if not pd.api.types.is_datetime64_any_dtype(result[time_col]):
+                result[time_col] = pd.to_datetime(result[time_col], format='mixed', utc=True)
             
         return result.sort_values(time_col).reset_index(drop=True)
 

@@ -20,8 +20,9 @@ class MarketMonitorAgent:
         system_prompt = (
             "You are a Market Status Monitor. Your goal is to provide a concise, "
             "data-driven summary of current market indicators for a professional trader. "
-            "Focus on spotting anomalies in Funding Rates, CVD, and Open Interest. "
-            "Format the output in clean Markdown."
+            "Focus on spotting anomalies in Funding Rates, CVD, Open Interest, and breaking Telegram news. "
+            "Format the output in clean, highly readable Markdown using bullet points and emojis. "
+            "Keep the entire summary under 150 words."
         )
         
         user_message = f"""
@@ -29,9 +30,9 @@ class MarketMonitorAgent:
         {json.dumps(indicators, indent=2)}
         
         Please provide:
-        1. Quick Sentiment (Bullish/Bearish/Neutral)
-        2. Notable anomalies in CVD or Funding
-        3. Strategic outlook for the next 4 hours
+        1. 🛡️ Quick Market Sentiment (Bullish/Bearish/Neutral)
+        2. 🪙 Notable Token Anomalies (Prices, Funding, Volatility)
+        3. 📰 Breaking News & Narrative (From Telegram Intel)
         """
 
         try:

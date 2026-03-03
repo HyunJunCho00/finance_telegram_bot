@@ -646,7 +646,24 @@ class CloudflareReranker:
             # 1. List of floats: [0.93, 0.01, ...]
             # 2. List of dicts: [{"index": 0, "score": 0.93}, ...]
             # 3. List of dicts with 'id': [{"id": 0, "score": 0.93}, ...]
-            
+            # 4. Dict wrapping a list: {"scores": [...]} or {"data": [...]}  ← occasional API variant
+
+            if isinstance(results, dict):
+                # Try known wrapper keys before giving up
+                results = (
+                    results.get("scores")
+                    or results.get("data")
+                    or results.get("result")
+                    or results.get("results")
+                )
+                if not isinstance(results, list):
+                    logger.warning(
+                        f"CloudflareReranker: unexpected result dict — could not extract list. "
+                        f"Keys: {list(data.get('result', {}).keys()) if isinstance(data.get('result'), dict) else '?'}"
+                    )
+                    return None
+                logger.debug("CloudflareReranker: unwrapped dict response → list OK")
+
             if not isinstance(results, list):
                 logger.warning(f"CloudflareReranker: unexpected result type {type(results)}")
                 return None

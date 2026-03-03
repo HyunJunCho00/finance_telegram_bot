@@ -143,36 +143,43 @@ def job_analysis():
         logger.error(f"Analysis job error: {e}")
 
 def job_routine_market_status():
-    """V13.3: Routine Market Status check (Free-First)."""
+    """V13.3: Routine Market Status check (Free-First) with Multi-Coin & Telegram Intel."""
     try:
         logger.info("Running routine market status check (Free-First)")
 
-        # BTC 가격: DB에서 최신 1분봉 close 사용
-        btc_price = None
+        indicators = {}
+        for symbol in settings.trading_symbols:
+            indicators[symbol] = {}
+            # Price
+            try:
+                df = db.get_latest_market_data(symbol, limit=1)
+                if not df.empty and "close" in df.columns:
+                    indicators[symbol]["price"] = float(df["close"].iloc[-1])
+            except Exception:
+                pass
+
+            # Funding Rate
+            try:
+                f_df = db.get_funding_history(symbol, limit=1)
+                if not f_df.empty and "funding_rate" in f_df.columns:
+                    indicators[symbol]["funding_rate"] = float(f_df["funding_rate"].iloc[-1])
+            except Exception:
+                pass
+
+            # Volatility
+            indicators[symbol]["volatility"] = volatility_monitor.calculate_price_change(symbol)
+                
+        # Telegram Intel (Last 1 hour)
+        telegram_intel = "No recent significant news."
         try:
-            btc_df = db.get_latest_market_data("BTCUSDT", limit=1)
-            if not btc_df.empty and "close" in btc_df.columns:
-                btc_price = float(btc_df["close"].iloc[-1])
-        except Exception:
-            pass
+            recent_insights = db.client.table("ai_insights").select("insight_text").order("created_at", desc=True).limit(5).execute()
+            if hasattr(recent_insights, "data") and recent_insights.data:
+                telegram_intel = "\n".join([row["insight_text"] for row in recent_insights.data])
+        except Exception as e:
+            logger.warning(f"Failed to fetch Telegram intel for routine update: {e}")
+            
+        indicators["TELEGRAM_INTEL"] = telegram_intel
 
-        # 펀딩율: DB에서 최신 funding_rate 사용
-        funding_rate = None
-        try:
-            f_df = db.get_funding_history("BTCUSDT", limit=1)
-            if not f_df.empty and "funding_rate" in f_df.columns:
-                funding_rate = float(f_df["funding_rate"].iloc[-1])
-        except Exception:
-            pass
-
-        # 변동성: VolatilityMonitor의 calculate_price_change() 사용
-        volatility = volatility_monitor.calculate_price_change("BTCUSDT")
-
-        indicators = {
-            "btc_price": btc_price,
-            "funding_rate": funding_rate,
-            "volatility": volatility,
-        }
         summary = market_monitor_agent.summarize_current_status(indicators)
         logger.success(f"Market Summary Generated:\n{summary}")
 

@@ -58,8 +58,15 @@ class ReportGenerator:
         d = decision.get('decision', 'N/A')
         confidence = decision.get('confidence', 0)
         
-        header_icon = "🟢" if d == "LONG" else "🔴" if d == "SHORT" else "🟡"
-        mode_label = "SWING" if mode == TradingMode.SWING else "POSITION"
+        # Enhanced directional clarity
+        if d == "LONG":
+            header_icon, color_theme = "🟢", "📈 강세 (LONG)"
+        elif d == "SHORT":
+            header_icon, color_theme = "🔴", "📉 약세 (SHORT)"
+        else:
+            header_icon, color_theme = "🟡", "⏳ 관망 (HOLD)"
+            
+        mode_label = "SWING (스윙)" if mode == TradingMode.SWING else "POSITION (포지션)"
         
         # Format prices
         def fmt_price(val):
@@ -68,27 +75,29 @@ class ReportGenerator:
             except: return str(val)
 
         summary_lines = [
-            f"{header_icon} <b>{mode_label} REPORT | {report['symbol']}</b>",
-            f"<code>{report['timestamp'][:16].replace('T', ' ')} UTC</code>",
-            "",
-            f"🎯 <b>DECISION: {d}</b> ({confidence}%)",
-            f"🏁 Entry: <code>{fmt_price(decision.get('entry_price'))}</code> | SL: <code>{fmt_price(decision.get('stop_loss'))}</code>",
-            f"🎯 TP: <code>{fmt_price(decision.get('take_profit'))}</code>",
-            "",
+            f"{header_icon} <b>[ {mode_label} ] AI 분석 리포트 | {report['symbol']}</b>",
+            f"🕒 <code>{report['timestamp'][:16].replace('T', ' ')} UTC</code>\n",
+            f"🎯 <b>최종 결정: {color_theme}</b> (확신도: {confidence}%)",
+            f"<blockquote>",
+            f"🏁 진입가: <code>{fmt_price(decision.get('entry_price'))}</code>",
+            f"🛑 손절가: <code>{fmt_price(decision.get('stop_loss'))}</code>",
+            f"🏆 목표가: <code>{fmt_price(decision.get('take_profit'))}</code>",
+            f"</blockquote>\n"
         ]
-
-        # Execution Status
-        receipt = decision.get("execution_receipt")
-        if receipt and receipt.get("success"):
-            summary_lines.append(f"✅ <b>EXECUTION ACTIVE</b> ({len(receipt.get('receipts', []))} orders)")
-        elif receipt:
-            summary_lines.append(f"⏸️ <b>STATUS:</b> {receipt.get('note', 'PENDING')}")
 
         # Final Logic (Summary)
         reasoning = decision.get('reasoning', {})
         final_logic = reasoning.get('final_logic', 'No summary available.') if isinstance(reasoning, dict) else str(reasoning)[:200]
         
-        summary_lines.append(f"\n💡 <b>SUMMARY:</b> <i>{final_logic}</i>")
+        summary_lines.append(f"💡 <b>Summary:</b>")
+        summary_lines.append(f"<i>{final_logic}</i>\n")
+
+        # Execution Status
+        receipt = decision.get("execution_receipt")
+        if receipt and receipt.get("success"):
+            summary_lines.append(f"✅ <b>자동매매 실행 완료</b> ({len(receipt.get('receipts', []))} orders)")
+        elif receipt:
+            summary_lines.append(f"⏸️ <b>실행 보류:</b> {receipt.get('note', 'PENDING')}")
         
         return "\n".join(summary_lines)
 
@@ -101,17 +110,19 @@ class ReportGenerator:
         
         if isinstance(reasoning, dict):
             mapping = {
-                "technical": "📏 TECHNICALS",
-                "derivatives": "⛓️ DERIVATIVES",
-                "experts": "🧠 EXPERT SWARM",
-                "narrative": "🌐 NARRATIVE/RAG",
-                "counter_scenario": "⚠️ RISK/FALSIFIABILITY"
+                "technical": "📏 기술적 분석 (Technical)",
+                "derivatives": "⛓️ 파생상품 심리 (Derivatives)",
+                "experts": "🧠 전문가 스웜 (Expert Swarm)",
+                "narrative": "🌐 시장 내러티브 (Narrative/News)",
+                "counter_scenario": "⚠️ 최악의 시나리오 (Risk)"
             }
             for key, title in mapping.items():
                 val = reasoning.get(key)
                 if val:
                     safe_val = str(val).replace('<', '&lt;').replace('>', '&gt;')
                     if len(safe_val) > 1500: safe_val = safe_val[:1497] + "..."
+                    # Add paragraph breaks for readability if raw text is too dense
+                    safe_val = safe_val.replace(". ", ".\n\n")
                     lines.append(f"<b>{title}:</b>\n<i>{safe_val}</i>\n")
         else:
             lines.append(f"<i>{str(reasoning).replace('<', '&lt;').replace('>', '&gt;')}</i>")

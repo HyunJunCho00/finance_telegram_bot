@@ -177,9 +177,12 @@ class ChartGenerator:
                 # Resample CVD to match OHLCV rule, but use min_count=1 to keep structural NaNs
                 cvd_resampled = cvd.resample(config['resample_rule']).sum(min_count=1)
                 # Calculate Cumulative Delta for visual trend
-                cvd_resampled['cvd_acc'] = (cvd_resampled.get('whale_buy_vol', 0) - cvd_resampled.get('whale_sell_vol', 0)).cumsum()
+                buy_vol = cvd_resampled['whale_buy_vol'] if 'whale_buy_vol' in cvd_resampled else pd.Series(0, index=cvd_resampled.index)
+                sell_vol = cvd_resampled['whale_sell_vol'] if 'whale_sell_vol' in cvd_resampled else pd.Series(0, index=cvd_resampled.index)
+                
+                cvd_resampled['cvd_acc'] = (buy_vol - sell_vol).cumsum()
                 # Calculate individual bar delta
-                cvd_resampled['delta'] = cvd_resampled.get('whale_buy_vol', 0) - cvd_resampled.get('whale_sell_vol', 0)
+                cvd_resampled['delta'] = buy_vol - sell_vol
                 
                 # Align with chart_df index
                 cvd_aligned = cvd_resampled.reindex(chart_df.index)
@@ -206,28 +209,42 @@ class ChartGenerator:
                 else:
                     fnd['timestamp'] = pd.to_datetime(fnd['timestamp'], utc=True).dt.floor('min')
                 fnd = fnd.set_index('timestamp')
-                # Resample (OI is mean or last, Funding is mean)
-                fnd_resampled = fnd.resample(config['resample_rule']).agg({
-                    'open_interest': 'last',
-                    'funding_rate': 'mean'
-                })
                 
-                fnd_aligned = fnd_resampled.reindex(chart_df.index)
+                # Safely determine what columns are available
+                has_oi = 'open_interest' in fnd.columns
+                has_funding = 'funding_rate' in fnd.columns
                 
-                fnd_oi_plot = fnd_aligned['open_interest'].bfill().ffill()
-                fnd_rate_plot = fnd_aligned['funding_rate'].fillna(0)
+                agg_map = {}
+                if has_oi: agg_map['open_interest'] = 'last'
+                if has_funding: agg_map['funding_rate'] = 'mean'
                 
-                # Panel 3: Open Interest
-                apds.append(mpf.make_addplot(fnd_oi_plot, panel=3,
-                                           color='#2980B9', width=1.2,
-                                           ylabel='OI', secondary_y=False))
-                
-                # Funding Heat-tape (Calculated as a bar chart at the bottom of Panel 0)
-                f_colors = ['#27AE60' if r > 0.0001 else '#C0392B' if r < -0.0001 else '#BDC3C7' 
-                           for r in fnd_rate_plot]
-                apds.append(mpf.make_addplot(fnd_rate_plot, panel=4,
-                                           type='bar', color=f_colors, alpha=0.8,
-                                           ylabel='Fnd', secondary_y=False))
+                if not agg_map:
+                    # No usable columns in funding_df at all
+                    funding_df = None
+                else:
+                    fnd_resampled = fnd.resample(config['resample_rule']).agg(agg_map)
+                    fnd_aligned = fnd_resampled.reindex(chart_df.index)
+                    
+                    # OI Panel — only if column exists
+                    if has_oi:
+                        fnd_oi_plot = fnd_aligned['open_interest'].bfill().ffill()
+                        apds.append(mpf.make_addplot(fnd_oi_plot, panel=3,
+                                                   color='#2980B9', width=1.2,
+                                                   ylabel='OI', secondary_y=False))
+                    else:
+                        # No OI — adjust panel count so Funding goes to the right panel
+                        num_panels -= 1
+                        p_ratios.pop()  # remove the OI ratio placeholder
+                    
+                    # Funding Rate Tape — only if column exists
+                    if has_funding:
+                        fnd_rate_plot = fnd_aligned['funding_rate'].fillna(0)
+                        f_colors = ['#27AE60' if r > 0.0001 else '#C0392B' if r < -0.0001 else '#BDC3C7' 
+                                   for r in fnd_rate_plot]
+                        tape_panel = 4 if has_oi else 3  # shift panel if OI missing
+                        apds.append(mpf.make_addplot(fnd_rate_plot, panel=tape_panel,
+                                                   type='bar', color=f_colors, alpha=0.8,
+                                                   ylabel='Fnd', secondary_y=False))
 
             # Dynamic Theme Selection
             theme = getattr(settings, 'CHART_THEME', 'dark_premium').lower()
@@ -294,6 +311,8 @@ class ChartGenerator:
                 ylabel='Price',
                 figsize=(15, 12 if num_panels > 3 else 10),
                 panel_ratios=tuple(p_ratios),
+                datetime_format='%Y-%m-%d',
+                xrotation=0,
                 tight_layout=False,  # We'll use subplots_adjust for margins
                 returnfig=True
             )
