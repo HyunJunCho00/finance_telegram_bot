@@ -594,6 +594,10 @@ def node_generate_chart(state: AnalysisState) -> dict:
                 
                 # Unify columns: ALWAYS use 'taker_buy_volume' to calculate continuous CVD in USD.
                 # Live DB (bridge_cvd) has 'taker_buy_volume' (COIN), GCS (hist_cvd) has 'taker_buy_volume' (COIN).
+                cols_to_drop = [c for c in ['whale_buy_vol', 'whale_sell_vol', 'whale_delta', 'whale_cvd'] if c in merged_cvd.columns]
+                if cols_to_drop:
+                    merged_cvd = merged_cvd.drop(columns=cols_to_drop)
+                    
                 merged_cvd = merged_cvd.rename(columns={
                     'taker_buy_volume': 'whale_buy_vol',
                     'taker_sell_volume': 'whale_sell_vol'
