@@ -543,10 +543,18 @@ class MathEngine:
                 r['stoch_rsi_k'] = self._safe_val(stoch[cols[0]])
                 r['stoch_rsi_d'] = self._safe_val(stoch[cols[1]])
 
+            # In processors/math_engine.py
+            import warnings
+            
             try:
                 r['williams_r'] = self._safe_val(ta.willr(high, low, close, length=14))
                 r['cci'] = self._safe_val(ta.cci(high, low, close, length=20))
-                r['mfi'] = self._safe_val(ta.mfi(high, low, close, volume, length=14))
+                
+                # MFI requires strict float64 series and sometimes breaks if values are too large
+                vol_mfi = volume.astype('float64')
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=FutureWarning)
+                    r['mfi'] = self._safe_val(ta.mfi(high, low, close, vol_mfi, length=14))
             except Exception as e:
                 logger.warning(f"Error calculating willr/cci/mfi: {e}")
 

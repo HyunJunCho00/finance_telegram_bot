@@ -284,6 +284,8 @@ class ChartGenerator:
             if funding_df is not None: 
                 p_ratios.append(1.5) # OI
                 p_ratios.append(0.6) # Funding Tape (Thin)
+                
+            logger.debug(f"Calling mpf.plot with {len(apds)} addplots, {num_panels} panels, ratios {p_ratios}")
 
             fig, axes = mpf.plot(
                 chart_df, type='candle', style=style, volume=True,
