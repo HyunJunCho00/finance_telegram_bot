@@ -279,6 +279,7 @@ class MCPTools:
                     cvd_hist = pd.concat(cvd_hist_dfs, ignore_index=True) if cvd_hist_dfs else pd.DataFrame()
                     
                     if not cvd_hist.empty:
+                        cvd_hist = cvd_hist.reset_index(drop=True)
                         cvd_hist.rename(columns={
                             'taker_buy_volume': 'whale_buy_vol',
                             'taker_sell_volume': 'whale_sell_vol'
@@ -291,7 +292,8 @@ class MCPTools:
                             price_map = price_map.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
                             price_map = price_map[~price_map.index.duplicated(keep='last')]
                             ts_col = pd.to_datetime(cvd_hist['timestamp'], utc=True).dt.floor('D')
-                            daily_prices = ts_col.map(price_map).ffill().bfill().fillna(float(df['close'].iloc[-1]))
+                            # Use .values to avoid Series index mismatch during multiplication
+                            daily_prices = ts_col.map(price_map).ffill().bfill().fillna(float(df['close'].iloc[-1])).values
                         else:
                             daily_prices = float(df['close'].iloc[-1]) if not df.empty else 60000.0
                         
