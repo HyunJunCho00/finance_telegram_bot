@@ -255,14 +255,14 @@ class MCPTools:
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
                     if timeframe and timeframe.lower() in ('1w', 'w') or mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
-                    
-            # [V14.5 Fix] Synchronize lookback with OHLCV (24 months)
-            # This ensures indicators don't stop at Nov 2025 like in previous bug.
-            m_back_timeseries = m_back
-            
-            # Bridge GCS gap: 45,000 rows covers ~31 days of 1m data
-            db_limit = 45000 
-                    
+
+                    # [V14.5 Fix] Synchronize lookback with OHLCV (24 months)
+                    # This ensures indicators don't stop at Nov 2025 like in previous bug.
+                    m_back_timeseries = m_back
+
+                    # Bridge GCS gap: 45,000 rows covers ~31 days of 1m data
+                    db_limit = 45000
+
                     # ── 1. CVD ──
                     # Load historical months from GCS cache (past months only, always skips current)
                     cvd_hist_dfs = []
