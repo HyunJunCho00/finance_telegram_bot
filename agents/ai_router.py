@@ -352,6 +352,7 @@ class AIClient:
                 temperature=temperature,
                 system=system_prompt,
                 messages=[{"role": "user", "content": content}],
+                timeout=45.0,
             )
 
             return response.content[0].text
@@ -418,6 +419,7 @@ class AIClient:
             if not model_id.startswith("o"):
                 kwargs["temperature"] = temperature
                 kwargs["max_tokens"] = max_tokens
+            kwargs["timeout"] = 45.0
 
             response = client.chat.completions.create(**kwargs)
 

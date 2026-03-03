@@ -237,6 +237,7 @@ class ChartGenerator:
                                            secondary_y=True))
 
             # 5. Integrate OI and Funding if provided
+            _has_oi = True  # track for panel count correction below
             if funding_df is not None and not funding_df.empty:
                 fnd = funding_df.copy()
                 if pd.api.types.is_numeric_dtype(fnd['timestamp']):
@@ -267,9 +268,8 @@ class ChartGenerator:
                                                    color='#2980B9', width=1.2,
                                                    ylabel='OI', secondary_y=False))
                     else:
-                        # No OI — adjust panel count so Funding goes to the right panel
-                        num_panels -= 1
-                        p_ratios.pop()  # remove the OI ratio placeholder
+                        # No OI — flag for panel count correction below
+                        _has_oi = False
                     
                     # Funding Rate Tape — only if column exists
                     if has_funding:
@@ -329,12 +329,13 @@ class ChartGenerator:
             # Plot — Adaptive panel layout (Price 0, Vol 1, CVD 2, OI 3, Funding 4)
             num_panels = 2 # Basic: Price + Vol
             if cvd_df is not None: num_panels += 1
-            if funding_df is not None: num_panels += 2 # OI Panel + Funding Tape Panel
-            
+            if funding_df is not None:
+                num_panels += 2 if _has_oi else 1  # OI + Funding, or just Funding
+
             p_ratios = [5, 1.2] # Price, Vol
             if cvd_df is not None: p_ratios.append(1.8)
-            if funding_df is not None: 
-                p_ratios.append(1.5) # OI
+            if funding_df is not None:
+                if _has_oi: p_ratios.append(1.5) # OI
                 p_ratios.append(0.6) # Funding Tape (Thin)
                 
             logger.debug(f"Calling mpf.plot with {len(apds)} addplots, {num_panels} panels, ratios {p_ratios}")
@@ -672,7 +673,7 @@ class ChartGenerator:
             timestamps = chart_df.index
             
             # Ensure both are timezone aware for subtraction
-            if timestamps.tzinfo is None:
+            if timestamps.tz is None:
                 timestamps = timestamps.tz_localize('UTC')
             if ts1.tzinfo is None:
                 ts1 = ts1.replace(tzinfo=pd.Timestamp.utcnow().tzinfo)

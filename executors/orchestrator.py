@@ -582,27 +582,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
             m_back = 6 if mode == TradingMode.SWING else 12
             hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
             if not hist_cvd.empty:
-                # [FIX CRITICAL] Map historical columns to live schema for chart_generator
-                hist_cvd = hist_cvd.rename(columns={
-                    'taker_buy_volume': 'whale_buy_vol',
-                    'taker_sell_volume': 'whale_sell_vol'
-                })
                 hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-                
-                # [FIX SCALE] Convert historical Coin volume to USD volume using precise historical daily prices
-                if df_1d is not None and not df_1d.empty:
-                    price_map = df_1d.copy()
-                    price_map['timestamp'] = pd.to_datetime(price_map['timestamp'], utc=True).dt.floor('D')
-                    price_map = price_map.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
-                    daily_prices = hist_cvd['timestamp'].dt.floor('D').map(price_map).ffill().bfill()
-                    if daily_prices.isna().any():
-                        daily_prices = daily_prices.fillna(df['close'].iloc[-1] if not df.empty else 60000)
-                else:
-                    daily_prices = df['close'].iloc[-1] if not df.empty else 60000
-                    
-                hist_cvd['whale_buy_vol'] = hist_cvd['whale_buy_vol'] * daily_prices
-                hist_cvd['whale_sell_vol'] = hist_cvd['whale_sell_vol'] * daily_prices
-                
                 since_cvd = hist_cvd['timestamp'].max()
                 bridge_cvd = db.get_cvd_data(symbol, limit=50000, since=since_cvd)
                 
@@ -610,7 +590,30 @@ def node_generate_chart(state: AnalysisState) -> dict:
                 if not bridge_cvd.empty: dfs.append(bridge_cvd)
                 if cvd_df is not None and not cvd_df.empty: dfs.append(cvd_df)
                 
-                cvd_df = pd.concat(dfs).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                merged_cvd = pd.concat(dfs).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                
+                # Unify columns: ALWAYS use 'taker_buy_volume' to calculate continuous CVD in USD.
+                # Live DB (bridge_cvd) has 'taker_buy_volume' (COIN), GCS (hist_cvd) has 'taker_buy_volume' (COIN).
+                merged_cvd = merged_cvd.rename(columns={
+                    'taker_buy_volume': 'whale_buy_vol',
+                    'taker_sell_volume': 'whale_sell_vol'
+                })
+                
+                # Setup Daily Prices for entire trace to scale COIN into USD uniformly
+                if df_1d is not None and not df_1d.empty:
+                    price_map = df_1d.copy()
+                    price_map['timestamp'] = pd.to_datetime(price_map['timestamp'], utc=True).dt.floor('D')
+                    price_map = price_map.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
+                    daily_prices = merged_cvd['timestamp'].dt.floor('D').map(price_map).ffill().bfill()
+                    if daily_prices.isna().any():
+                        daily_prices = daily_prices.fillna(df['close'].iloc[-1] if not df.empty else 60000)
+                else:
+                    daily_prices = df['close'].iloc[-1] if not df.empty else 60000
+                    
+                merged_cvd['whale_buy_vol'] = merged_cvd['whale_buy_vol'].fillna(0) * daily_prices
+                merged_cvd['whale_sell_vol'] = merged_cvd['whale_sell_vol'].fillna(0) * daily_prices
+                
+                cvd_df = merged_cvd
     except Exception as e:
         logger.warning(f"CVD data load for chart skipped/merged: {e}")
 
