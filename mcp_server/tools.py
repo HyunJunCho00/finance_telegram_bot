@@ -262,7 +262,6 @@ class MCPTools:
 
                     # Bridge GCS gap: 45,000 rows covers ~31 days of 1m data
                     db_limit = 45000
-                    cvd_recent = db.get_cvd_data(symbol, limit=db_limit)
 
                     # ── 1. CVD ──
                     # Load historical months from GCS cache (past months only, always skips current)
@@ -279,7 +278,8 @@ class MCPTools:
                     cvd_hist = pd.concat(cvd_hist_dfs, ignore_index=True) if cvd_hist_dfs else pd.DataFrame()
                     
                     if not cvd_hist.empty:
-                        cvd_hist = cvd_hist.reset_index(drop=True)
+                        # [V14.6] Robustness: Remove duplicate columns and reset index before processing
+                        cvd_hist = cvd_hist.loc[:, ~cvd_hist.columns.duplicated()].reset_index(drop=True)
                         cvd_hist.rename(columns={
                             'taker_buy_volume': 'whale_buy_vol',
                             'taker_sell_volume': 'whale_sell_vol'
@@ -300,22 +300,22 @@ class MCPTools:
                         cvd_hist['whale_buy_vol'] = cvd_hist['whale_buy_vol'] * daily_prices
                         cvd_hist['whale_sell_vol'] = cvd_hist['whale_sell_vol'] * daily_prices
                         cvd_hist['timestamp'] = pd.to_datetime(cvd_hist['timestamp'], utc=True)
-                        earliest_hist = cvd_hist['timestamp'].min()
                     else:
-                        earliest_hist = None
+                        cvd_hist = pd.DataFrame() # Ensure empty DF if concat failed
                     
-                    if cvd_recent is not None and not cvd_recent.empty:
-                        # [V14.7 Fix] Collector already stores whale_buy_vol in USD. 
-                        # No scaling needed for recent data.
+                    # Merge with recent DB data
+                    cvd_recent = db.get_cvd_data(symbol, limit=db_limit)
+                    if not cvd_recent.empty:
+                        cvd_recent = cvd_recent.loc[:, ~cvd_recent.columns.duplicated()].reset_index(drop=True)
                         cvd_recent['timestamp'] = pd.to_datetime(cvd_recent['timestamp'], utc=True)
-                    
-                    if not cvd_hist.empty and cvd_recent is not None and not cvd_recent.empty:
-                        cvd_df = pd.concat([cvd_hist, cvd_recent], ignore_index=True)\
-                                   .drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-                    elif not cvd_hist.empty:
-                        cvd_df = cvd_hist
+                        cvd_df = pd.concat([cvd_hist, cvd_recent], ignore_index=True)
+                        cvd_df = cvd_df.loc[:, ~cvd_df.columns.duplicated()]\
+                                       .drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                        cvd_df = cvd_df.reset_index(drop=True)
                     else:
-                        cvd_df = cvd_recent
+                        cvd_df = cvd_hist
+                    
+                    earliest_hist = cvd_df['timestamp'].min() if not cvd_df.empty else None
                     
                     # ── 2. Funding / OI ──
                     fnd_hist_dfs = []
@@ -331,16 +331,20 @@ class MCPTools:
                     if not fnd_hist.empty:
                         # [V14.5 Fix] Standardize OI to USD value
                         fnd_hist.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
+                        # [V14.6] Dedup columns — GCS parquet may already have 'open_interest',
+                        # causing duplicate columns after rename which breaks pd.concat
+                        fnd_hist = fnd_hist.loc[:, ~fnd_hist.columns.duplicated()].reset_index(drop=True)
                         fnd_hist['timestamp'] = pd.to_datetime(fnd_hist['timestamp'], utc=True)
-                        
+
                         fnd_recent = db.get_funding_history(symbol, limit=db_limit)
                         if fnd_recent is not None and not fnd_recent.empty:
-                            # [V14.5 Fix] Use Global USD value from DB (not just Binance contract count)
                             fnd_recent.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
+                            fnd_recent = fnd_recent.loc[:, ~fnd_recent.columns.duplicated()].reset_index(drop=True)
                             fnd_recent['timestamp'] = pd.to_datetime(fnd_recent['timestamp'], utc=True)
-                            
+
                             funding_df = pd.concat([fnd_hist, fnd_recent], ignore_index=True)\
                                            .drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                            funding_df = funding_df.reset_index(drop=True)
                         else:
                             funding_df = fnd_hist
                     else:

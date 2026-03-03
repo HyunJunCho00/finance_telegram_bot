@@ -587,10 +587,15 @@ def node_generate_chart(state: AnalysisState) -> dict:
                 bridge_cvd = db.get_cvd_data(symbol, limit=50000, since=since_cvd)
                 
                 dfs = [hist_cvd]
-                if not bridge_cvd.empty: dfs.append(bridge_cvd)
-                if cvd_df is not None and not cvd_df.empty: dfs.append(cvd_df)
+                if not bridge_cvd.empty: 
+                    bridge_cvd = bridge_cvd.loc[:, ~bridge_cvd.columns.duplicated()].reset_index(drop=True)
+                    dfs.append(bridge_cvd)
+                if cvd_df is not None and not cvd_df.empty: 
+                    cvd_df = cvd_df.loc[:, ~cvd_df.columns.duplicated()].reset_index(drop=True)
+                    dfs.append(cvd_df)
                 
                 merged_cvd = pd.concat(dfs).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                merged_cvd = merged_cvd.loc[:, ~merged_cvd.columns.duplicated()].reset_index(drop=True)
                 
                 # Unify columns: ALWAYS use 'taker_buy_volume' to calculate continuous CVD in USD.
                 # Live DB (bridge_cvd) has 'taker_buy_volume' (COIN), GCS (hist_cvd) has 'taker_buy_volume' (COIN).
@@ -638,6 +643,8 @@ def node_generate_chart(state: AnalysisState) -> dict:
         # Fetch funding data (includes OI, LSR) matching the lookback
         funding_limit = settings.data_lookback_hours * 60
         funding_df = db.get_funding_history(symbol, limit=funding_limit)
+        if funding_df is not None and not funding_df.empty:
+            funding_df = funding_df.loc[:, ~funding_df.columns.duplicated()].reset_index(drop=True)
         
         # [NEW] Merge with GCS historical funding for long-term charts
         from processors.gcs_parquet import gcs_parquet_store
@@ -645,6 +652,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
             m_back = 6 if mode == TradingMode.SWING else 12
             hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
             if not hist_fnd.empty:
+                hist_fnd = hist_fnd.loc[:, ~hist_fnd.columns.duplicated()].reset_index(drop=True)
                 # [FIX CRITICAL] Map historical columns to live schema for chart_generator
                 hist_fnd = hist_fnd.rename(columns={
                     'open_interest_value': 'open_interest'
