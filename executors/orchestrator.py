@@ -424,50 +424,41 @@ def node_triage(state: AnalysisState) -> dict:
 
 def node_liquidity_expert(state: AnalysisState) -> dict:
     """Run Liquidity Agent."""
-    bb = state.get("blackboard", {})
-    
     result = liquidity_agent.analyze(
         state.get("cvd_context", ""),
         state.get("liquidation_context", ""),
         mode=state.get("mode", "SWING").upper()
     )
-    bb["liquidity"] = result
-    return {"blackboard": bb}
+    return {"blackboard": {"liquidity": result}}
 
 def node_microstructure_expert(state: AnalysisState) -> dict:
     """Run Microstructure Agent."""
-    bb = state.get("blackboard", {})
-    
     result = microstructure_agent.analyze(
         state.get("microstructure_context", ""),
         mode=state.get("mode", "SWING").upper()
     )
-    bb["microstructure"] = result
-    return {"blackboard": bb}
+    return {"blackboard": {"microstructure": result}}
 
 def node_macro_options_expert(state: AnalysisState) -> dict:
     """Run Macro Options Agent."""
-    bb = state.get("blackboard", {})
-    
     result = macro_options_agent.analyze(
         state.get("deribit_context", ""),
         state.get("macro_context", ""),
         mode=state.get("mode", "SWING").upper()
     )
-    bb["macro"] = result
-    return {"blackboard": bb}
+    return {"blackboard": {"macro": result}}
 
 def node_vlm_geometric_expert(state: AnalysisState) -> dict:
     """Run VLM Geometric visual analysis. Sole agent that receives the raw chart image.
     Judge reads VLM's structured text output only — no raw chart forwarded to Judge."""
-    bb = state.get("blackboard", {})
     chart = state.get("chart_image_b64", "")
     symbol = state.get("symbol", "BTCUSDT")
     
     if not chart:
-        bb["vlm_geometry"] = {"anomaly": "none", "directional_bias": "NEUTRAL",
-                               "confidence": 0, "rationale": "No chart available"}
-        return {"blackboard": bb}
+        return {"blackboard": {"vlm_geometry": {
+            "anomaly": "none", "directional_bias": "NEUTRAL",
+            "confidence": 0, "rationale": "No chart available"
+        }}}
 
     # Extract current price from cached market_data for prompt context
     market_data = _market_data_cache.get(symbol, {})
@@ -479,8 +470,7 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
         symbol=symbol,
         current_price=current_price
     )
-    bb["vlm_geometry"] = result
-    return {"blackboard": bb}
+    return {"blackboard": {"vlm_geometry": result}}
 
 
 def node_blackboard_synthesis(state: AnalysisState) -> dict:
@@ -666,12 +656,14 @@ def node_generate_chart(state: AnalysisState) -> dict:
         logger.warning(f"Funding/OI data load for chart skipped/merged: {e}")
 
 
-    chart_bytes = chart_generator.generate_chart(df, market_data, symbol, mode,
-                                                  liquidation_df=liquidation_df,
-                                                  cvd_df=cvd_df,
-                                                  funding_df=funding_df,
-                                                  df_1d=df_1d,
-                                                  df_1w=df_1w)
+    import concurrent.futures
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            chart_generator.generate_chart, 
+            df, market_data, symbol, mode,
+            liquidation_df, cvd_df, funding_df, df_1d, df_1w
+        )
+        chart_bytes = future.result()
 
     if not chart_bytes:
         logger.warning(f"Chart generation FAILED for {symbol} ({mode.value})")
