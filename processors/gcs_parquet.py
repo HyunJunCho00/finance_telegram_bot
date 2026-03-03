@@ -223,8 +223,9 @@ class GCSParquetStore:
         now = datetime.now(timezone.utc)
 
         if timeframe in ("1d", "1w"):
-            # Yearly partition: load current year + previous year
-            for year_offset in range(2):
+            # Yearly partition: derive years_back from months_back
+            years_back = max(2, (months_back + 11) // 12)
+            for year_offset in range(years_back):
                 year = (now - timedelta(days=365 * year_offset)).strftime("%Y")
                 path = f"ohlcv/{timeframe}/{symbol}/{year}.parquet"
                 df = self._download_parquet(path)
