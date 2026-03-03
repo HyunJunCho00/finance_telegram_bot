@@ -256,6 +256,11 @@ class MCPTools:
                     # 1. CVD
                     cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=6)
                     if not cvd_hist.empty:
+                        # [FIX CRITICAL] Map historical columns to live schema for chart_generator
+                        cvd_hist = cvd_hist.rename(columns={
+                            'taker_buy_volume': 'whale_buy_vol',
+                            'taker_sell_volume': 'whale_sell_vol'
+                        })
                         since_cvd = cvd_hist['timestamp'].max()
                         cvd_recent = db.get_cvd_data(symbol, limit=50000, since=since_cvd)
                         cvd_df = pd.concat([cvd_hist, cvd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
@@ -266,6 +271,10 @@ class MCPTools:
                     # 2. Funding / OI
                     fnd_hist = gcs_parquet_store.load_timeseries("funding", symbol, months_back=6)
                     if not fnd_hist.empty:
+                        # [FIX CRITICAL] Map historical columns to live schema for chart_generator
+                        fnd_hist = fnd_hist.rename(columns={
+                            'open_interest_value': 'open_interest'
+                        })
                         since_fnd = fnd_hist['timestamp'].max()
                         fnd_recent = db.get_funding_history(symbol, limit=50000, since=since_fnd)
                         funding_df = pd.concat([fnd_hist, fnd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
