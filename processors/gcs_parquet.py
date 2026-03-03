@@ -237,7 +237,7 @@ class GCSParquetStore:
 
         result = pd.concat(dfs, ignore_index=True)
         # Handle numeric timestamps (ms) if they somehow got stored that way
-        time_col = result.columns[0] # Usually 'timestamp'
+        time_col = 'timestamp' if 'timestamp' in result.columns else result.columns[0]
         if pd.api.types.is_numeric_dtype(result[time_col]):
             result[time_col] = pd.to_datetime(result[time_col], unit='ms', utc=True)
         else:

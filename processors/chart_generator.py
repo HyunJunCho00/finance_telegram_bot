@@ -184,8 +184,8 @@ class ChartGenerator:
                 # Align with chart_df index
                 cvd_aligned = cvd_resampled.reindex(chart_df.index)
                 
-                # Forward fill cumulative CVD but NOT the initial NaNs before data started
-                cvd_acc_plot = cvd_aligned['cvd_acc'].ffill()
+                # Forward and backfill to prevent empty visual gaps for historical dates not in DB
+                cvd_acc_plot = cvd_aligned['cvd_acc'].bfill().ffill()
                 # Individual delta bars can be 0 when missing
                 cvd_delta_plot = cvd_aligned['delta'].fillna(0)
                 
@@ -214,7 +214,7 @@ class ChartGenerator:
                 
                 fnd_aligned = fnd_resampled.reindex(chart_df.index)
                 
-                fnd_oi_plot = fnd_aligned['open_interest'].ffill()
+                fnd_oi_plot = fnd_aligned['open_interest'].bfill().ffill()
                 fnd_rate_plot = fnd_aligned['funding_rate'].fillna(0)
                 
                 # Panel 3: Open Interest
