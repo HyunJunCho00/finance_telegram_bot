@@ -581,6 +581,11 @@ def node_generate_chart(state: AnalysisState) -> dict:
             m_back = 6 if mode == TradingMode.SWING else 12
             hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
             if not hist_cvd.empty:
+                # [FIX CRITICAL] Map historical columns to live schema for chart_generator
+                hist_cvd = hist_cvd.rename(columns={
+                    'taker_buy_volume': 'whale_buy_vol',
+                    'taker_sell_volume': 'whale_sell_vol'
+                })
                 hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
                 since_cvd = hist_cvd['timestamp'].max()
                 bridge_cvd = db.get_cvd_data(symbol, limit=50000, since=since_cvd)
@@ -616,6 +621,10 @@ def node_generate_chart(state: AnalysisState) -> dict:
             m_back = 6 if mode == TradingMode.SWING else 12
             hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
             if not hist_fnd.empty:
+                # [FIX CRITICAL] Map historical columns to live schema for chart_generator
+                hist_fnd = hist_fnd.rename(columns={
+                    'open_interest_value': 'open_interest'
+                })
                 hist_fnd['timestamp'] = pd.to_datetime(hist_fnd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
                 since_fnd = hist_fnd['timestamp'].max()
                 bridge_fnd = db.get_funding_history(symbol, limit=50000, since=since_fnd)
