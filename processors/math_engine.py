@@ -94,7 +94,13 @@ class MathEngine:
             'low': 'min',
             'close': 'last',
             'volume': 'sum'
-        }).dropna().reset_index()
+        })
+        
+        # [Fix] Retain the true timestamps of the highs and lows so MTFA trendlines don't float
+        resampled['high_time'] = tmp.groupby(pd.Grouper(freq=rule))['high'].idxmax()
+        resampled['low_time'] = tmp.groupby(pd.Grouper(freq=rule))['low'].idxmin()
+
+        resampled = resampled.dropna(subset=['open']).reset_index()
 
         return resampled
 
@@ -158,8 +164,12 @@ class MathEngine:
             y1, y2 = float(df.iloc[x1]['low']), float(df.iloc[x2]['low'])
             
             # Map index to actual timestamps to prevent gap distortion
-            ts1 = df.index[x1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x1]['timestamp']
-            ts2 = df.index[x2] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x2]['timestamp']
+            if 'low_time' in df.columns:
+                ts1 = df.iloc[x1]['low_time']
+                ts2 = df.iloc[x2]['low_time']
+            else:
+                ts1 = df.index[x1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x1]['timestamp']
+                ts2 = df.index[x2] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x2]['timestamp']
             
             # In case timestamps are not datetime yet
             ts1 = pd.to_datetime(ts1, utc=True)
@@ -191,8 +201,12 @@ class MathEngine:
             y1, y2 = float(df.iloc[x1]['high']), float(df.iloc[x2]['high'])
             
             # Map index to actual timestamps to prevent gap distortion
-            ts1 = df.index[x1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x1]['timestamp']
-            ts2 = df.index[x2] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x2]['timestamp']
+            if 'high_time' in df.columns:
+                ts1 = df.iloc[x1]['high_time']
+                ts2 = df.iloc[x2]['high_time']
+            else:
+                ts1 = df.index[x1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x1]['timestamp']
+                ts2 = df.index[x2] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x2]['timestamp']
             
             # In case timestamps are not datetime yet
             ts1 = pd.to_datetime(ts1, utc=True)

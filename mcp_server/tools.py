@@ -316,7 +316,15 @@ class MCPTools:
                     if not cvd_recent.empty:
                         cvd_recent = cvd_recent.loc[:, ~cvd_recent.columns.duplicated()].reset_index(drop=True)
                         cvd_recent['timestamp'] = pd.to_datetime(cvd_recent['timestamp'], utc=True)
-                        cvd_df = pd.concat([cvd_hist, cvd_recent], ignore_index=True)
+                        
+                        # [Fix] Convert recent DB coin volume → USD using latest price to match GCS scale
+                        current_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
+                        if 'whale_buy_vol' in cvd_recent.columns:
+                            cvd_recent['whale_buy_vol'] = cvd_recent['whale_buy_vol'] * current_px
+                        if 'whale_sell_vol' in cvd_recent.columns:
+                            cvd_recent['whale_sell_vol'] = cvd_recent['whale_sell_vol'] * current_px
+                            
+                        cvd_df = pd.concat([cvd_hist, cvd_recent], ignore_index=True) if not cvd_hist.empty else cvd_recent
                         cvd_df = cvd_df.loc[:, ~cvd_df.columns.duplicated()]\
                                        .drop_duplicates(subset=['timestamp']).sort_values('timestamp')
                         cvd_df = cvd_df.reset_index(drop=True)
