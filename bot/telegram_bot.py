@@ -563,19 +563,26 @@ class TradingBot:
             import asyncio
             from agents.ai_router import ai_client
             from google.genai import types as gtypes
-            from mcp_server.tools import mcp_tools
 
             gemini = ai_client._gemini_client
 
+            _mcp_tools = None
+            def _get_mcp_tools():
+                nonlocal _mcp_tools
+                if _mcp_tools is None:
+                    from mcp_server.tools import mcp_tools as _loaded_mcp_tools
+                    _mcp_tools = _loaded_mcp_tools
+                return _mcp_tools
+
             tool_fn_map = {
-                "analyze_market":            lambda a: mcp_tools.get_market_analysis(a["symbol"]),
-                "get_funding_info":          lambda a: mcp_tools.get_funding_data(a["symbol"]),
-                "get_global_oi":             lambda a: mcp_tools.get_global_oi(a["symbol"]),
-                "get_cvd":                   lambda a: mcp_tools.get_cvd_data(a["symbol"], limit=a.get("minutes", 240)),
-                "get_indicator_summary":     lambda a: mcp_tools.get_indicator_summary(a["symbol"]),
-                "get_news_summary":          lambda a: mcp_tools.get_telegram_summary(a.get("hours", 4)),
-                "get_latest_trading_report": lambda a: mcp_tools.get_latest_report(),
-                "get_current_position":      lambda a: mcp_tools.get_position_status(a["symbol"]),
+                "analyze_market":            lambda a: _get_mcp_tools().get_market_analysis(a["symbol"]),
+                "get_funding_info":          lambda a: _get_mcp_tools().get_funding_data(a["symbol"]),
+                "get_global_oi":             lambda a: _get_mcp_tools().get_global_oi(a["symbol"]),
+                "get_cvd":                   lambda a: _get_mcp_tools().get_cvd_data(a["symbol"], limit=a.get("minutes", 240)),
+                "get_indicator_summary":     lambda a: _get_mcp_tools().get_indicator_summary(a["symbol"]),
+                "get_news_summary":          lambda a: _get_mcp_tools().get_telegram_summary(a.get("hours", 4)),
+                "get_latest_trading_report": lambda a: _get_mcp_tools().get_latest_report(),
+                "get_current_position":      lambda a: _get_mcp_tools().get_position_status(a["symbol"]),
                 "get_trading_mode":          lambda a: {
                     "mode": settings.trading_mode.value,
                     "candle_limit": settings.candle_limit,
@@ -583,16 +590,16 @@ class TradingBot:
                     "analysis_interval_hours": settings.analysis_interval_hours,
                 },
                 "switch_trading_mode":       lambda a: (
-                    mcp_tools.switch_mode(a["mode"]),
+                    _get_mcp_tools().switch_mode(a["mode"]),
                     (settings.__setattr__('TRADING_MODE', a["mode"].lower()), 
                      __import__('config', fromlist=['scheduler_config']).scheduler_config.reschedule_analysis_job(a["mode"].lower()))[1]
                 )[0],
                 "toggle_ai_analysis":        lambda a: (state_manager.set_analysis_enabled(a["enabled"]), {"status": f"AI 분석 {'활성화' if a['enabled'] else '비활성화'} 완료"})[1],
-                "get_feedback_history":      lambda a: mcp_tools.get_feedback_history(a.get("limit", 5)),
-                "query_knowledge_graph":     lambda a: mcp_tools.query_rag(a["query"], mode=a.get("mode", "hybrid")),
-                "search_narrative":          lambda a: mcp_tools.search_market_narrative(a["symbol"]),
-                "get_chart_image":           lambda a: mcp_tools.get_chart_image(a["symbol"], timeframe=a.get("timeframe")),
-                "search_web":                lambda a: mcp_tools.search_web(a["query"]),
+                "get_feedback_history":      lambda a: _get_mcp_tools().get_feedback_history(a.get("limit", 5)),
+                "query_knowledge_graph":     lambda a: _get_mcp_tools().query_rag(a["query"], mode=a.get("mode", "hybrid")),
+                "search_narrative":          lambda a: _get_mcp_tools().search_market_narrative(a["symbol"]),
+                "get_chart_image":           lambda a: _get_mcp_tools().get_chart_image(a["symbol"], timeframe=a.get("timeframe")),
+                "search_web":                lambda a: _get_mcp_tools().search_web(a["query"]),
             }
 
             # _CHAT_TOOLS (Anthropic 포맷) → Gemini FunctionDeclaration 변환
