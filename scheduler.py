@@ -230,14 +230,11 @@ def job_1hour_evaluation():
         logger.error(f"1-hour evaluation job error: {e}")
 
 def job_1hour_telegram():
-    """Fetch and batch Telegram messages into LightRAG every 1 hour."""
+    """Batch stored Telegram messages into LightRAG every 1 hour (Real-time listener handles collection)."""
     try:
         logger.info("Running 1-hour Telegram batching job")
-        # 1. Fetch raw messages directly via the collector
-        from collectors.telegram_collector import telegram_collector
-        telegram_collector.run(hours=1)
 
-        # 2. Synthesize and ingest to LightRAG
+        # 1. Synthesize and ingest to LightRAG
         from processors.telegram_batcher import telegram_batcher
         telegram_batcher.process_and_ingest(lookback_hours=1)
 
@@ -476,13 +473,15 @@ def main():
     # [FIX Cold Start] Run initial data collection immediately so first analysis has data
     logger.info("Running initial data collection (cold start bootstrap)...")
     def _startup_telegram_catchup():
-        from collectors.telegram_collector import telegram_collector
+        """Handles initial RAG synthesis for the last 24h.
+        Raw collection is handled by the telegram_listener thread's backfill task.
+        """
+        import time
+        # Small delay to let the listener start fetching backfill messages before we batch them
+        time.sleep(10)
+        
         from processors.telegram_batcher import telegram_batcher
-
-        # Gap recovery:
-        # - collector: resume by message_id for all missed raw messages
-        # - batcher: ingest recent backlog so restart does not leave an analysis blind window
-        telegram_collector.run(hours=24)
+        # Ingest recent backlog so restart does not leave an analysis blind window
         telegram_batcher.process_and_ingest(lookback_hours=24)
 
     _initial_collectors = [

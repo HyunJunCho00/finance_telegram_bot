@@ -476,6 +476,14 @@ Now analyze the provided chart:"""
 
             upload_session_to_secret_manager()
         except Exception as e:
+            err = str(e).lower()
+            if "database is locked" in err:
+                # Session sqlite is already in use (typically by realtime listener).
+                # Skip this cycle without poisoning collector init state.
+                logger.warning("Telegram session is locked by another process/client; skipping this collector cycle.")
+                self._client = None
+                return []
+
             logger.error(f"Telegram session error: {e}")
             self._init_failed = True
             self._last_init_failed_at = datetime.now(timezone.utc)
