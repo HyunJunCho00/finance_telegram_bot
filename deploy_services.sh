@@ -68,6 +68,12 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+echo "Fixing directory permissions for data and cache..."
+# Ensure directories exist and belong to the correct user
+sudo mkdir -p $APP_DIR/data $APP_DIR/cache
+sudo chown -R $USER:$GROUP $APP_DIR/data $APP_DIR/cache
+sudo chmod -R 775 $APP_DIR/data $APP_DIR/cache
+
 echo "Moving service files to /etc/systemd/system/ (requires sudo)..."
 sudo mv /tmp/bot-*.service /etc/systemd/system/
 
@@ -79,9 +85,11 @@ sudo systemctl enable bot-collector.service
 sudo systemctl enable bot-trading.service
 sudo systemctl enable bot-ui.service
 
+echo "Restarting all services to apply changes..."
+sudo systemctl restart bot-collector bot-trading bot-ui
+
 echo "Deployment complete!"
-echo "To start them, run:"
-echo "sudo systemctl start bot-collector bot-trading bot-ui"
+echo "Services are now running and directory permissions are fixed."
 echo ""
 echo "To view logs, run:"
 echo "sudo journalctl -u bot-collector -f"
