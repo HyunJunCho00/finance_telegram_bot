@@ -633,8 +633,11 @@ def node_generate_chart(state: AnalysisState) -> dict:
                     unified_prices = pd.concat(price_dfs).drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
                     merged_cvd['timestamp'] = pd.to_datetime(merged_cvd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce')
                     
+                    # [FIX] Sort in-place so indexing matches exactly with cvd_priced return array
+                    merged_cvd = merged_cvd.sort_values('timestamp').reset_index(drop=True)
+                    
                     cvd_priced = pd.merge_asof(
-                        merged_cvd.sort_values('timestamp'), 
+                        merged_cvd, 
                         unified_prices, 
                         on='timestamp', 
                         direction='backward'
