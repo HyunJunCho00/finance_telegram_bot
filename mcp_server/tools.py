@@ -464,8 +464,8 @@ class MCPTools:
 
             # [NEW] 스케줄러 주기 즉시 재설정
             try:
-                from config.scheduler_config import reschedule_analysis_job
-                reschedule_analysis_job(mode_lower)
+                from config import scheduler_config
+                scheduler_config.reschedule_analysis_job(mode_lower)
             except Exception as e:
                 logger.error(f"Failed to reschedule analysis via tool: {e}")
 

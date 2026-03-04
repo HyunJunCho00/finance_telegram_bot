@@ -13,7 +13,7 @@ from evaluators.feedback_generator import feedback_generator
 from processors.light_rag import light_rag
 from processors.gcs_archive import gcs_archive_exporter
 from agents.market_monitor_agent import market_monitor_agent
-from config.scheduler_config import scheduler, _build_analysis_trigger, reschedule_analysis_job
+from config import scheduler_config
 from config.settings import settings, TradingMode
 from config.database import db
 from executors.order_manager import execution_desk
@@ -317,7 +317,7 @@ def main():
         except Exception as e:
             logger.error(f"WS health check error: {e}")
 
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_5m_ws_health_check,
         'interval',
         minutes=5,
@@ -326,7 +326,7 @@ def main():
     )
 
     # 1-minute tick: price, funding, microstructure, volatility
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_1min_tick,
         'interval',
         minutes=1,
@@ -335,7 +335,7 @@ def main():
     )
     
     # 1-minute execution tick: ExecutionDesk and Paper Engine Liquidations
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_1min_execution,
         'interval',
         minutes=1,
@@ -344,7 +344,7 @@ def main():
     )
 
     # 15-minute Dune
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_15min_dune,
         'interval',
         minutes=15,
@@ -353,7 +353,7 @@ def main():
     )
 
     # Deribit options data: DVOL, PCR, IV Term Structure, 25d Skew — every 1 hour
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_1hour_deribit,
         'interval',
         hours=1,
@@ -363,7 +363,7 @@ def main():
 
     # Funding Fee Simulation - every 8 hours (00:00, 08:00, 16:00 UTC)
     if settings.PAPER_TRADING_MODE:
-        scheduler.add_job(
+        scheduler_config.scheduler.add_job(
             job_8hour_funding_fee,
             CronTrigger(hour='0,8,16', minute=0),
             id='job_8hour_funding_fee',
@@ -371,7 +371,7 @@ def main():
         )
 
     # Fear & Greed Index — daily at 00:15 UTC (after data refreshes)
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_daily_fear_greed,
         CronTrigger(hour=0, minute=15),
         id='job_daily_fear_greed',
@@ -379,7 +379,7 @@ def main():
     )
 
     # 1-Hour Telegram Batching & Ingestion
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_1hour_telegram,
         'interval',
         hours=1,
@@ -388,7 +388,7 @@ def main():
     )
 
     # 1-Hour Crypto News API Fetch & Ingestion
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_1hour_crypto_news,
         'interval',
         hours=1,
@@ -397,15 +397,15 @@ def main():
     )
 
     # Mode-aware analysis (1h / 4h / 24h depending on mode)
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_analysis,
-        _build_analysis_trigger(mode),
+        scheduler_config._build_analysis_trigger(mode),
         id='job_analysis',
         max_instances=1
     )
 
     # V13.3: Routine Market Status (Free-First) - every 1 hour (daily free tiers refresh 2026)
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_routine_market_status,
         'interval',
         hours=1,
@@ -414,7 +414,7 @@ def main():
     )
 
     # Daily evaluation at 00:30 UTC = 09:30 KST
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_24hour_evaluation,
         CronTrigger(hour=0, minute=30),
         id='job_24hour_evaluation',
@@ -422,7 +422,7 @@ def main():
     )
     
     # 1-Hour RAG Episodic Memory Evaluation (V6)
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_1hour_evaluation,
         'interval',
         hours=1,
@@ -431,7 +431,7 @@ def main():
     )
 
     # Daily cleanup at 01:00 UTC = 10:00 KST
-    scheduler.add_job(
+    scheduler_config.scheduler.add_job(
         job_daily_cleanup,
         CronTrigger(hour=1, minute=0),
         id='job_daily_cleanup',
@@ -440,7 +440,7 @@ def main():
 
 
 
-    scheduler.start()
+    scheduler_config.scheduler.start()
     logger.info("Scheduler started.")
 
     # [FIX Cold Start] Run initial data collection immediately so first analysis has data
