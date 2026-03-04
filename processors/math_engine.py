@@ -1345,14 +1345,34 @@ class MathEngine:
                        df_1d: Optional[pd.DataFrame] = None,
                        df_1w: Optional[pd.DataFrame] = None,
                        timeframe: Optional[str] = None) -> Dict:
-        """Unified entry point. Dispatches to mode-specific analysis.
-        If timeframe is provided, overrides mode for a single-TF custom analysis."""
-        if timeframe and timeframe not in (None, 'auto'):
-            return self.analyze_market_custom(df_1m, timeframe, df_1d=df_1d, df_1w=df_1w)
-            
+        """Unified entry point. Calculates base HTF structure and merges LTF if requested."""
+        # 1. Base analysis determined by Mode (HTF)
         if mode == TradingMode.POSITION:
-            return self.analyze_market_position(df_1m, df_1d=df_1d, df_1w=df_1w)
-        return self.analyze_market_swing(df_1m, df_1d=df_1d)
+            result = self.analyze_market_position(df_1m, df_1d=df_1d, df_1w=df_1w)
+        else:
+            result = self.analyze_market_swing(df_1m, df_1d=df_1d)
+            
+        # 2. Add custom LTF data if requested (MTFA overlay)
+        if timeframe and timeframe not in (None, 'auto'):
+            custom_result = self.analyze_market_custom(df_1m, timeframe, df_1d=df_1d, df_1w=df_1w)
+            
+            # Merge custom LTF into base HTF result
+            if timeframe not in result['timeframes']:
+                result['timeframes'][timeframe] = custom_result['timeframes'].get(timeframe)
+            if 'structure' in custom_result:
+                result['structure'].update(custom_result['structure'])
+            if 'market_structure' in custom_result:
+                result['market_structure'].update(custom_result['market_structure'])
+            if 'fibonacci' in custom_result:
+                result['fibonacci'].update(custom_result['fibonacci'])
+            if 'swing_levels' in custom_result:
+                result['swing_levels'].update(custom_result['swing_levels'])
+            if 'trendline_quality' in custom_result:
+                result['trendline_quality'].update(custom_result.get('trendline_quality', {}))
+                
+            result['timeframe'] = timeframe  # Mark as custom display TF
+            
+        return result
 
     # ─────────────── Compact Data Formatting ───────────────
 

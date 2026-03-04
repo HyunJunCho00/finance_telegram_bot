@@ -67,32 +67,9 @@ class ChartGenerator:
 
     def _get_mode_config(self, mode: TradingMode, timeframe: Optional[str] = None) -> Dict:
         """Per-mode or per-timeframe chart configuration."""
-        if timeframe and timeframe.lower() not in ('auto', 'none'):
-            tf = timeframe.lower().strip()
-            tf_map = {
-                '1m': '1min', '3m': '3min', '5m': '5min', '15m': '15min', '30m': '30min',
-                '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h',
-                '1d': '1D', '3d': '3D', '1w': '1W-MON', '1M': '1MS',
-            }
-            rule = tf_map.get(tf, '1h')
-            # Dynamic tail calculation based on TF to show enough history
-            tail = 200
-            if tf in ('1m', '5m', '15m'): tail = 150 # Intraday needs more zoom
-            elif tf in ('1d', '1w'): tail = 200      # Macro needs context
-
-            return {
-                'resample_rule': rule,
-                'tail_candles': tail,
-                'min_candles': 20,
-                'title_suffix': tf.upper(),
-                'fib_tf': tf,
-                'structure_tfs': [tf],
-                'swing_tf': tf,
-                'is_custom': True
-            }
-
+        # 1. Base config determined by Mode (for Overlays / MTFA)
         if mode == TradingMode.POSITION:
-            return {
+            config = {
                 'resample_rule': '1W',
                 'tail_candles': 260,   # ~5 years 
                 'min_candles': 20,
@@ -100,9 +77,10 @@ class ChartGenerator:
                 'fib_tf': '1w',
                 'structure_tfs': ['1w'],
                 'swing_tf': '1w',
+                'is_custom': False
             }
         else:  # SWING (default)
-            return {
+            config = {
                 'resample_rule': '1D',
                 'tail_candles': 180,   # ~6 months
                 'min_candles': 30,
@@ -110,7 +88,32 @@ class ChartGenerator:
                 'fib_tf': '1d',
                 'structure_tfs': ['1d'],
                 'swing_tf': '1d',
+                'is_custom': False
             }
+
+        # 2. Override ONLY visual display aspects if custom timeframe requested (MTFA)
+        if timeframe and timeframe.lower() not in ('auto', 'none'):
+            tf = timeframe.lower().strip()
+            tf_map = {
+                '1m': '1min', '3m': '3min', '5m': '5min', '15m': '15min', '30m': '30min',
+                '1h': '1h', '2h': '2h', '4h': '4h', '6h': '6h', '8h': '8h', '12h': '12h',
+                '1d': '1D', '3d': '3D', '1w': '1W-MON', '1M': '1MS',
+            }
+            config['resample_rule'] = tf_map.get(tf, '1h')
+            # Dynamic tail calculation based on TF to show enough history
+            tail = 200
+            if tf in ('1m', '5m', '15m', '30m'): tail = 150 # Intraday needs more zoom
+            elif tf in ('1d', '1w'): tail = 200      # Macro needs context
+            config['tail_candles'] = tail
+            
+            # For VLM display, label the title correctly
+            config['title_suffix'] = f"{tf.upper()} (MTFA: {config['title_suffix']})"
+            config['is_custom'] = True
+            
+            # NOTE: We intentionally DO NOT OVERRIDE 'fib_tf', 'structure_tfs', and 'swing_tf'.
+            # They remain locked to the HTF (e.g. '1d' or '1w') defined by the Trade Mode.
+
+        return config
 
     def _filter_active_elements(self, current_price: float, analysis: Dict) -> Dict:
         """Filter analysis data to keep only elements relevant to current price action.
