@@ -1,4 +1,3 @@
-from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from collectors.price_collector import collector
 from collectors.funding_collector import funding_collector
@@ -14,6 +13,7 @@ from evaluators.feedback_generator import feedback_generator
 from processors.light_rag import light_rag
 from processors.gcs_archive import gcs_archive_exporter
 from agents.market_monitor_agent import market_monitor_agent
+from config.scheduler_config import scheduler, _build_analysis_trigger, reschedule_analysis_job
 from config.settings import settings, TradingMode
 from config.database import db
 from executors.order_manager import execution_desk
@@ -22,9 +22,6 @@ from executors.paper_exchange import paper_engine
 from loguru import logger
 import sys
 import threading
-from apscheduler.schedulers.background import BackgroundScheduler
-
-scheduler = BackgroundScheduler()
 
 
 def job_1min_tick():
@@ -281,29 +278,6 @@ def job_daily_cleanup():
         logger.error(f"Daily cleanup error: {e}")
 
 
-def _build_analysis_trigger(mode: TradingMode):
-    """Build APScheduler trigger based on trading mode.
-    - DAY_TRADING: every 1 hour
-    - SWING: every 4 hours
-    - POSITION: once daily at 00:00 UTC (= 09:00 KST, Upbit daily open)
-    """
-    if mode == TradingMode.POSITION:
-        # Once daily at 00:00 UTC = 09:00 KST (Upbit new day)
-        return CronTrigger(hour=0, minute=0)
-    else:
-        # SWING: every 8 hours (00:00, 08:00, 16:00 UTC) to save costs
-        return CronTrigger(hour='0,8,16', minute=0)
-
-
-def reschedule_analysis_job(new_mode: str):
-    """Dynamically update the analysis job frequency when mode changes."""
-    try:
-        mode_enum = TradingMode(new_mode.lower())
-        new_trigger = _build_analysis_trigger(mode_enum)
-        scheduler.reschedule_job('job_analysis', trigger=new_trigger)
-        logger.success(f"Analysis job rescheduled for {new_mode.upper()} mode triggers.")
-    except Exception as e:
-        logger.error(f"Failed to reschedule analysis job: {e}")
 
 
 def main():
@@ -318,7 +292,7 @@ def main():
     logger.info(f"  Data lookback: {settings.data_lookback_hours}h")
     logger.info(f"  Chart for VLM: {settings.should_use_chart}")
     logger.info(f"  Symbols: {', '.join(settings.trading_symbols)}")
-    logger.info(f"  AI: Gemini Flash (agents) + Claude Opus 4.6 (judge)")
+    logger.info(f"  AI: Gemini Flash (agents) + Claude Sonnet 4.6 (judge)")
     logger.info(f"  Data: Global OI + CVD + Whale CVD + Liquidations + Perplexity + LightRAG")
     logger.info(f"  Dune: {'enabled' if dune_collector else 'disabled'}")
     logger.info(f"  LightRAG: Neo4j {'connected' if settings.NEO4J_URI else 'in-memory'} + "

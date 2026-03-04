@@ -385,7 +385,7 @@ class TradingBot:
 
         # [NEW] 스케줄러 주기 즉시 재설정
         try:
-            from scheduler import reschedule_analysis_job
+            from config.scheduler_config import reschedule_analysis_job
             reschedule_analysis_job(new_mode)
         except Exception as e:
             logger.error(f"Failed to reschedule analysis: {e}")
@@ -585,7 +585,7 @@ class TradingBot:
                 "switch_trading_mode":       lambda a: (
                     mcp_tools.switch_mode(a["mode"]),
                     (settings.__setattr__('TRADING_MODE', a["mode"].lower()), 
-                     __import__('scheduler').reschedule_analysis_job(a["mode"].lower()))[1]
+                     __import__('config.scheduler_config', fromlist=['reschedule_analysis_job']).reschedule_analysis_job(a["mode"].lower()))[1]
                 )[0],
                 "toggle_ai_analysis":        lambda a: (state_manager.set_analysis_enabled(a["enabled"]), {"status": f"AI 분석 {'활성화' if a['enabled'] else '비활성화'} 완료"})[1],
                 "get_feedback_history":      lambda a: mcp_tools.get_feedback_history(a.get("limit", 5)),
