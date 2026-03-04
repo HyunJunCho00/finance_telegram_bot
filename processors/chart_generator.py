@@ -31,7 +31,7 @@ import mplfinance as mpf
 from io import BytesIO
 import base64
 from typing import Dict, List, Optional
-from config.settings import settings, TradingMode
+from config.settings import get_settings, TradingMode
 from loguru import logger
 from scipy.signal import argrelextrema
 from processors.math_engine import MathEngine
@@ -43,6 +43,7 @@ class ChartGenerator:
     """Generate structure-focused candlestick charts for VLM analysis."""
 
     def __init__(self):
+        settings = get_settings()
         self.width = settings.CHART_IMAGE_WIDTH
         self.height = settings.CHART_IMAGE_HEIGHT
         self.dpi = settings.CHART_IMAGE_DPI
@@ -199,6 +200,7 @@ class ChartGenerator:
             full_resampled['ema200'] = ta.ema(full_resampled['close'], length=min(200, len(full_resampled)-1))
 
             # 3. Get Trading Mode for Header context
+            settings = get_settings()
             trading_mode = getattr(settings, 'trading_mode', TradingMode.SWING)
             
             # 4. Slice for VISUAL window
@@ -215,27 +217,42 @@ class ChartGenerator:
                 else:
                     cvd['timestamp'] = pd.to_datetime(cvd['timestamp'], utc=True).dt.floor('min')
                 cvd = cvd.set_index('timestamp')
-                # Resample CVD to match OHLCV rule, but use min_count=1 to keep structural NaNs
+                
+                # [FIX V14.7] Robust column handling: Binance uses 'taker_', tools use 'whale_'
+                # Standardize to ensure delta calculation works regardless of source
+                col_map = {
+                    'taker_buy_volume': 'whale_buy_vol',
+                    'taker_sell_volume': 'whale_sell_vol',
+                    'buy_vol': 'whale_buy_vol',
+                    'sell_vol': 'whale_sell_vol'
+                }
+                cvd = cvd.rename(columns={k: v for k, v in col_map.items() if k in cvd.columns})
+                
+                # Resample CVD to match OHLCV rule
                 cvd_resampled = cvd.resample(config['resample_rule']).sum(min_count=1)
-                # Calculate Cumulative Delta for visual trend
-                if 'whale_buy_vol' in cvd_resampled and 'whale_sell_vol' in cvd_resampled:
-                    buy_vol = cvd_resampled['whale_buy_vol']
-                    sell_vol = cvd_resampled['whale_sell_vol']
+                
+                # [FIX V14.7] Calculate Cumulative Delta on FULL available history 
+                # before alignment to preserve long-term trend visibility
+                if 'whale_buy_vol' in cvd_resampled.columns and 'whale_sell_vol' in cvd_resampled.columns:
+                    buy_vol = cvd_resampled['whale_buy_vol'].fillna(0)
+                    sell_vol = cvd_resampled['whale_sell_vol'].fillna(0)
                     
-                    mask_empty = (buy_vol == 0) & (sell_vol == 0)
                     delta = buy_vol - sell_vol
-                    delta.loc[mask_empty] = np.nan
-                    
                     cvd_resampled['delta'] = delta
-                    cvd_resampled['cvd_acc'] = delta.cumsum().ffill()
+                    cvd_resampled['cvd_acc'] = delta.cumsum()
                 else:
-                    cvd_resampled['delta'] = pd.Series(np.nan, index=cvd_resampled.index)
-                    cvd_resampled['cvd_acc'] = pd.Series(np.nan, index=cvd_resampled.index)
+                    # Fallback to 'volume_delta' or 'delta' if direct volumes missing
+                    delta_col = next((c for c in ['volume_delta', 'delta'] if c in cvd_resampled.columns), None)
+                    if delta_col:
+                        cvd_resampled['delta'] = cvd_resampled[delta_col].fillna(0)
+                        cvd_resampled['cvd_acc'] = cvd_resampled['delta'].cumsum()
+                    else:
+                        cvd_resampled['delta'] = pd.Series(0, index=cvd_resampled.index)
+                        cvd_resampled['cvd_acc'] = pd.Series(0, index=cvd_resampled.index)
                 
-                # Align with chart_df index
+                # Align with chart_df index (Visual Window)
                 cvd_aligned = cvd_resampled.reindex(chart_df.index)
-                
-                cvd_acc_plot = cvd_aligned['cvd_acc']
+                cvd_acc_plot = cvd_aligned['cvd_acc'].ffill().bfill()
                 cvd_delta_plot = cvd_aligned['delta'].fillna(0)
                 
                 # Panel 2: (Price 0, Vol 1, CVD Panel 2)
@@ -299,6 +316,7 @@ class ChartGenerator:
                                                    ylabel='Fnd', secondary_y=False))
 
             # Dynamic Theme Selection
+            settings = get_settings()
             theme = getattr(settings, 'CHART_THEME', 'dark_premium').lower()
             
             if theme == 'light_premium':

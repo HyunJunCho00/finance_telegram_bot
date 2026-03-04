@@ -1,6 +1,6 @@
 from typing import Dict, Optional, List
 from config.database import db
-from config.settings import settings, TradingMode
+from config.settings import get_settings, TradingMode
 from processors.math_engine import math_engine
 from processors.chart_generator import chart_generator
 from processors.gcs_parquet import gcs_parquet_store
@@ -17,6 +17,7 @@ class MCPTools:
     def get_market_analysis(self, symbol: str) -> Dict:
         """Get mode-specific market analysis. Raw data only."""
         try:
+            settings = get_settings()
             df = db.get_latest_market_data(symbol, limit=settings.candle_limit)
             if df.empty:
                 return {"error": "No market data available"}
@@ -224,6 +225,8 @@ class MCPTools:
 
     def get_chart_image(self, symbol: str, timeframe: Optional[str] = None) -> Dict:
         try:
+            # [FIX] Fetch latest settings dynamically to reflect mode changes immediately
+            settings = get_settings()
             # Map common timeframe aliases to TradingMode
             mode = settings.trading_mode
             limit = settings.candle_limit
@@ -422,6 +425,7 @@ class MCPTools:
         """사용자 질의용: 모든 지표 포함 (PSAR, KC, Aroon, HMA 등).
         분석 파이프라인에는 format_compact() 화이트리스트만 전달됨."""
         try:
+            settings = get_settings()
             df = db.get_latest_market_data(symbol, limit=settings.candle_limit)
             if df.empty:
                 return {"error": "No market data available"}
@@ -443,15 +447,18 @@ class MCPTools:
             return {"error": str(e)}
 
     def switch_mode(self, mode: str) -> Dict:
-        """Switch trading mode at runtime by updating env var."""
+        """Switch trading mode at runtime by updating env var and persisting to SQLite."""
         try:
             mode_lower = mode.lower().strip()
             if mode_lower not in ('swing', 'position'):
                 return {"error": f"Invalid mode '{mode}'. Use 'swing', or 'position'."}
 
+            # [FIX] DB 저장으로 재시작 후에도 mode 유지
+            from config.local_state import state_manager
+            state_manager.set_trading_mode(mode_lower)
             os.environ['TRADING_MODE'] = mode_lower
-            from config.settings import get_settings
-            get_settings.cache_clear()
+            
+            settings = get_settings()
 
             mode_cfg = {
                 "swing": {"candle_limit": settings.SWING_CANDLE_LIMIT, "chart_for_vlm": settings.USE_CHART_IMAGES},

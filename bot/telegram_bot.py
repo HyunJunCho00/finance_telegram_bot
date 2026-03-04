@@ -377,9 +377,10 @@ class TradingBot:
             await update.message.reply_text("Invalid. Use: /mode swing | position")
             return
 
+        # [FIX] SQLite DB에도 함께 저장 → 재시작 후에도 mode가 유지됨
+        from config.local_state import state_manager
+        state_manager.set_trading_mode(new_mode)
         os.environ['TRADING_MODE'] = new_mode
-        from config.settings import get_settings
-        get_settings.cache_clear()
 
         await update.message.reply_text(
             f"Mode switched to {new_mode.upper()}\n"
@@ -523,8 +524,9 @@ class TradingBot:
                 
                 if report:
                     from executors.report_generator import report_generator
-                    # Determine mode - default to swing if not found (or store in callback_data)
-                    mode = TradingMode.SWING 
+                    # Determine mode - default to current settings if not found
+                    settings = get_settings()
+                    mode = settings.trading_mode 
                     if "POSITION" in report.get('final_decision', ''):
                         mode = TradingMode.POSITION
 
@@ -625,7 +627,7 @@ class TradingBot:
             for _ in range(5):  # 최대 5회 agentic 루프
                 response = await asyncio.to_thread(
                     gemini.models.generate_content,
-                    model=settings.MODEL_CHAT,
+                    model=get_settings().MODEL_CHAT,
                     contents=contents,
                     config=config,
                 )

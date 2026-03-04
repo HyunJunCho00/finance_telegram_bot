@@ -70,6 +70,10 @@ def init_db():
     cursor.execute(
         "INSERT OR IGNORE INTO system_config (key, value) VALUES ('panic_mode', 'false')"
     )
+    # [FIX] trading_mode 영구 저장 — 재시작 후에도 유지
+    cursor.execute(
+        "INSERT OR IGNORE INTO system_config (key, value) VALUES ('trading_mode', 'swing')"
+    )
     conn.commit()
     conn.close()
 
@@ -129,6 +133,31 @@ class LocalStateManager:
             )
             self.conn.commit()
         logger.info(f"System Config: AI Analysis {'ENABLED' if enabled else 'DISABLED'}")
+
+    def get_trading_mode(self) -> str:
+        """Get persisted trading mode (swing|position). Defaults to 'swing'."""
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT value FROM system_config WHERE key = 'trading_mode'")
+            row = cursor.fetchone()
+            if row:
+                return row['value'].lower()
+            return 'swing'
+
+    def set_trading_mode(self, mode: str):
+        """Persist trading mode to SQLite so it survives process restarts."""
+        mode = mode.lower().strip()
+        if mode not in ('swing', 'position'):
+            raise ValueError(f"Invalid trading mode: {mode}")
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO system_config (key, value) VALUES ('trading_mode', ?)",
+                (mode,)
+            )
+            self.conn.commit()
+        logger.info(f"System Config: Trading Mode set to {mode.upper()}")
+
 
     def add_intent(
         self,

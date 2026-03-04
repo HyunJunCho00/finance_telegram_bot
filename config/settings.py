@@ -366,8 +366,25 @@ class SecretManager:
         return secrets
 
 
-@lru_cache()
 def get_settings() -> Settings:
+    # [FIX] 재시작 후 trading_mode 복원:
+    # TRADING_MODE 환경변수가 세팅 안 됐을 때만 SQLite에서 읽어와 주입.
+    # (cmd_mode 에서 os.environ + DB 양쪽에 동시 저장 → 재시작 시 DB → env 복원)
+    if not os.environ.get("TRADING_MODE"):
+        try:
+            import sqlite3 as _sqlite3
+            from pathlib import Path as _Path
+            _db_path = str(_Path(__file__).parent.parent / "data" / "local_state.db")
+            _conn = _sqlite3.connect(_db_path)
+            _cur = _conn.cursor()
+            _cur.execute("SELECT value FROM system_config WHERE key = 'trading_mode'")
+            _row = _cur.fetchone()
+            _conn.close()
+            if _row:
+                os.environ["TRADING_MODE"] = _row[0]
+        except Exception:
+            pass  # DB 없거나 실패 시 .env 기본값 사용
+
     if os.getenv("USE_SECRET_MANAGER", "false").lower() == "true":
         project_id = os.getenv("PROJECT_ID", "")
 
@@ -389,14 +406,12 @@ def get_settings() -> Settings:
         # Filter out empty strings so Pydantic uses field defaults instead of failing validation
         secrets = {k: v for k, v in secrets.items() if v != ""}
 
-        settings = Settings(
+        return Settings(
             PROJECT_ID=project_id,
             **secrets
         )
     else:
-        settings = Settings()
-
-    return settings
+        return Settings()
 
 
 settings = get_settings()
