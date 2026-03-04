@@ -9,7 +9,7 @@ Role → API → Model (single source of truth):
   risk_eval_fallback → Groq               → openai/gpt-oss-20b
   rag_extraction   → Groq                 → openai/gpt-oss-20b
   news_summarize   → Groq                 → openai/gpt-oss-20b
-  monitor_hourly   → OpenRouter           → openrouter/auto (free)
+  monitor_hourly   → Cerebras              → gpt-oss-120b
   cloudflare_triage → Cloudflare Workers AI → @cf/meta/llama-3-8b-instruct-awq
   cloudflare_rerank → Cloudflare Workers AI → @cf/baai/bge-reranker-base
   claude_standby   → Anthropic            → claude-sonnet-4-6  (manual only)
@@ -88,12 +88,12 @@ class CloudflareGenerator:
 class AIClient:
     def __init__(self):
         # ── Gemini (dual-project) ─────────────────────────────────────────────
-        judge_key = getattr(settings, "GEMINI_API_KEY_JUDGE", "") or settings.GEMINI_API_KEY
-        vlm_key = (
-            getattr(settings, "GEMINI_API_KEY_VLM", "")
-            or settings.GEMINI_API_KEY
-        )
-        default_key = settings.GEMINI_API_KEY
+        legacy_default_key = getattr(settings, "GEMINI_API_KEY", "")
+        judge_key = getattr(settings, "GEMINI_API_KEY_JUDGE", "") or legacy_default_key
+        vlm_key = getattr(settings, "GEMINI_API_KEY_VLM", "") or legacy_default_key
+        # Final safety net for gemini_default path:
+        # VLM key -> Judge key -> legacy default key -> Vertex AI auth.
+        default_key = vlm_key or judge_key or legacy_default_key
 
         def _make_gemini(key: str):
             if key:
@@ -215,7 +215,7 @@ class AIClient:
             "post_mortem":        ("groq",           settings.MODEL_RAG_EXTRACTION,     15000),
             "feedback":           ("groq",           settings.MODEL_RAG_EXTRACTION,     15000),
             # OpenRouter — monitor_hourly
-            "monitor_hourly":     ("openrouter",     settings.MODEL_MONITOR_HOURLY,     8000),
+            "monitor_hourly":     ("cerebras",       settings.MODEL_MONITOR_HOURLY,     8000),
             # Cloudflare
             "cloudflare_triage":  ("cf",             settings.MODEL_CF_TRIAGE,          5000),
             "cloudflare_rerank":  ("cf",             settings.MODEL_CF_RERANK,          5000),

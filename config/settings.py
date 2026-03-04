@@ -159,7 +159,7 @@ class Settings(BaseSettings):
     MODEL_NEWS_SUMMARIZE: str = "openai/gpt-oss-20b"
 
     # 7. monitor_hourly ??OpenRouter (free)
-    MODEL_MONITOR_HOURLY: str = "openrouter/auto"
+    MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
 
     # 8. cloudflare_triage / cloudflare_rerank (CF infra)
     MODEL_CF_TRIAGE: str = "@cf/meta/llama-3-8b-instruct-awq"
@@ -364,6 +364,8 @@ class SecretManager:
             "OPENAI_API_KEY",
             "VOYAGE_API_KEY",
             "GEMINI_API_KEY",
+            "GEMINI_API_KEY_JUDGE",
+            "GEMINI_API_KEY_VLM",
             "BINANCE_API_KEY",
             "BINANCE_API_SECRET",
             "UPBIT_ACCESS_KEY",
