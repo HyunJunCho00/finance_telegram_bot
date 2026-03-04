@@ -856,7 +856,8 @@ def run_cold_start(mode: str = "all", days: int = 210,
                    upbit_days: Optional[int] = None,
                    fear_greed_days: Optional[int] = None,
                    deribit_days: Optional[int] = None,
-                   macro_days: Optional[int] = None):
+                   macro_days: Optional[int] = None,
+                   no_resume: bool = False):
     """Run cold start data loading.
 
     Args:
