@@ -214,6 +214,9 @@ If relevant content exists, output a single dense paragraph starting with "NEWS 
                         channel=f"BATCHED_{cat}",
                         timestamp=datetime.now(timezone.utc).isoformat(),
                     )
+                    # [V14.1] Small cooldown between chunks to prevent 429 flood
+                    import time
+                    time.sleep(1.0)
 
                 except Exception as e:
                     logger.error(

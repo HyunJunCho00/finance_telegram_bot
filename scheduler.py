@@ -530,12 +530,12 @@ def main():
         Raw collection is handled by the telegram_listener thread's backfill task.
         """
         import time
-        # Small delay to let the listener start fetching backfill messages before we batch them
-        time.sleep(10)
+        # Increased delay to 30s to let the Listener finish its metadata-only backfill
+        time.sleep(30)
         
         from processors.telegram_batcher import telegram_batcher
-        # Ingest recent backlog so restart does not leave an analysis blind window
-        telegram_batcher.process_and_ingest(lookback_hours=24)
+        # Reduced to 6h for synthesized catch-up to avoid heavy LLM load on cold start
+        telegram_batcher.process_and_ingest(lookback_hours=6)
 
     _initial_collectors = [
         ("Price + Funding + Microstructure", lambda: (collector.run(), funding_collector.run(), microstructure_collector.run())),

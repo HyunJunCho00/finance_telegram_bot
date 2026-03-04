@@ -1291,17 +1291,31 @@ CRITICAL RULES:
                 logger.warning(f"Embedding client init failed: {e}")
         return self._embed_client
 
+    # Class-level timers for rate limiting across instances
+    _last_embed_time: float = 0.0
+    _last_llm_time: float = 0.0
+
     def _get_embedding(self, text: str) -> Optional[np.ndarray]:
-        """Get embedding from Voyage AI voyage-finance-2."""
+        """Get embedding from Voyage AI voyage-finance-2 with rate limiting (3 RPM safe)."""
         if self.embed_client is None:
             return None
         
         import time
+        
+        # ── Rate Limit: 3 RPM (Voyage Free) = 20s per call ────────────────────
+        # Even on paid tiers, a small 0.5s floor prevents burst errors.
+        current_time = time.time()
+        elapsed = current_time - LightRAGEngine._last_embed_time
+        if elapsed < 1.0: # Minimum gap for safety
+            time.sleep(1.0 - elapsed)
+        
         max_retries = 3
-        base_delay = 2.0
+        base_delay = 5.0 # Higher initial delay for rate limit errors
         
         for attempt in range(max_retries):
             try:
+                # Update last call time BEFORE calling to reserve slot
+                LightRAGEngine._last_embed_time = time.time()
                 result = self.embed_client.embed([text[:4000]], model="voyage-finance-2")
                 if result.embeddings and len(result.embeddings) > 0:
                     return np.array(result.embeddings[0], dtype=np.float32)
@@ -1310,7 +1324,7 @@ CRITICAL RULES:
                 if "429" in err_str or "rate" in err_str or "limit" in err_str:
                     if attempt < max_retries - 1:
                         sleep_time = base_delay * (2 ** attempt)
-                        logger.warning(f"Embedding error (429), retrying in {sleep_time}s...")
+                        logger.warning(f"Embedding rate limit (429), retrying in {sleep_time}s...")
                         time.sleep(sleep_time)
                         continue
                 logger.warning(f"Embedding error: {e}")
@@ -1349,11 +1363,15 @@ CRITICAL RULES:
         return text.strip()
 
     def _extract_with_llm(self, text: str) -> Dict:
-        """LLM-based entity and relationship extraction (Gemini Flash).
+        """LLM-based entity and relationship extraction (Gemini Flash) with rate limiting."""
+        # ── Rate Limit: 30-50 RPM Floor ────────────────────
+        import time
+        current_time = time.time()
+        elapsed = current_time - LightRAGEngine._last_llm_time
+        if elapsed < 0.8: # Ensure ~75 RPM max to avoid 30-50 RPM spikes
+            time.sleep(0.8 - elapsed)
+        LightRAGEngine._last_llm_time = time.time()
 
-        This is the core of LightRAG 정석 - LLM understands context,
-        unlike regex which only matches patterns.
-        """
         ai = self._get_ai_client()
         if not ai:
             return {"entities": [], "relationships": []}
