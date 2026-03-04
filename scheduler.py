@@ -516,7 +516,7 @@ def main():
             websocket_collector.stop()
         except Exception:
             pass
-        scheduler.shutdown()
+        scheduler_config.scheduler.shutdown()
         sys.exit(0)
 
 

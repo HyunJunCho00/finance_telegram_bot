@@ -277,7 +277,7 @@ class MCPTools:
                     
                     # ── 2. Funding / OI ──
                     fnd_hist_dfs = []
-                    for m in range(1, m_back_timeseries + 1):  # start from 1 to SKIP current month
+                    for m in range(1, min(m_back_timeseries, 1) + 1):  # [FIX OOM] max 1 month LIMIT
                         month_str = (now_utc - pd.DateOffset(months=m)).strftime("%Y-%m")
                         path = f"funding/{symbol}/{month_str}.parquet"
                         df_part = gcs_parquet_store._download_parquet(path)
