@@ -27,6 +27,7 @@ from anthropic import Anthropic
 from openai import OpenAI
 from loguru import logger
 
+import threading
 from config.settings import settings
 
 
@@ -127,6 +128,12 @@ class AIClient:
         # backward-compat
         self.default_model_id = "gemini-3-flash-preview"  # chat/fallback only
         self.premium_model_id = settings.MODEL_JUDGE
+
+        # ── Rate Limiting & Concurrency Control (V14.3) ──────────────────────
+        self._global_api_lock = threading.Lock()
+        self._last_call_timestamp = 0.0
+        self._MIN_GAP = 0.5  # 500ms floor between ANY two AI calls
+
 
     # ── Lazy clients ──────────────────────────────────────────────────────────
     @property
@@ -251,8 +258,33 @@ class AIClient:
         use_premium: bool = False,
         role: str = "general",
     ) -> str:
+        # ── Global Concurrency & Rate Limit Guard ────────────────────────────
+        with self._global_api_lock:
+            # Enforce minimum gap between calls
+            now = time.time()
+            elapsed = now - self._last_call_timestamp
+            if elapsed < self._MIN_GAP:
+                wait_time = self._MIN_GAP - elapsed
+                time.sleep(wait_time)
+            
+            # Execute the routed call
+            result = self._execute_routed_call(
+                system_prompt, user_message, max_tokens, temperature, 
+                chart_image_b64, use_premium, role
+            )
+            
+            # Update timestamp AFTER call completes for a clean post-processing gap
+            self._last_call_timestamp = time.time()
+            return result
+
+    def _execute_routed_call(
+        self, system_prompt: str, user_message: str, max_tokens: int,
+        temperature: float, chart_image_b64: Optional[str],
+        use_premium: bool, role: str
+    ) -> str:
         backend, model_id, cap = self._get_route(role)
         msg = self._trim_input(user_message, cap)
+
 
         if backend == "gemini_judge":
             return self._generate_gemini(self._gemini_judge, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64)

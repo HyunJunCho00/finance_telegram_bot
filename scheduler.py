@@ -418,8 +418,7 @@ def main():
     # Deribit options data: DVOL, PCR, IV Term Structure, 25d Skew ??every 1 hour
     scheduler_config.scheduler.add_job(
         job_1hour_deribit,
-        'interval',
-        hours=1,
+        CronTrigger(minute=0),
         id='job_1hour_deribit',
         max_instances=1
     )
@@ -444,8 +443,7 @@ def main():
     # 1-Hour Telegram Batching & Ingestion
     scheduler_config.scheduler.add_job(
         job_1hour_telegram,
-        'interval',
-        hours=1,
+        CronTrigger(minute=5),
         id='job_1hour_telegram',
         max_instances=1
     )
@@ -453,8 +451,7 @@ def main():
     # 1-Hour Crypto News API Fetch & Ingestion
     scheduler_config.scheduler.add_job(
         job_1hour_crypto_news,
-        'interval',
-        hours=1,
+        CronTrigger(minute=10),
         id='job_1hour_crypto_news',
         max_instances=1
     )
@@ -470,8 +467,7 @@ def main():
     # ?? Hourly Monitor ??NO_ACTION / WATCH / TRIGGER against Daily Playbook ??
     scheduler_config.scheduler.add_job(
         job_hourly_monitor,
-        'interval',
-        hours=1,
+        CronTrigger(minute=15),
         id='job_hourly_monitor',
         max_instances=1,
     )
@@ -487,8 +483,7 @@ def main():
     # Routine Market Status (Free-First) ??kept for passive hourly Telegram update
     scheduler_config.scheduler.add_job(
         job_routine_market_status,
-        'interval',
-        hours=1,
+        CronTrigger(minute=20),
         id='job_market_status',
         max_instances=1,
     )
@@ -504,8 +499,7 @@ def main():
     # 1-Hour RAG Episodic Memory Evaluation (V6)
     scheduler_config.scheduler.add_job(
         job_1hour_evaluation,
-        'interval',
-        hours=1,
+        CronTrigger(minute=45),
         id='job_1hour_evaluation',
         max_instances=1
     )
