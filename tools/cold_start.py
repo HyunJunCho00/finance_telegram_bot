@@ -872,6 +872,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
         fear_greed_days: Override for Fear & Greed loader
         deribit_days: Override for Deribit DVOL loader
         macro_days: Override for Macro loader
+        no_resume: Skip latest timestamp check
     """
     if symbols is None:
         symbols = ["BTCUSDT", "ETHUSDT"]
@@ -894,7 +895,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
             end = datetime.now(timezone.utc)
             default_start = end - timedelta(days=effective_ohlcv_days)
             # Resume: check DB for latest existing data
-            latest = _get_latest_timestamp("market_data", symbol=symbol, exchange="binance")
+            latest = _get_latest_timestamp("market_data", symbol=symbol, exchange="binance") if not no_resume else None
             if latest and latest > default_start:
                 start = latest + timedelta(minutes=1)
                 logger.info(f"[RESUME] {symbol} OHLCV: DB has data up to {latest}, fetching from {start}")
@@ -918,7 +919,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
         loader = UpbitBulkLoader()
         for symbol in ["BTC/KRW", "ETH/KRW"]:
             db_symbol = symbol.replace("/", "")
-            latest = _get_latest_timestamp("market_data", symbol=db_symbol, exchange="upbit")
+            latest = _get_latest_timestamp("market_data", symbol=db_symbol, exchange="upbit") if not no_resume else None
             if latest:
                 elapsed = (datetime.now(timezone.utc) - latest).total_seconds() / 86400
                 effective_days = max(1, int(elapsed) + 1)  # fetch from last data + 1 day buffer
@@ -938,7 +939,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
     if mode in ("all", "funding"):
         loader = FundingBulkLoader()
         for symbol in symbols:
-            latest = _get_latest_timestamp("funding_data", symbol=symbol)
+            latest = _get_latest_timestamp("funding_data", symbol=symbol) if not no_resume else None
             if latest:
                 elapsed = (datetime.now(timezone.utc) - latest).total_seconds() / 86400
                 effective_days_f = max(1, int(elapsed) + 1)
@@ -1045,31 +1046,8 @@ def run_cold_start(mode: str = "all", days: int = 210,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cold Start Data Loader")
-    parser.add_argument("--mode", default="all",
-                        choices=["all", "ohlcv", "funding", "telegram", "resample",
-                                 "upbit", "fear_greed", "deribit_dvol", "macro"],
-                        help="What to load (default: all)")
-    _default_days = (datetime.now(timezone.utc) - datetime(2020, 1, 1, tzinfo=timezone.utc)).days
-    parser.add_argument("--days", type=int, default=_default_days,
-                        help=f"Days of history for all loaders (default: since 2020-01-01 = {_default_days} days)")
-    parser.add_argument("--symbol", type=str, default=None,
-                        help="Single symbol e.g. BTCUSDT (default: BTCUSDT + ETHUSDT)")
-    parser.add_argument("--db-days", type=int, default=7,
-                        help="Days to keep in PostgreSQL hot cache (rest → GCS)")
-    parser.add_argument("--ohlcv-days", type=int, default=None,
-                        help="Override --days for OHLCV loader")
-    parser.add_argument("--funding-days", type=int, default=None,
-                        help="Override --days for Funding loader")
-    parser.add_argument("--telegram-days", type=int, default=None,
-                        help="Override --days for Telegram loader")
-    parser.add_argument("--upbit-days", type=int, default=None,
-                        help="Override --days for Upbit loader")
-    parser.add_argument("--fear-greed-days", type=int, default=None,
-                        help="Override --days for Fear & Greed loader")
-    parser.add_argument("--deribit-days", type=int, default=None,
-                        help="Override --days for Deribit DVOL loader")
-    parser.add_argument("--macro-days", type=int, default=None,
-                        help="Override --days for Macro (FRED + yfinance) loader")
+    parser.add_argument("--no-resume", action="store_true",
+                        help="Skip resume logic and force fetch the full requested range")
 
     args = parser.parse_args()
 
@@ -1086,4 +1064,5 @@ if __name__ == "__main__":
         fear_greed_days=args.fear_greed_days,
         deribit_days=args.deribit_days,
         macro_days=args.macro_days,
+        no_resume=args.no_resume,
     )
