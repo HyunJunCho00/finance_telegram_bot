@@ -62,9 +62,9 @@ class ChartGenerator:
         current_price = float(df['close'].iloc[-1])
         analysis = self._filter_active_elements(current_price, analysis)
         
-        return self._generate_structure_chart(df, analysis, symbol, config, 
+        return self._generate_structure_chart(df, analysis, symbol, config,
                                               liquidation_df, cvd_df, funding_df,
-                                              df_1d=df_1d, df_1w=df_1w)
+                                              df_1d=df_1d, df_1w=df_1w, mode=mode)
 
     def _get_mode_config(self, mode: TradingMode, timeframe: Optional[str] = None) -> Dict:
         """Per-mode or per-timeframe chart configuration."""
@@ -155,7 +155,8 @@ class ChartGenerator:
                                    cvd_df: Optional[pd.DataFrame] = None,
                                    funding_df: Optional[pd.DataFrame] = None,
                                    df_1d: Optional[pd.DataFrame] = None,
-                                   df_1w: Optional[pd.DataFrame] = None) -> Optional[bytes]:
+                                   df_1w: Optional[pd.DataFrame] = None,
+                                   mode: TradingMode = TradingMode.SWING) -> Optional[bytes]:
         """Core chart generation — candlesticks + structure overlays only."""
         try:
             # Prepare OHLCV (Realtime)
@@ -202,6 +203,10 @@ class ChartGenerator:
             # 3. Get Trading Mode for Header context
             settings = get_settings()
             trading_mode = getattr(settings, 'trading_mode', TradingMode.SWING)
+            show_cvd_panel = bool(getattr(settings, 'CHART_SHOW_CVD_PANEL', False))
+            show_cvd_overlay = bool(getattr(settings, 'CHART_SHOW_CVD_OVERLAY', False))
+            show_oi_panel = bool(getattr(settings, 'CHART_SHOW_OI_PANEL', False))
+            show_funding_panel = bool(getattr(settings, 'CHART_SHOW_FUNDING_PANEL', False))
             
             # 4. Slice for VISUAL window
             chart_df = full_resampled.tail(config['tail_candles']).copy()
@@ -210,7 +215,7 @@ class ChartGenerator:
             # 4. Integrate CVD if provided
             apds = []
             _cvd_added = False  # tracks whether a CVD panel was actually appended to mpf
-            if cvd_df is not None and not cvd_df.empty:
+            if show_cvd_panel and cvd_df is not None and not cvd_df.empty:
                 cvd = cvd_df.copy()
                 if pd.api.types.is_numeric_dtype(cvd['timestamp']):
                     cvd['timestamp'] = pd.to_datetime(cvd['timestamp'], unit='ms', utc=True).dt.floor('min')
@@ -267,8 +272,9 @@ class ChartGenerator:
                 _cvd_added = True  # CVD panel successfully registered
 
             # 5. Integrate OI and Funding if provided
-            _has_oi = True  # track for panel count correction below
-            if funding_df is not None and not funding_df.empty:
+            _has_oi = False
+            _has_funding = False
+            if (show_oi_panel or show_funding_panel) and funding_df is not None and not funding_df.empty:
                 fnd = funding_df.copy()
                 if pd.api.types.is_numeric_dtype(fnd['timestamp']):
                     fnd['timestamp'] = pd.to_datetime(fnd['timestamp'], unit='ms', utc=True).dt.floor('min')
@@ -277,8 +283,8 @@ class ChartGenerator:
                 fnd = fnd.set_index('timestamp')
                 
                 # Safely determine what columns are available
-                has_oi = 'open_interest' in fnd.columns
-                has_funding = 'funding_rate' in fnd.columns
+                has_oi = show_oi_panel and ('open_interest' in fnd.columns)
+                has_funding = show_funding_panel and ('funding_rate' in fnd.columns)
                 
                 agg_map = {}
                 if has_oi: agg_map['open_interest'] = 'last'
@@ -301,6 +307,7 @@ class ChartGenerator:
                         apds.append(mpf.make_addplot(fnd_oi_plot, panel=_oi_panel,
                                                    color='#2980B9', width=1.2,
                                                    ylabel='OI', secondary_y=False))
+                        _has_oi = True
                     else:
                         # No OI — flag for panel count correction below
                         _has_oi = False
@@ -315,6 +322,7 @@ class ChartGenerator:
                         apds.append(mpf.make_addplot(fnd_rate_plot, panel=tape_panel,
                                                    type='bar', color=f_colors, alpha=0.8,
                                                    ylabel='Fnd', secondary_y=False))
+                        _has_funding = True
 
             # Dynamic Theme Selection
             settings = get_settings()
@@ -366,14 +374,17 @@ class ChartGenerator:
             # Use _cvd_added (not cvd_df is not None) — empty cvd_df must not reserve a panel
             num_panels = 2  # Basic: Price + Vol
             if _cvd_added: num_panels += 1
-            if funding_df is not None:
-                num_panels += 2 if _has_oi else 1  # OI + Funding, or just Funding
+            if _has_oi:
+                num_panels += 1
+            if _has_funding:
+                num_panels += 1
 
             p_ratios = [5, 1.2]  # Price, Vol
             if _cvd_added: p_ratios.append(1.8)   # CVD panel
-            if funding_df is not None:
-                if _has_oi: p_ratios.append(1.5)  # OI
-                p_ratios.append(0.6)               # Funding Tape (Thin)
+            if _has_oi:
+                p_ratios.append(1.5)  # OI
+            if _has_funding:
+                p_ratios.append(0.6)  # Funding Tape
                 
             logger.debug(f"Calling mpf.plot with {len(apds)} addplots, {num_panels} panels, ratios {p_ratios}")
 
@@ -404,8 +415,9 @@ class ChartGenerator:
                          transform=price_ax.transAxes, fontsize=80, fontweight='bold',
                          color=text_color, alpha=0.03, ha='center', va='center', zorder=0)
 
-            # ── Overlay 1: Pivot Points (turning points) ──
-            self._draw_pivot_points(price_ax, chart_df)
+            # ── Overlay 1: Pivot Points (turning points) — SWING only ──
+            if mode != TradingMode.POSITION:
+                self._draw_pivot_points(price_ax, chart_df)
 
             # ── Overlay 2: Market Structure Labels (HH/HL/LH/LL) ──
             self._draw_market_structure_labels(price_ax, chart_df)
@@ -441,8 +453,8 @@ class ChartGenerator:
             # ── Overlay 7: Volume Profile Histogram (right side) ──
             self._draw_volume_profile_histogram(price_ax, chart_df)
 
-            # ── Overlay 8: Liquidation Markers ──
-            if liquidation_df is not None and not liquidation_df.empty:
+            # ── Overlay 8: Liquidation Markers — SWING only ──
+            if mode != TradingMode.POSITION and liquidation_df is not None and not liquidation_df.empty:
                 self._draw_liquidation_markers(price_ax, chart_df, liquidation_df)
 
             # ── Overlay 9: Fair Value Gaps (FVG) ──
@@ -458,16 +470,17 @@ class ChartGenerator:
             # ── [NEW] Overlay 11: Anchored VWAP ──
             self._draw_anchored_vwap(price_ax, chart_df, full_resampled)
 
-            # ── [NEW] Overlay 12: Alpha Divergence Markers (CVD) ──
-            if cvd_df is not None:
+            # Overlay 12: optional CVD alpha divergence markers
+            if show_cvd_overlay and cvd_df is not None and not cvd_df.empty:
                 div = math_engine.detect_macro_divergences(full_resampled, cvd_df)
                 self._draw_macro_alpha_markers(price_ax, chart_df, div)
 
             # ── [PRO] Overlay 13: Header Legend ──
             self._draw_header_legend(price_ax, chart_df, symbol, config, text_color)
 
-            # ── [PRO] Overlay 14: Session Breaks (Day-dividers) ──
-            self._draw_session_breaks(price_ax, chart_df)
+            # ── [PRO] Overlay 14: Session Breaks (Day-dividers) — SWING only ──
+            if mode != TradingMode.POSITION:
+                self._draw_session_breaks(price_ax, chart_df)
             
             # ── [PRO] Overlay 15: Current Price Label (On Y-axis) ──
             self._draw_current_price_label(price_ax, chart_df, text_color)

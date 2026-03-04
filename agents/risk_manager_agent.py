@@ -1,6 +1,7 @@
 import json
 from loguru import logger
 from .ai_router import ai_client
+from config.settings import TradingMode
 
 class RiskManagerAgent:
     """The Chief Risk Officer (CRO).
@@ -84,10 +85,32 @@ Output Format (Strict JSON):
         # Fail safe: Default to HOLD if CRO fails to respond properly
         return {"decision": "HOLD", "allocation_pct": 0, "leverage": 1, "reasoning": "CRO System Failure: Default to HOLD", "cro_veto_applied": True}
 
-    def evaluate_trade(self, draft_decision: dict, funding_context: str, deribit_context: str) -> dict:
+    def evaluate_trade(self, draft_decision: dict, funding_context: str, deribit_context: str,
+                       mode: TradingMode = TradingMode.SWING) -> dict:
         
         # Fast-pass: If PM already voted HOLD or CANCEL_AND_CLOSE, CRO just agrees.
         dec = draft_decision.get('decision', 'HOLD')
+        # Hard rule for compounding-oriented architecture:
+        # POSITION mode never allows SHORT.
+        if mode == TradingMode.POSITION and dec == 'SHORT':
+            draft_decision['decision'] = 'HOLD'
+            draft_decision['allocation_pct'] = 0
+            draft_decision['leverage'] = 1
+            draft_decision['cro_veto_applied'] = True
+            draft_decision['risk_manager_note'] = "POSITION mode hard rule: SHORT disabled by CRO."
+            return draft_decision
+
+        # Venue policy hard rules:
+        # - SWING: futures only (BINANCE), LONG/SHORT allowed
+        # - POSITION: spot style (SPLIT), LONG/HOLD only, leverage 1x
+        if mode == TradingMode.SWING:
+            if dec in ['LONG', 'SHORT']:
+                draft_decision['target_exchange'] = 'BINANCE'
+        elif mode == TradingMode.POSITION:
+            if dec == 'LONG':
+                draft_decision['target_exchange'] = 'SPLIT'
+                draft_decision['leverage'] = 1
+
         if dec in ['HOLD', 'CANCEL_AND_CLOSE']:
             draft_decision['cro_veto_applied'] = False
             draft_decision['risk_manager_note'] = f"PM decided to {dec}. CRO concurs without risk checks."
@@ -112,9 +135,25 @@ Please execute your Risk Management oversight and output the final, safe JSON.""
                 user_message=user_message,
                 temperature=0.1,  # Very strict, less creative
                 max_tokens=600,
-                role="macro"  # Routes to settings.MODEL_MACRO (gpt-5.2)
+                role="risk_eval"  # Cerebras gpt-oss-120b; fallback to Groq
             )
-            return self._parse_decision(response, draft_decision)
+            final = self._parse_decision(response, draft_decision)
+            if mode == TradingMode.POSITION and final.get('decision') == 'SHORT':
+                final['decision'] = 'HOLD'
+                final['allocation_pct'] = 0
+                final['leverage'] = 1
+                final['cro_veto_applied'] = True
+                final['risk_manager_note'] = "POSITION mode hard rule: SHORT disabled by CRO."
+                return final
+
+            # Re-apply venue policy after LLM output parsing.
+            if mode == TradingMode.SWING and final.get('decision') in ['LONG', 'SHORT']:
+                final['target_exchange'] = 'BINANCE'
+            elif mode == TradingMode.POSITION:
+                if final.get('decision') == 'LONG':
+                    final['target_exchange'] = 'SPLIT'
+                    final['leverage'] = 1
+            return final
             
         except Exception as e:
             logger.error(f"CRO Agent error: {e}")

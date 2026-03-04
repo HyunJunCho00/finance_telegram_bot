@@ -1,4 +1,4 @@
-from apscheduler.triggers.cron import CronTrigger
+﻿from apscheduler.triggers.cron import CronTrigger
 from collectors.price_collector import collector
 from collectors.funding_collector import funding_collector
 from collectors.volatility_monitor import volatility_monitor
@@ -68,7 +68,7 @@ def job_1min_execution():
                 except Exception:
                     pass
             paper_engine.check_liquidations(prices)
-            # [FIX CRITICAL-2] Actually call check_tp_sl — was implemented but never invoked
+            # [FIX CRITICAL-2] Actually call check_tp_sl ??was implemented but never invoked
             paper_engine.check_tp_sl(prices)
             
     except Exception as e:
@@ -193,18 +193,18 @@ def job_routine_market_status():
             from mcp_server.tools import mcp_tools
             
             # 1. Send Text Summary
-            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"📊 *Routine Market Update*\n\n{summary}"))
+            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"?뱤 *Routine Market Update*\n\n{summary}"))
             
-            # 2. Send Light Charts (4h) for all symbols
+            # 2. Send fixed SWING lane charts for all symbols
             for symbol in settings.trading_symbols:
                 try:
-                    chart_res = mcp_tools.get_chart_image(symbol, timeframe="4h")
+                    chart_res = mcp_tools.get_chart_image(symbol, lane="swing")
                     if "chart_base64" in chart_res:
                         photo_bytes = base64.b64decode(chart_res["chart_base64"])
                         asyncio.run(trading_bot.send_photo(
                             settings.TELEGRAM_CHAT_ID, 
                             photo_bytes, 
-                            caption=f"📈 <b>{symbol} 4h Trend</b>"
+                            caption=f"?뱢 <b>{symbol} SWING Trend</b>"
                         ))
                 except Exception as chart_err:
                     logger.warning(f"Failed to send routine chart for {symbol}: {chart_err}")
@@ -281,6 +281,42 @@ def job_daily_cleanup():
 
 
 
+
+def job_daily_precision():
+    """00:00 UTC serial: BTC POSITION ??ETH POSITION ??BTC SWING ??ETH SWING.
+    Runs full analysis and refreshes Daily Playbooks.
+    Schedule:
+      00:00 BTC POSITION
+      00:03 ETH POSITION
+      00:06 BTC SWING
+      00:09 ETH SWING
+    """
+    try:
+        from config.local_state import state_manager
+        if not state_manager.is_analysis_enabled():
+            logger.info("Daily precision skipped (analysis disabled)")
+            return
+        macro_collector.run()
+        orchestrator.run_daily_playbook()
+    except Exception as e:
+        logger.error(f"Daily precision job error: {e}")
+
+
+def job_hourly_monitor():
+    """Hourly: evaluate all symbol/mode pairs against Daily Playbook.
+    Outputs NO_ACTION / WATCH / TRIGGER.
+    TRIGGER ??run analysis + allow order execution (capped at 2/day/symbol).
+    """
+    try:
+        from config.local_state import state_manager
+        if not state_manager.is_analysis_enabled():
+            logger.info("Hourly monitor skipped (analysis disabled)")
+            return
+        orchestrator.run_hourly_monitor()
+    except Exception as e:
+        logger.error(f"Hourly monitor job error: {e}")
+
+
 def main():
     mode = settings.trading_mode
     interval = settings.analysis_interval_hours
@@ -293,8 +329,8 @@ def main():
     logger.info(f"  Data lookback: {settings.data_lookback_hours}h")
     logger.info(f"  Chart for VLM: {settings.should_use_chart}")
     logger.info(f"  Symbols: {', '.join(settings.trading_symbols)}")
-    logger.info(f"  AI: Gemini Flash (agents) + Claude Sonnet 4.6 (judge)")
-    logger.info(f"  Data: Global OI + CVD + Whale CVD + Liquidations + Perplexity + LightRAG")
+    logger.info(f"  AI: Gemini Judge/VLM (Project A/B) + Cerebras (meta/risk) + Groq (news/rag) + OpenRouter (monitor)")
+    logger.info(f"  Data: Global OI + OI Divergence + MFI Proxy + Liquidations + Perplexity + LightRAG")
     logger.info(f"  Dune: {'enabled' if dune_collector else 'disabled'}")
     logger.info(f"  LightRAG: Neo4j {'connected' if settings.NEO4J_URI else 'in-memory'} + "
                 f"Milvus {'connected' if settings.MILVUS_URI else 'in-memory'}")
@@ -307,13 +343,13 @@ def main():
     except Exception as e:
         logger.warning(f"WebSocket collector unavailable: {e}")
 
-    # [FIX] WebSocket thread health check — every 5 minutes
+    # [FIX] WebSocket thread health check ??every 5 minutes
     def job_5m_ws_health_check():
         try:
             from collectors.websocket_collector import websocket_collector
             if hasattr(websocket_collector, '_thread'):
                 if not websocket_collector._thread.is_alive():
-                    logger.warning("WebSocket thread died — restarting...")
+                    logger.warning("WebSocket thread died ??restarting...")
                     websocket_collector.start_background()
         except Exception as e:
             logger.error(f"WS health check error: {e}")
@@ -379,7 +415,7 @@ def main():
         max_instances=1
     )
 
-    # Deribit options data: DVOL, PCR, IV Term Structure, 25d Skew — every 1 hour
+    # Deribit options data: DVOL, PCR, IV Term Structure, 25d Skew ??every 1 hour
     scheduler_config.scheduler.add_job(
         job_1hour_deribit,
         'interval',
@@ -397,7 +433,7 @@ def main():
             max_instances=1
         )
 
-    # Fear & Greed Index — daily at 00:15 UTC (after data refreshes)
+    # Fear & Greed Index ??daily at 00:15 UTC (after data refreshes)
     scheduler_config.scheduler.add_job(
         job_daily_fear_greed,
         CronTrigger(hour=0, minute=15),
@@ -423,21 +459,38 @@ def main():
         max_instances=1
     )
 
-    # Mode-aware analysis (1h / 4h / 24h depending on mode)
+    # ?? Daily Precision (00:00 UTC) ??BTC/ETH 횞 SWING/POSITION Playbook generation ??
+    scheduler_config.scheduler.add_job(
+        job_daily_precision,
+        CronTrigger(hour=0, minute=0),
+        id='job_daily_precision',
+        max_instances=1,
+    )
+
+    # ?? Hourly Monitor ??NO_ACTION / WATCH / TRIGGER against Daily Playbook ??
+    scheduler_config.scheduler.add_job(
+        job_hourly_monitor,
+        'interval',
+        hours=1,
+        id='job_hourly_monitor',
+        max_instances=1,
+    )
+
+    # Legacy mode-aware analysis (kept for emergency/manual trigger via bot)
     scheduler_config.scheduler.add_job(
         job_analysis,
         scheduler_config._build_analysis_trigger(mode),
         id='job_analysis',
-        max_instances=1
+        max_instances=1,
     )
 
-    # V13.3: Routine Market Status (Free-First) - every 1 hour (daily free tiers refresh 2026)
+    # Routine Market Status (Free-First) ??kept for passive hourly Telegram update
     scheduler_config.scheduler.add_job(
         job_routine_market_status,
         'interval',
         hours=1,
         id='job_market_status',
-        max_instances=1
+        max_instances=1,
     )
 
     # Daily evaluation at 00:30 UTC = 09:30 KST
@@ -494,9 +547,9 @@ def main():
     for name, fn in _initial_collectors:
         try:
             fn()
-            logger.info(f"  ✅ {name} collected")
+            logger.info(f"  ??{name} collected")
         except Exception as e:
-            logger.warning(f"  ⚠️ {name} collection failed (non-fatal): {e}")
+            logger.warning(f"  ?좑툘 {name} collection failed (non-fatal): {e}")
 
     # Main thread: keep alive + graceful shutdown
     try:
@@ -505,13 +558,13 @@ def main():
             time.sleep(60)
             # Optional: restart bot thread if it dies
             if not bot_thread.is_alive():
-                logger.warning("Telegram bot thread died — restarting in 30s...")
+                logger.warning("Telegram bot thread died ??restarting in 30s...")
                 time.sleep(30)
                 bot_thread = threading.Thread(target=_run_telegram_bot, name="telegram-bot", daemon=True)
                 bot_thread.start()
 
             if not listener_thread.is_alive():
-                logger.warning("Telegram listener thread died — restarting in 30s...")
+                logger.warning("Telegram listener thread died ??restarting in 30s...")
                 time.sleep(30)
                 listener_thread = threading.Thread(target=_run_telegram_listener, name="telegram-listener", daemon=True)
                 listener_thread.start()

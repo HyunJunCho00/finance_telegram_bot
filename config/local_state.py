@@ -107,6 +107,14 @@ def init_db():
         "INSERT OR IGNORE INTO paper_wallets (exchange, balance, updated_at) VALUES ('binance', 100000.0, ?)",
         (now,)
     )
+    cursor.execute(
+        "INSERT OR IGNORE INTO paper_wallets (exchange, balance, updated_at) VALUES ('binance_spot', 100000.0, ?)",
+        (now,)
+    )
+    cursor.execute(
+        "INSERT OR IGNORE INTO paper_wallets (exchange, balance, updated_at) VALUES ('upbit', 100000.0, ?)",
+        (now,)
+    )
 
     conn.commit()
     conn.close()
@@ -226,6 +234,27 @@ class LocalStateManager:
 
         with self._lock:
             cursor = self.conn.cursor()
+            # Deduplicate pending/active intents for same symbol+exchange to avoid order overlap.
+            cursor.execute(
+                """
+                SELECT intent_id
+                FROM active_orders
+                WHERE symbol = ?
+                  AND exchange = ?
+                  AND status IN ('PENDING', 'ACTIVE')
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (symbol, exchange),
+            )
+            existing = cursor.fetchone()
+            if existing:
+                logger.warning(
+                    f"Duplicate intent blocked for {symbol} [{exchange}] "
+                    f"(existing={existing['intent_id'][:8]})"
+                )
+                return ""
+
             cursor.execute('''
                 INSERT INTO active_orders
                 (intent_id, symbol, direction, execution_style,
@@ -245,6 +274,27 @@ class LocalStateManager:
             f"${amount:.2f} lev={leverage}x tp={tp_price} sl={sl_price} [{exchange}]"
         )
         return intent_id
+
+    def get_reserved_margin(self, exchange: str) -> float:
+        """Estimated reserved margin from not-yet-filled intents on an exchange."""
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                SELECT remaining_amount, leverage
+                FROM active_orders
+                WHERE exchange = ?
+                  AND status IN ('PENDING', 'ACTIVE')
+                """,
+                (exchange,),
+            )
+            rows = cursor.fetchall()
+        reserved = 0.0
+        for row in rows:
+            remaining = float(row["remaining_amount"] or 0.0)
+            lev = float(row["leverage"] or 1.0)
+            reserved += remaining / max(lev, 1.0)
+        return reserved
 
     def get_active_orders(self) -> List[Dict]:
         with self._lock:

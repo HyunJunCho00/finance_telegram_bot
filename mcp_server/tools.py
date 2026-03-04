@@ -6,7 +6,6 @@ from processors.chart_generator import chart_generator
 from processors.gcs_parquet import gcs_parquet_store
 from processors.cvd_normalizer import build_price_timeline, merge_cvd_sources, normalize_cvd_to_usd
 from loguru import logger
-import os
 import json
 import pandas as pd
 from math import nan # for serialization safety
@@ -223,20 +222,16 @@ class MCPTools:
             logger.error(f"Position status error: {e}")
             return {"error": str(e)}
 
-    def get_chart_image(self, symbol: str, timeframe: Optional[str] = None) -> Dict:
+    def get_chart_image(self, symbol: str, lane: Optional[str] = None) -> Dict:
         try:
-            # [FIX] Fetch latest settings dynamically to reflect mode changes immediately
             settings = get_settings()
-            # Map common timeframe aliases to TradingMode
-            mode = settings.trading_mode
-            limit = settings.candle_limit
-            
-            # Data Volume is determined entirely by the global `mode` parameter.
-            # Display TF (timeframe) only controls resampling and visual structure, not the mode.
-            if mode == TradingMode.POSITION:
-                limit = 45000  # Bridge GCS gap for macro analysis
-            else:
-                limit = 10000  # Default ~7-10 days for swing
+            lane_norm = (lane or "swing").lower().strip()
+            if lane_norm not in ("swing", "position"):
+                return {"error": "Invalid lane. Use 'swing' or 'position'."}
+
+            mode = TradingMode.SWING if lane_norm == "swing" else TradingMode.POSITION
+            fixed_timeframe = "4h" if mode == TradingMode.SWING else "1d"
+            limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.POSITION_CANDLE_LIMIT
 
             df = db.get_latest_market_data(symbol, limit=limit)
             if df.empty:
@@ -250,7 +245,7 @@ class MCPTools:
                 try:
                     m_back = settings.history_lookback_months
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
-                    if timeframe and timeframe.lower() in ('1w', 'w') or mode == TradingMode.POSITION:
+                    if mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
 
                     m_back_timeseries = m_back  # Full lookback for consolidated process memory efficiency
@@ -258,7 +253,7 @@ class MCPTools:
                     # Bridge GCS gap: 45,000 rows covers ~31 days of 1m data
                     db_limit = 45000
 
-                    # ── 1. CVD ──
+                    # ?? 1. CVD ??
                     now_utc = pd.Timestamp.now(tz='UTC')
                     cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back_timeseries)
                     if not cvd_hist.empty:
@@ -275,7 +270,7 @@ class MCPTools:
                     price_timeline = build_price_timeline(df_1m=df, df_1d=df_1d, fallback_price=fallback_px)
                     cvd_df = normalize_cvd_to_usd(merged_cvd, price_timeline, fallback_price=fallback_px)
                     
-                    # ── 2. Funding / OI ──
+                    # ?? 2. Funding / OI ??
                     fnd_hist_dfs = []
                     for m in range(1, m_back + 1):  # Full lookback (skip current month in archive)
                         month_str = (now_utc - pd.DateOffset(months=m)).strftime("%Y-%m")
@@ -289,7 +284,7 @@ class MCPTools:
                     if not fnd_hist.empty:
                         # [V14.5 Fix] Standardize OI to USD value
                         fnd_hist.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
-                        # [V14.6] Dedup columns — GCS parquet may already have 'open_interest',
+                        # [V14.6] Dedup columns ??GCS parquet may already have 'open_interest',
                         # causing duplicate columns after rename which breaks pd.concat
                         fnd_hist = fnd_hist.loc[:, ~fnd_hist.columns.duplicated()].reset_index(drop=True)
                         fnd_hist['timestamp'] = pd.to_datetime(fnd_hist['timestamp'], utc=True)
@@ -318,21 +313,23 @@ class MCPTools:
                     logger.warning(f"GCS load for chart tool skipped: {e}\n{traceback.format_exc()}")
 
             # Get analysis and generate chart
-            analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w, 
-                                                   timeframe=timeframe)
+            analysis = math_engine.analyze_market(
+                df, mode, df_1d=df_1d, df_1w=df_1w, timeframe=fixed_timeframe
+            )
             chart_bytes = chart_generator.generate_chart(df, analysis, symbol, mode, 
                                                           df_1d=df_1d, df_1w=df_1w,
                                                           cvd_df=cvd_df, 
                                                           funding_df=funding_df,
                                                           liquidation_df=liq_df,
-                                                          timeframe=timeframe)
+                                                          timeframe=fixed_timeframe)
 
             if chart_bytes:
                 b64 = chart_generator.chart_to_base64(chart_bytes)
                 return {
                     "symbol": symbol,
                     "mode": mode.value,
-                    "timeframe_requested": timeframe or mode.value,
+                    "lane": lane_norm,
+                    "timeframe": fixed_timeframe,
                     "chart_base64": b64,
                     "size_bytes": len(chart_bytes)
                 }
@@ -342,8 +339,8 @@ class MCPTools:
             return {"error": str(e)}
 
     def get_indicator_summary(self, symbol: str) -> Dict:
-        """사용자 질의용: 모든 지표 포함 (PSAR, KC, Aroon, HMA 등).
-        분석 파이프라인에는 format_compact() 화이트리스트만 전달됨."""
+        """?ъ슜??吏덉쓽?? 紐⑤뱺 吏???ы븿 (PSAR, KC, Aroon, HMA ??.
+        遺꾩꽍 ?뚯씠?꾨씪?몄뿉??format_compact() ?붿씠?몃━?ㅽ듃留??꾨떖??"""
         try:
             settings = get_settings()
             df = db.get_latest_market_data(symbol, limit=settings.candle_limit)
@@ -351,7 +348,7 @@ class MCPTools:
                 return {"error": "No market data available"}
 
             mode = settings.trading_mode
-            # 모드별 주요 타임프레임 원시 지표 반환 (화이트리스트 미적용)
+            # 紐⑤뱶蹂?二쇱슂 ??꾪봽?덉엫 ?먯떆 吏??諛섑솚 (?붿씠?몃━?ㅽ듃 誘몄쟻??
             primary_tf = '4h' if mode.value == 'swing' else '1d'
             tf_df = math_engine.resample_to_timeframe(df, primary_tf)
             indicators = math_engine.calculate_indicators_for_timeframe(tf_df)
@@ -360,50 +357,22 @@ class MCPTools:
                 "symbol": symbol,
                 "timeframe": primary_tf,
                 "mode": mode.value,
-                "indicators": indicators,  # PSAR, KC, Aroon, HMA 포함 전체
+                "indicators": indicators,  # PSAR, KC, Aroon, HMA ?ы븿 ?꾩껜
             }
         except Exception as e:
             logger.error(f"Indicator summary error: {e}")
             return {"error": str(e)}
 
     def switch_mode(self, mode: str) -> Dict:
-        """Switch trading mode at runtime by updating env var and persisting to SQLite."""
-        try:
-            mode_lower = mode.lower().strip()
-            if mode_lower not in ('swing', 'position'):
-                return {"error": f"Invalid mode '{mode}'. Use 'swing', or 'position'."}
-
-            # [FIX] SQLite DB + 환경변수 + 필드 싱글톤 모두 업데이트
-            from config.local_state import state_manager
-            state_manager.set_trading_mode(mode_lower)
-            os.environ['TRADING_MODE'] = mode_lower
-            
-            # [NEW] 메모리 싱글톤 즉시 업데이트
-            settings = get_settings()
-            settings.TRADING_MODE = mode_lower
-
-            # [NEW] 스케줄러 주기 즉시 재설정
-            try:
-                from config import scheduler_config
-                scheduler_config.reschedule_analysis_job(mode_lower)
-            except Exception as e:
-                logger.error(f"Failed to reschedule analysis via tool: {e}")
-
-            mode_cfg = {
-                "swing": {"candle_limit": settings.SWING_CANDLE_LIMIT, "chart_for_vlm": settings.USE_CHART_IMAGES},
-                "position": {"candle_limit": settings.POSITION_CANDLE_LIMIT, "chart_for_vlm": settings.USE_CHART_IMAGES},
-            }
-
-            return {
-                "success": True,
-                "new_mode": mode_lower,
-                "candle_limit": mode_cfg[mode_lower]["candle_limit"],
-                "chart_for_vlm": mode_cfg[mode_lower]["chart_for_vlm"],
-                "message": f"Switched to {mode_lower.upper()} mode"
-            }
-        except Exception as e:
-            logger.error(f"Mode switch error: {e}")
-            return {"error": str(e)}
+        """Mode switching is intentionally disabled (dual-mode policy)."""
+        return {
+            "success": False,
+            "disabled": True,
+            "message": (
+                "Mode switching is disabled. Policy is fixed: "
+                "SWING (futures long/short) + POSITION (spot long-only) run together."
+            ),
+        }
 
     def get_feedback_history(self, limit: int = 5) -> Dict:
         """Get past trading mistakes and lessons learned."""

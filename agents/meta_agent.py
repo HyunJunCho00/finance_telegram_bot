@@ -74,7 +74,7 @@ Analyze the data and classify the current Market Regime. Provide a clear rationa
                 user_message=user_message,
                 temperature=0.2,
                 max_tokens=800,
-                role="macro", # Routes to flash/pro based on settings
+                role="meta_regime",  # Cerebras gpt-oss-120b
             )
 
             # Robust JSON parsing

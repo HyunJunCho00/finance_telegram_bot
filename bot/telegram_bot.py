@@ -4,7 +4,7 @@ Commands:
 /start     - Welcome message & status overview
 /status    - Current position and latest decision
 /analyze   - Run immediate analysis (BTC or ETH)
-/mode      - Show or switch trading mode (swing/position)
+/mode      - Show fixed dual-mode policy
 /report    - Resend latest analysis report
 /chart     - Generate premium technical chart
 /report_on - Resume automated AI analysis
@@ -18,15 +18,14 @@ from config.settings import settings, TradingMode
 from config.database import db
 from loguru import logger
 import json
-import os
 from io import BytesIO
 import base64
 
-# ── 자연어 채팅 핸들러용 상수 ───────────────────────────────────────────────
+# --- 자연어 채팅 핸들러용 상수 ---
 
-_CHAT_SYSTEM = """당신은 크립토 트레이딩봇의 AI 어시스턴트입니다.
+_CHAT_SYSTEM = """당신은 독립형 트레이딩봇의 AI 어시스턴트입니다.
 사용자의 자연어 질문에 답하기 위해 적절한 툴을 선택해 데이터를 조회하고, 결과를 한국어로 간결하게 해석해서 답변하세요.
-- BTC/비트코인 언급 → BTCUSDT, ETH/이더리움 언급 → ETHUSDT
+- BTC/비트코인 언급 시 BTCUSDT, ETH/이더리움 언급 시 ETHUSDT
 - 숫자는 읽기 쉽게 적절히 반올림
 - 질문에 필요한 툴만 사용하고 과도한 호출은 피할 것"""
 
@@ -51,7 +50,7 @@ _CHAT_TOOLS = [
     },
     {
         "name": "get_global_oi",
-        "description": "글로벌 미결제약정(OI) — Binance+Bybit+OKX 합산",
+        "description": "글로벌 미결제약정(OI) 총합 (Binance+Bybit+OKX 합산)",
         "input_schema": {
             "type": "object",
             "properties": {"symbol": {"type": "string"}},
@@ -60,7 +59,7 @@ _CHAT_TOOLS = [
     },
     {
         "name": "get_cvd",
-        "description": "CVD(누적 체결 델타) — 매수/매도 압력 추세",
+        "description": "CVD(누적 체결 델타) 및 매수/매도 압력 추세",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -109,7 +108,7 @@ _CHAT_TOOLS = [
     },
     {
         "name": "toggle_ai_analysis",
-        "description": "AI 분석 및 리포트 생성을 켜거나 끕니다 (비용 절약용)",
+        "description": "AI 분석 및 리포트 생성을 켜거나 끕니다 (비용 절약)",
         "input_schema": {
             "type": "object",
             "properties": {"enabled": {"type": "boolean", "description": "True: 켜기, False: 끄기"}},
@@ -129,14 +128,14 @@ _CHAT_TOOLS = [
         "name": "query_knowledge_graph",
         "description": (
             "LightRAG 지식 그래프 조회. 1시간마다 14개 텔레그램 채널에서 수집된 "
-            "시장 내러티브·고래 동향·온체인 이벤트·규제 뉴스 등 관계 맥락 검색. "
-            "'왜 오르나/떨어지나' 류 질문에 필수."
+            "시장 내러티브·고래 동향·거시적 이벤트/뉴스 등 관계 맥락 검색. "
+            "'~를 알려줘' 질문 시 필수."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "검색어 (예: 'BTC whale accumulation', 'ETH ETF')"},
-                "mode": {"type": "string", "description": "'local'(엔티티), 'global'(테마), 'hybrid'(둘 다). 기본 hybrid"},
+                "mode": {"type": "string", "description": "'local'(단기), 'global'(장기), 'hybrid'(모두). 기본 hybrid"},
             },
             "required": ["query"],
         },
@@ -144,8 +143,8 @@ _CHAT_TOOLS = [
     {
         "name": "search_narrative",
         "description": (
-            "Perplexity API로 실시간 웹 검색. BTC/ETH 가격 움직임의 최신 이유·매크로 이벤트·뉴스 흐름 파악. "
-            "RAG로 답 안될 때 사용. API 쿼터(200콜/일) 주의."
+            "Perplexity API로 실시간 검색. BTC/ETH 가격 움직임의 최신 이유·매크로 이벤트/뉴스 흐름 파악. "
+            "RAG로 부족할 때 사용. API 쿼터(200회) 주의."
         ),
         "input_schema": {
             "type": "object",
@@ -155,19 +154,19 @@ _CHAT_TOOLS = [
     },
     {
         "name": "get_chart_image",
-        "description": "기술적 차트 이미지를 생성해 텔레그램으로 전송. 특정 타임프레임(1d, 4h 등) 요청 가능.",
+        "description": "기술적 차트 이미지를 생성해 텔레그램으로 전송. lane은 swing 또는 position만 허용",
         "input_schema": {
             "type": "object",
             "properties": {
                 "symbol": {"type": "string", "description": "예: BTCUSDT"},
-                "timeframe": {"type": "string", "description": "옵션: 1d(long-term), 4h(swing). 기본은 현재 모드"}
+                "lane": {"type": "string", "description": "옵션: swing 또는 position. 기본 swing"}
             },
             "required": ["symbol"],
         },
     },
     {
         "name": "search_web",
-        "description": "Tavily API(저비용)를 사용한 일반 웹 검색. 최신 뉴스나 일반적인 정보 조색용.",
+        "description": "Tavily API(저비용)를 사용한 일반 웹 검색. 최신 뉴스 및 일반적인 정보 조사용",
         "input_schema": {
             "type": "object",
             "properties": {"query": {"type": "string", "description": "검색어"}},
@@ -195,16 +194,15 @@ class TradingBot:
         await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=caption, parse_mode='HTML')
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        mode = settings.trading_mode.value.upper()
         await update.message.reply_text(
             f"Crypto Trading Bot Active\n"
-            f"Mode: {mode}\n"
+            f"Mode: DUAL (SWING + POSITION)\n"
             f"Symbols: BTC, ETH\n\n"
             f"Commands:\n"
             f"/status  - Current position & equity\n"
             f"/analyze - Live analysis (BTC/ETH)\n"
             f"/chart   - Generate HD technical chart\n"
-            f"/mode    - Switch Swing/Position\n"
+            f"/mode    - Show fixed policy\n"
             f"/report  - Resend latest report\n"
             f"/report_off - Pause AI (Save $)\n"
             f"/report_on  - Resume AI\n"
@@ -213,12 +211,12 @@ class TradingBot:
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
-            "🔍 <b>Available Commands</b>\n\n"
+            "📚 <b>Available Commands</b>\n\n"
             "/status - Real-time positions & PnL\n"
             "/analyze [BTC|ETH] - Trigger instant AI analysis\n"
-            "/chart [BTC|ETH] [4h|1d] - Generate premium HD chart\n"
+            "/chart [BTC|ETH] [swing|position] - Generate premium HD chart\n"
             "/report - Resend latest analysis report\n"
-            "/mode [swing|position] - Switch system timeframe\n"
+            "/mode - Show fixed dual-mode policy (change disabled)\n"
             "/report_off - PAUSE AI automation (Save cost)\n"
             "/report_on  - RESUME AI automation\n"
             "/help - Show this message\n\n"
@@ -228,12 +226,11 @@ class TradingBot:
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
-            mode = settings.trading_mode.value.upper()
             is_paper = settings.PAPER_TRADING_MODE
 
             lines = [
-                f"🛡️ <b>Trading Status</b>",
-                f"Mode: <code>{mode}</code>",
+                f"📊 <b>Trading Status</b>",
+                f"Mode: <code>DUAL (SWING + POSITION)</code>",
                 f"Type: <code>{'PAPER' if is_paper else 'LIVE'}</code>",
                 ""
             ]
@@ -250,7 +247,7 @@ class TradingBot:
                 upbit_unrealized = 0.0
                 upbit_margin = 0.0
 
-                lines.append("📌 <b>Active Positions</b>")
+                lines.append("💼 <b>Active Positions</b>")
                 if not positions:
                     lines.append("<i>- No open positions</i>")
                 else:
@@ -276,9 +273,9 @@ class TradingBot:
                             upbit_unrealized += pnl
                             upbit_margin += initial_margin
 
-                        pnl_icon = "🟢" if pnl >= 0 else "🔴"
+                        pnl_icon = "📈" if pnl >= 0 else "📉"
                         lines.append(
-                            f"• {exchange.upper()} | <b>{symbol}</b>: {side} {leverage}x\n"
+                            f"➡️ {exchange.upper()} | <b>{symbol}</b>: {side} {leverage}x\n"
                             f"  Entry: {entry:,.2f} | Now: {current_price:,.2f}\n"
                             f"  PnL: {pnl_icon} <b>${pnl:+.2f}</b>"
                         )
@@ -290,13 +287,13 @@ class TradingBot:
                     ex_margin = binance_margin if ex == 'binance' else upbit_margin
                     ex_unrealized = binance_unrealized if ex == 'binance' else upbit_unrealized
                     equity = bal + ex_margin + ex_unrealized
-                    lines.append(f"• {ex.upper()} Balance: <code>${bal:,.2f}</code>")
-                    lines.append(f"• {ex.upper()} <b>Total Equity: ${equity:,.2f}</b>")
+                    lines.append(f"🏦 {ex.upper()} Balance: <code>${bal:,.2f}</code>")
+                    lines.append(f"💰 {ex.upper()} <b>Total Equity: ${equity:,.2f}</b>")
                     lines.append(f"  (Margin: ${ex_margin:.2f} | UnPnL: ${ex_unrealized:+.2f})")
                 lines.append("")
 
             # 2. Strategy Analysis (Latest Reports)
-            lines.append("🤖 <b>Latest Strategy</b>")
+            lines.append("🧠 <b>Latest Strategy</b>")
             for symbol in settings.trading_symbols:
                 report = db.get_latest_report(symbol=symbol)
                 if report:
@@ -309,11 +306,11 @@ class TradingBot:
                     ts = report.get('timestamp', 'N/A')[:16].replace('T', ' ')
 
                     lines.append(
-                        f"• {symbol}: <b>{decision}</b> ({confidence}%) "
+                        f"➡️ {symbol}: <b>{decision}</b> ({confidence}%) "
                         f"<pre>{ts}</pre>"
                     )
                 else:
-                    lines.append(f"• {symbol}: No report yet")
+                    lines.append(f"➡️ {symbol}: No report yet")
 
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             keyboard = []
@@ -323,9 +320,9 @@ class TradingBot:
                     sym = pos.get('symbol')
                     if pos_id:
                         keyboard.append([
-                            InlineKeyboardButton(f"🔒 SL 본절", callback_data=f"pos_sl_{pos_id}"),
+                            InlineKeyboardButton(f"🛡️ SL 본절", callback_data=f"pos_sl_{pos_id}"),
                             InlineKeyboardButton(f"✂️ {sym} 50%", callback_data=f"pos_half_{pos_id}"),
-                            InlineKeyboardButton(f"🛑 {sym} 100%", callback_data=f"pos_close_{pos_id}")
+                            InlineKeyboardButton(f"❌ {sym} 100%", callback_data=f"pos_close_{pos_id}")
                         ])
             reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
             await update.message.reply_text('\n'.join(lines), parse_mode='HTML', reply_markup=reply_markup)
@@ -341,7 +338,10 @@ class TradingBot:
             return
 
         symbol = args[0].upper() + 'USDT'
-        await update.message.reply_text(f"Running {settings.trading_mode.value.upper()} analysis for {symbol}...")
+        await update.message.reply_text(
+            f"Running dual-lane analysis for {symbol} "
+            f"(SWING futures hedge + POSITION spot accumulation)..."
+        )
 
         try:
             from executors.orchestrator import orchestrator
@@ -360,39 +360,12 @@ class TradingBot:
             await update.message.reply_text(f"Error: {e}")
 
     async def cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        args = context.args
-
-        if not args:
-            mode = settings.trading_mode.value
-            await update.message.reply_text(
-                f"Current mode: {mode.upper()}\n"
-                f"Candle limit: {settings.candle_limit}\n"
-                f"Chart for AI: {settings.should_use_chart}\n\n"
-                f"Switch: /mode swing | position"
-            )
-            return
-
-        new_mode = args[0].lower().strip()
-        if new_mode not in ('swing', 'position'):
-            await update.message.reply_text("Invalid. Use: /mode swing | position")
-            return
-
-        # [FIX] SQLite DB + 환경변수 + 필드 싱글톤 모두 업데이트
-        from config.local_state import state_manager
-        state_manager.set_trading_mode(new_mode)
-        os.environ['TRADING_MODE'] = new_mode
-        settings.TRADING_MODE = new_mode  # [NEW] 메모리 싱글톤 즉시 업데이트
-
-        # [NEW] 스케줄러 주기 즉시 재설정
-        try:
-            from config import scheduler_config
-            scheduler_config.reschedule_analysis_job(new_mode)
-        except Exception as e:
-            logger.error(f"Failed to reschedule analysis: {e}")
-
         await update.message.reply_text(
-            f"Mode switched to {new_mode.upper()}\n"
-            f"Next analysis will use {new_mode} timeframes."
+            "Mode switching is disabled.\n"
+            "Policy is fixed:\n"
+            "- SWING: futures hedge lane (LONG/SHORT)\n"
+            "- POSITION: spot accumulation lane (LONG only)\n"
+            "Both lanes run together every cycle."
         )
 
     async def cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -425,7 +398,7 @@ class TradingBot:
     async def cmd_report_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         from config.local_state import state_manager
         state_manager.set_analysis_enabled(True)
-        await update.message.reply_text("✅ <b>AI 리포트 및 분석이 활성화되었습니다.</b>\n이제 정기적으로 시장을 분석하고 속보를 검증합니다.", parse_mode='HTML')
+        await update.message.reply_text("🚀 <b>AI 리포트 및 분석이 활성화되었습니다.</b>\n이제 정기적으로 시장을 분석하고 정보를 검증합니다.", parse_mode='HTML')
 
     async def cmd_report_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         from config.local_state import state_manager
@@ -433,10 +406,10 @@ class TradingBot:
         await update.message.reply_text("🛑 <b>AI 리포트 및 분석이 중단되었습니다.</b>\n데이터 수집은 계속되지만, 고비용 AI 호출은 발생하지 않습니다.", parse_mode='HTML')
 
     async def cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Direct command to get a chart image: /chart [symbol] [timeframe]"""
+        """Direct command to get a chart image: /chart [symbol] [swing|position]"""
         args = context.args
         if not args:
-            await update.message.reply_text("Usage: /chart BTC|ETH [1d|4h]")
+            await update.message.reply_text("Usage: /chart BTC|ETH [swing|position]")
             return
 
         base = args[0].upper()
@@ -445,23 +418,26 @@ class TradingBot:
             return
 
         symbol = base + "USDT"
-        timeframe = args[1].lower() if len(args) > 1 else None
+        lane = args[1].lower() if len(args) > 1 else "swing"
+        if lane not in ("swing", "position"):
+            await update.message.reply_text("Invalid lane. Use: /chart BTC|ETH [swing|position]")
+            return
 
-        await update.message.reply_text(f"Generating premium {timeframe or 'auto'} chart for {symbol}...")
+        await update.message.reply_text(f"Generating premium {lane.upper()} chart for {symbol}...")
 
         try:
             from mcp_server.tools import mcp_tools
-            result = mcp_tools.get_chart_image(symbol, timeframe=timeframe)
+            result = mcp_tools.get_chart_image(symbol, lane=lane)
 
             if "chart_base64" in result:
                 chart_bytes = base64.b64decode(result["chart_base64"])
                 buf = BytesIO(chart_bytes)
-                buf.name = f"{symbol}_{timeframe or 'current'}.png"
+                buf.name = f"{symbol}_{lane}.png"
                 
                 # Send photo
-                caption = f"📊 <b>{symbol} {result.get('mode', '').upper()} CHART</b>\n"
-                if timeframe:
-                    caption += f"Timeframe: <code>{timeframe}</code> (Requested)\n"
+                caption = f"📈 <b>{symbol} {result.get('mode', '').upper()} CHART</b>\n"
+                caption += f"Lane: <code>{result.get('lane', lane)}</code>\n"
+                caption += f"Timeframe: <code>{result.get('timeframe', '-')}</code> (Fixed)\n"
                 caption += f"Quality: <code>Premium HD</code>"
                 
                 await update.message.reply_photo(photo=buf, caption=caption, parse_mode='HTML')
@@ -490,7 +466,7 @@ class TradingBot:
                 pos = cursor.fetchone()
                 
                 if not pos:
-                    await query.edit_message_text(f"{query.message.text}\n\n❌ Position not found or closed.")
+                    await query.edit_message_text(f"{query.message.text}\n\n⚠️ Position not found or closed.")
                     return
                 
                 symbol = pos["symbol"]
@@ -583,25 +559,21 @@ class TradingBot:
                 "get_latest_trading_report": lambda a: _get_mcp_tools().get_latest_report(),
                 "get_current_position":      lambda a: _get_mcp_tools().get_position_status(a["symbol"]),
                 "get_trading_mode":          lambda a: {
-                    "mode": settings.trading_mode.value,
-                    "candle_limit": settings.candle_limit,
+                    "mode": "dual",
+                    "swing": {"venue": "binance_futures", "direction": "long_short"},
+                    "position": {"venue": "binance_spot_upbit", "direction": "long_only"},
                     "chart_enabled": settings.should_use_chart,
-                    "analysis_interval_hours": settings.analysis_interval_hours,
+                    "analysis_interval_hours": {"swing": settings.SWING_INTERVAL_HOURS, "position": settings.POSITION_INTERVAL_HOURS},
                 },
-                "switch_trading_mode":       lambda a: (
-                    _get_mcp_tools().switch_mode(a["mode"]),
-                    (settings.__setattr__('TRADING_MODE', a["mode"].lower()), 
-                     __import__('config', fromlist=['scheduler_config']).scheduler_config.reschedule_analysis_job(a["mode"].lower()))[1]
-                )[0],
                 "toggle_ai_analysis":        lambda a: (__import__('config.local_state', fromlist=['state_manager']).state_manager.set_analysis_enabled(a["enabled"]), {"status": f"AI 분석 {'활성화' if a['enabled'] else '비활성화'} 완료"})[1],
                 "get_feedback_history":      lambda a: _get_mcp_tools().get_feedback_history(a.get("limit", 5)),
                 "query_knowledge_graph":     lambda a: _get_mcp_tools().query_rag(a["query"], mode=a.get("mode", "hybrid")),
                 "search_narrative":          lambda a: _get_mcp_tools().search_market_narrative(a["symbol"]),
-                "get_chart_image":           lambda a: _get_mcp_tools().get_chart_image(a["symbol"], timeframe=a.get("timeframe")),
+                "get_chart_image":           lambda a: _get_mcp_tools().get_chart_image(a["symbol"], lane=a.get("lane", "swing")),
                 "search_web":                lambda a: _get_mcp_tools().search_web(a["query"]),
             }
 
-            # _CHAT_TOOLS (Anthropic 포맷) → Gemini FunctionDeclaration 변환
+            # _CHAT_TOOLS (Anthropic 포맷) -> Gemini FunctionDeclaration 변환
             _type_map = {
                 "object": "OBJECT", "string": "STRING",
                 "integer": "INTEGER", "number": "NUMBER", "boolean": "BOOLEAN",
@@ -665,7 +637,7 @@ class TradingBot:
                 # 모델 응답 히스토리에 추가
                 contents.append(gtypes.Content(role="model", parts=model_parts))
 
-                # 툴 실행 후 function_response 수집
+                # 툴 실행 및 function_response 수집
                 fn_response_parts = []
                 for part in fn_call_parts:
                     fn_name = part.function_call.name
@@ -676,7 +648,7 @@ class TradingBot:
                     else:
                         result = await asyncio.to_thread(fn, fn_args)
 
-                    # 차트 이미지 특수 처리: base64 → reply_photo()
+                    # 차트 이미지 특수 처리: base64 -> reply_photo()
                     if fn_name == "get_chart_image" and "chart_base64" in result:
                         try:
                             chart_bytes = base64.b64decode(result["chart_base64"])

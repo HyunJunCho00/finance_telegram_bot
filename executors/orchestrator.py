@@ -1,13 +1,13 @@
-"""Orchestrator: LangGraph StateGraph multi-agent analysis pipeline.
+﻿"""Orchestrator: LangGraph StateGraph multi-agent analysis pipeline.
 
 Architecture:
   LangGraph StateGraph manages the analysis flow as a directed graph.
   Each node is a processing step. Edges define the execution order.
 
 Graph:
-  collect_data -> perplexity_search -> rag_ingest -> funding/cvd/liquidation/rag_query/macro/deribit -> triage
-  -> [liquidity_expert, microstructure_expert, macro_expert] 
-  -> generate_chart -> judge_agent -> risk_manager -> execute_trade -> generate_report
+  collect_data -> context_gathering -> meta_agent -> triage
+  -> generate_chart -> rule_based_chart -> vlm_expert (conditional runtime)
+  -> judge_agent -> risk_manager -> execute_trade -> generate_report
 
 Benefits over sequential:
   - Explicit state management (TypedDict)
@@ -16,22 +16,20 @@ Benefits over sequential:
   - Built-in retry support
 
 Cost optimization:
-  - Experts (Liquidity, Microstructure, Macro): Gemini Flash, TEXT ONLY, compact data format
-  - Judge: Claude Opus 4.6, gets chart image (512x512)
+  - Default path is 3-agent core: Meta -> Judge -> Risk
+  - VLM is only invoked when triage/rule-based chart signals indicate uncertainty or stress
 """
 
 from typing import Dict, Optional, TypedDict, Annotated
+import threading
 from config.database import db
 from config.settings import settings, TradingMode
 from processors.math_engine import math_engine
 from processors.chart_generator import chart_generator
 from processors.light_rag import light_rag
-from processors.cvd_normalizer import build_price_timeline, merge_cvd_sources, normalize_cvd_to_usd
+# CVD normalizer removed ??CVD pipeline deprecated
 from collectors.perplexity_collector import perplexity_collector
 from collectors.macro_collector import macro_collector
-from agents.liquidity_agent import liquidity_agent
-from agents.microstructure_agent import microstructure_agent
-from agents.macro_options_agent import macro_options_agent
 from agents.vlm_geometric_agent import vlm_geometric_agent
 from agents.meta_agent import meta_agent
 from agents.judge_agent import judge_agent
@@ -41,8 +39,6 @@ from executors.report_generator import report_generator
 from executors.trade_executor import trade_executor
 from executors.post_mortem import write_post_mortem
 from executors.data_synthesizer import synthesize_training_data
-from agents.ai_router import ai_client
-from utils.retry import api_retry
 from utils.cooldown import is_on_cooldown, set_cooldown
 from loguru import logger
 import numpy as np
@@ -54,6 +50,7 @@ import json
 _df_cache: dict = {}        # {symbol: DataFrame}
 _market_data_cache: dict = {}  # {symbol: market_data_dict}
 _cvd_cache: dict = {}       # {symbol: DataFrame}
+
 _liq_cache: dict = {}       # {symbol: DataFrame}
 _funding_cache: dict = {}   # {symbol: DataFrame}
 
@@ -73,12 +70,13 @@ def merge_dicts(a: dict, b: dict) -> dict:
     if b: out.update(b)
     return out
 
-# ── State definition (LangGraph TypedDict) ──
+# ???? State definition (LangGraph TypedDict) ????
 
 class AnalysisState(TypedDict):
     symbol: str
     mode: str  # "swing" or "position"
     is_emergency: bool
+    execute_trades: bool
 
     # Data collection results
     df_size: int
@@ -120,13 +118,13 @@ class AnalysisState(TypedDict):
 
 
 
-# ── Node functions ──
+# ???? Node functions ????
 
 def node_collect_data(state: AnalysisState) -> dict:
     """Fetch 1m OHLCV data from Supabase + higher TFs from GCS if available."""
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
-    candle_limit = settings.candle_limit
+    candle_limit = settings.POSITION_CANDLE_LIMIT if mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
 
     df = db.get_latest_market_data(symbol, limit=candle_limit)
     if df.empty:
@@ -233,20 +231,25 @@ def node_context_gathering(state: AnalysisState) -> dict:
         except Exception as e:
             logger.error(f"Funding context error: {e}")
 
-        # 4. CVD Context
+        # 4. OI Divergence + MFI Summary (appended to funding_context)
         try:
-            cvd_df = db.get_cvd_data(symbol, limit=settings.data_lookback_hours * 60)
-            _cvd_cache[symbol] = cvd_df  # Cache for chart generation
-            if not cvd_df.empty:
-                t_delta = float(cvd_df['volume_delta'].sum())
-                r_delta = float(cvd_df.tail(60)['volume_delta'].sum())
-                parts = [f"[CVD] {settings.data_lookback_hours}H Delta={t_delta:.2f} | 1H Delta={r_delta:.2f} | CVD={float(cvd_df['cvd'].iloc[-1]):.2f}"]
-                if 'whale_cvd' in cvd_df.columns:
-                    w_buy = cvd_df['whale_buy_vol'].sum()
-                    w_sell = cvd_df['whale_sell_vol'].sum()
-                    parts.append(f"[WHALE_CVD] Buy=${w_buy:,.0f} Sell=${w_sell:,.0f} Ratio={w_buy/max(w_sell,1):.2f}")
-                db_updates["cvd_context"] = " | ".join(parts)
-        except Exception as e: logger.error(f"CVD error: {e}")
+            oi_rows = db.client.table("funding_data").select("oi_binance", "oi_bybit", "oi_okx", "timestamp").eq("symbol", symbol).order("timestamp", desc=True).limit(12).execute()
+            if oi_rows.data and len(oi_rows.data) >= 3:
+                oi_series = [float(r.get("oi_binance", 0) or 0) + float(r.get("oi_bybit", 0) or 0) + float(r.get("oi_okx", 0) or 0) for r in oi_rows.data]
+                oi_now, oi_prev = oi_series[0], oi_series[-1]
+                oi_chg_pct = ((oi_now - oi_prev) / oi_prev * 100) if oi_prev else 0
+                df_snap = _df_cache.get(symbol)
+                price_chg_pct = 0.0
+                if df_snap is not None and not df_snap.empty and len(df_snap) >= 12:
+                    p_now = float(df_snap['close'].iloc[-1])
+                    p_prev = float(df_snap['close'].iloc[-12])
+                    price_chg_pct = ((p_now - p_prev) / p_prev * 100) if p_prev else 0
+                oi_div = "DIVERGENCE" if (oi_chg_pct > 1.5 and price_chg_pct < -0.5) or (oi_chg_pct < -1.5 and price_chg_pct > 0.5) else "ALIGNED"
+                mfi_proxy = "INFLOW" if oi_chg_pct > 0.5 and price_chg_pct > 0 else "OUTFLOW" if oi_chg_pct < -0.5 and price_chg_pct < 0 else "NEUTRAL"
+                oi_summary = f" | [OI_DIV] OI_chg={oi_chg_pct:+.2f}% Price_chg={price_chg_pct:+.2f}% Status={oi_div} | [MFI_PROXY] {mfi_proxy}"
+                db_updates["funding_context"] = db_updates.get("funding_context", "") + oi_summary
+        except Exception as e:
+            logger.error(f"OI divergence/MFI error: {e}")
 
         # 5. Liquidation Context
         try:
@@ -423,35 +426,107 @@ def node_triage(state: AnalysisState) -> dict:
         "anomalies": list(set(anomalies)), # deduplicate
     }
 
-def node_liquidity_expert(state: AnalysisState) -> dict:
-    """Run Liquidity Agent."""
-    result = liquidity_agent.analyze(
-        state.get("cvd_context", ""),
-        state.get("liquidation_context", ""),
-        mode=state.get("mode", "SWING").upper()
-    )
-    return {"blackboard": {"liquidity": result}}
+def node_rule_based_chart(state: AnalysisState) -> dict:
+    """Deterministic chart-rule expert (no LLM cost)."""
+    symbol = state.get("symbol", "BTCUSDT")
+    market_data = _market_data_cache.get(symbol, {}) or {}
+    current_price = market_data.get("current_price")
 
-def node_microstructure_expert(state: AnalysisState) -> dict:
-    """Run Microstructure Agent."""
-    result = microstructure_agent.analyze(
-        state.get("microstructure_context", ""),
-        mode=state.get("mode", "SWING").upper()
-    )
-    return {"blackboard": {"microstructure": result}}
+    if not market_data or current_price is None:
+        return {"blackboard": {"chart_rules": {"status": "unavailable"}}}
 
-def node_macro_options_expert(state: AnalysisState) -> dict:
-    """Run Macro Options Agent."""
-    result = macro_options_agent.analyze(
-        state.get("deribit_context", ""),
-        state.get("macro_context", ""),
-        mode=state.get("mode", "SWING").upper()
-    )
-    return {"blackboard": {"macro": result}}
+    nearest_zone = None
+    confluence_zones = market_data.get("confluence_zones", []) or []
+    for zone in confluence_zones:
+        price = zone.get("price")
+        if not isinstance(price, (int, float)):
+            continue
+        dist_pct = abs(float(current_price) - float(price)) / max(float(current_price), 1e-9) * 100.0
+        cand = {
+            "price": round(float(price), 2),
+            "strength": int(zone.get("strength", 0)),
+            "level_count": int(zone.get("level_count", 0)),
+            "dist_pct": round(dist_pct, 3),
+            "timeframes": zone.get("timeframes", []),
+        }
+        if nearest_zone is None or cand["dist_pct"] < nearest_zone["dist_pct"]:
+            nearest_zone = cand
+
+    nearest_fib = None
+    fib_data = market_data.get("fibonacci", {}) or {}
+    for tf, fib_levels in fib_data.items():
+        if not isinstance(fib_levels, dict):
+            continue
+        for key, val in fib_levels.items():
+            if not str(key).startswith("fib_") or not isinstance(val, (int, float)):
+                continue
+            dist_pct = abs(float(current_price) - float(val)) / max(float(current_price), 1e-9) * 100.0
+            cand = {
+                "timeframe": tf,
+                "level": key,
+                "price": round(float(val), 2),
+                "dist_pct": round(dist_pct, 3),
+            }
+            if nearest_fib is None or cand["dist_pct"] < nearest_fib["dist_pct"]:
+                nearest_fib = cand
+
+    structure_alerts = []
+    market_struct = market_data.get("market_structure", {}) or {}
+    for tf, info in market_struct.items():
+        if not isinstance(info, dict):
+            continue
+        choch = info.get("choch")
+        msb = info.get("msb")
+        if isinstance(choch, dict):
+            structure_alerts.append({"timeframe": tf, "type": choch.get("type"), "price": choch.get("price")})
+        if isinstance(msb, dict):
+            structure_alerts.append({"timeframe": tf, "type": msb.get("type"), "price": msb.get("broken_level")})
+
+    return {"blackboard": {"chart_rules": {
+        "status": "ok",
+        "current_price": round(float(current_price), 2),
+        "nearest_confluence": nearest_zone,
+        "nearest_fibonacci": nearest_fib,
+        "structure_alerts": structure_alerts,
+        "signals": {
+            "at_confluence": bool(nearest_zone and nearest_zone["dist_pct"] <= 0.7),
+            "at_fibonacci": bool(nearest_fib and nearest_fib["dist_pct"] <= 0.5),
+            "has_structure_alert": bool(structure_alerts),
+        },
+    }}}
+
+
+def _should_run_vlm(state: AnalysisState) -> bool:
+    """Gate expensive visual reasoning to high-value conditions only."""
+    if not settings.should_use_chart:
+        return False
+    if state.get("is_emergency"):
+        return True
+
+    anomalies = set(state.get("anomalies", []) or [])
+    high_impact = {
+        "true_breakout",
+        "liquidation_cluster",
+        "liquidation_cascade",
+        "options_panic",
+        "manual_emergency_trigger",
+    }
+    if anomalies.intersection(high_impact):
+        return True
+
+    chart_rules = (state.get("blackboard", {}) or {}).get("chart_rules", {}) or {}
+    return bool(chart_rules.get("signals", {}).get("has_structure_alert"))
 
 def node_vlm_geometric_expert(state: AnalysisState) -> dict:
-    """Run VLM Geometric visual analysis. Sole agent that receives the raw chart image.
-    Judge reads VLM's structured text output only — no raw chart forwarded to Judge."""
+    """Run VLM Geometric visual analysis when high-impact conditions are present."""
+    if not _should_run_vlm(state):
+        return {"blackboard": {"vlm_geometry": {
+            "anomaly": "skipped",
+            "directional_bias": "NEUTRAL",
+            "confidence": 0,
+            "rationale": "VLM gated off by triage/rule-based conditions"
+        }}}
+
     chart = state.get("chart_image_b64", "")
     symbol = state.get("symbol", "BTCUSDT")
     
@@ -474,73 +549,12 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
     return {"blackboard": {"vlm_geometry": result}}
 
 
-def node_blackboard_synthesis(state: AnalysisState) -> dict:
-    """Synthesize all Blackboard expert outputs into a structured conflict map.
-
-    Runs AFTER all experts (including VLM). Produces a compact JSON that tells
-    Judge: what experts agree on, where they conflict, and which conflict needs
-    resolving. This reduces Judge's cognitive load from scanning 4+ raw JSONs.
-    Model: gemini-3-flash-preview (cheap, fast — synthesis not reasoning).
-    """
-    bb = state.get("blackboard", {})
-    if not bb:
-        return {}
-
-    regime = state.get("market_regime", "UNKNOWN")
-    trust_directive = state.get("regime_context", {}).get("trust_directive", "")
-
-    system_prompt = (
-        "You are a Senior Quantitative Analyst. Synthesize expert signals into a structured conflict map. "
-        "Be concise and precise. Output strictly JSON."
-    )
-    schema = """{
-  "consensus_signals": ["list of points ALL experts agree on, with price levels if available"],
-  "conflicts": [
-    {
-      "between": ["expert_a", "expert_b"],
-      "expert_a_claim": "...",
-      "expert_b_claim": "...",
-      "tiebreaker": "What data or condition would resolve this conflict"
-    }
-  ],
-  "dominant_signal": "BULLISH | BEARISH | NEUTRAL",
-  "highest_confidence_expert": "liquidity | microstructure | macro | vlm_geometry",
-  "key_uncertainty": "Single most important unresolved question for the Judge",
-  "regime_note": "Given the regime and trust_directive, which expert output should be weighted most"
-}"""
-
-    user_message = (
-        f"MARKET REGIME: {regime}\n"
-        f"TRUST DIRECTIVE: {trust_directive}\n\n"
-        f"BLACKBOARD:\n{json.dumps(bb, indent=2)}\n\n"
-        f"Output JSON matching this schema:\n{schema}"
-    )
-
-    try:
-        response = ai_client.generate_response(
-            system_prompt=system_prompt,
-            user_message=user_message,
-            temperature=0.1,
-            max_tokens=700,
-            role="liquidity",  # Gemini Flash — synthesis, not reasoning
-        )
-        s, e = response.find('{'), response.rfind('}') + 1
-        if s != -1 and e > s:
-            synthesis = json.loads(response[s:e])
-            bb["synthesis"] = synthesis
-            logger.info(f"Blackboard synthesis: dominant={synthesis.get('dominant_signal')}, "
-                        f"conflicts={len(synthesis.get('conflicts', []))}")
-            return {"blackboard": bb}
-    except Exception as exc:
-        logger.error(f"Blackboard synthesis error: {exc}")
-    return {}
-
 
 def node_generate_chart(state: AnalysisState) -> dict:
     """Generate structure chart for all modes (for Judge VLM)."""
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
-    candle_limit = settings.candle_limit
+    candle_limit = settings.POSITION_CANDLE_LIMIT if mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
 
     # [FIX CRASH-2] Use cached DataFrame from node_collect_data
     df = _df_cache.get(symbol)
@@ -568,30 +582,18 @@ def node_generate_chart(state: AnalysisState) -> dict:
     if market_data is None:
         market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
 
-    # Load CVD (Volume Delta) data for chart sync
+    # CVD pipeline removed ??cvd_df always None; chart_generator handles None gracefully
     cvd_df = None
-    try:
-        # Fetch 1m CVD data matching the candle lookback (from cache if available)
-        cvd_df = _cvd_cache.get(symbol)
-        if cvd_df is None:
-            cvd_limit = settings.data_lookback_hours * 60
-            cvd_df = db.get_cvd_data(symbol, limit=cvd_limit)
-        
-        # [NEW] Merge with GCS historical CVD for long-term charts
-        from processors.gcs_parquet import gcs_parquet_store
-        if gcs_parquet_store.enabled:
-            m_back = settings.history_lookback_months
-            hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
-            if not hist_cvd.empty:
-                hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'], utc=True, errors='coerce')
-            since_cvd = hist_cvd['timestamp'].max() if not hist_cvd.empty else None
-            bridge_cvd = db.get_cvd_data(symbol, limit=50000, since=since_cvd) if since_cvd is not None else pd.DataFrame()
-            merged_cvd = merge_cvd_sources(hist_cvd, bridge_cvd, cvd_df)
-            fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
-            price_timeline = build_price_timeline(df_1m=df, df_1d=df_1d, fallback_price=fallback_px)
-            cvd_df = normalize_cvd_to_usd(merged_cvd, price_timeline, fallback_price=fallback_px)
-    except Exception as e:
-        logger.warning(f"CVD data load for chart skipped/merged: {e}")
+    if settings.CHART_SHOW_CVD_PANEL or settings.CHART_SHOW_CVD_OVERLAY:
+        try:
+            cvd_df = _cvd_cache.get(symbol)
+            if cvd_df is None:
+                cvd_limit = settings.data_lookback_hours * 60
+                cvd_df = db.get_cvd_data(symbol, limit=cvd_limit)
+                _cvd_cache[symbol] = cvd_df
+        except Exception as e:
+            logger.warning(f"CVD data load for chart skipped: {e}")
+
 
     # Load liquidation data for chart markers
     liquidation_df = None
@@ -603,39 +605,41 @@ def node_generate_chart(state: AnalysisState) -> dict:
     except Exception:
         pass
 
-    # Load funding/OI data for chart sync
+    # Load funding/OI data for chart sync (optional panels)
     funding_df = None
-    try:
-        # Fetch funding data (includes OI, LSR) matching the lookback
-        funding_limit = settings.data_lookback_hours * 60
-        funding_df = db.get_funding_history(symbol, limit=funding_limit)
-        if funding_df is not None and not funding_df.empty:
-            funding_df = funding_df.loc[:, ~funding_df.columns.duplicated()].reset_index(drop=True)
-        
-        # [NEW] Merge with GCS historical funding for long-term charts
-        from processors.gcs_parquet import gcs_parquet_store
-        if gcs_parquet_store.enabled:
-            m_back = settings.history_lookback_months
-            hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
-            if not hist_fnd.empty:
-                hist_fnd = hist_fnd.loc[:, ~hist_fnd.columns.duplicated()].reset_index(drop=True)
-                # [FIX CRITICAL] Map historical columns to live schema for chart_generator
-                hist_fnd = hist_fnd.rename(columns={
-                    'open_interest_value': 'open_interest'
-                })
-                hist_fnd['timestamp'] = pd.to_datetime(hist_fnd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-                since_fnd = hist_fnd['timestamp'].max()
-                bridge_fnd = db.get_funding_history(symbol, limit=50000, since=since_fnd)
-                
-                dfs = [hist_fnd]
-                if not bridge_fnd.empty: dfs.append(bridge_fnd)
-                if funding_df is not None and not funding_df.empty: dfs.append(funding_df)
-                
-                funding_df = pd.concat(dfs).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-            else:
-                funding_df = hist_fnd
-    except Exception as e:
-        logger.warning(f"Funding/OI data load for chart skipped/merged: {e}")
+    if settings.CHART_SHOW_OI_PANEL or settings.CHART_SHOW_FUNDING_PANEL:
+        try:
+            # Fetch funding data (includes OI, LSR) matching the lookback
+            funding_limit = settings.data_lookback_hours * 60
+            funding_df = db.get_funding_history(symbol, limit=funding_limit)
+            if funding_df is not None and not funding_df.empty:
+                funding_df = funding_df.loc[:, ~funding_df.columns.duplicated()].reset_index(drop=True)
+            
+            # Merge with GCS historical funding for long-term charts
+            from processors.gcs_parquet import gcs_parquet_store
+            if gcs_parquet_store.enabled:
+                m_back = settings.history_lookback_months
+                hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
+                if not hist_fnd.empty:
+                    hist_fnd = hist_fnd.loc[:, ~hist_fnd.columns.duplicated()].reset_index(drop=True)
+                    hist_fnd = hist_fnd.rename(columns={
+                        'open_interest_value': 'open_interest'
+                    })
+                    hist_fnd['timestamp'] = pd.to_datetime(hist_fnd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
+                    since_fnd = hist_fnd['timestamp'].max()
+                    bridge_fnd = db.get_funding_history(symbol, limit=50000, since=since_fnd)
+                    
+                    dfs = [hist_fnd]
+                    if not bridge_fnd.empty:
+                        dfs.append(bridge_fnd)
+                    if funding_df is not None and not funding_df.empty:
+                        dfs.append(funding_df)
+                    
+                    funding_df = pd.concat(dfs).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                else:
+                    funding_df = hist_fnd
+        except Exception as e:
+            logger.warning(f"Funding/OI data load for chart skipped/merged: {e}")
 
 
     try:
@@ -678,7 +682,7 @@ def node_judge_agent(state: AnalysisState) -> dict:
     open_positions = state.get("open_positions", "")
 
     # Pass blackboard (includes synthesis + vlm_geometry) and regime context.
-    # Chart image is NOT forwarded — VLMGeometricAgent is the sole visual analyst.
+    # Chart image is NOT forwarded ??VLMGeometricAgent is the sole visual analyst.
     # Judge reads VLM's structured text output from the blackboard instead.
     regime_ctx = state.get("regime_context", {})
     decision = judge_agent.make_decision(
@@ -727,7 +731,12 @@ def node_risk_manager(state: AnalysisState) -> dict:
     funding = state.get("funding_context", "")
     deribit = state.get("deribit_context", "")
     
-    final_decision = risk_manager_agent.evaluate_trade(draft, funding, deribit)
+    final_decision = risk_manager_agent.evaluate_trade(
+        draft,
+        funding,
+        deribit,
+        mode=TradingMode(state.get("mode", "swing"))
+    )
     return {"final_decision": final_decision}
 
 def node_portfolio_leverage_guard(state: AnalysisState) -> dict:
@@ -741,7 +750,13 @@ def node_portfolio_leverage_guard(state: AnalysisState) -> dict:
         
         # 1. Fetch total equity and exposure (Paper mode for now as per strategy)
         target_exchange = decision.get("target_exchange", "BINANCE").lower()
-        wallet_balance = paper_engine.get_wallet_balance(target_exchange)
+        if target_exchange == "split":
+            wallet_balance = (
+                paper_engine.get_wallet_balance("binance_spot")
+                + paper_engine.get_wallet_balance("upbit")
+            )
+        else:
+            wallet_balance = paper_engine.get_wallet_balance(target_exchange)
         
         # In a real setup, we'd query API for open positions. 
         # For our specific retail guard, we calculate if THIS trade + current positions exceeds 2.0x.
@@ -781,6 +796,14 @@ def node_execute_trade(state: AnalysisState) -> dict:
     decision = state.get("final_decision", {})
     symbol = state["symbol"]
     mode = TradingMode(state["mode"]).value.upper()
+
+    # Optional guard: skip execution when explicitly disabled by caller.
+    if not state.get("execute_trades", True):
+        decision["execution_receipt"] = {
+            "status": "SKIPPED",
+            "reason": "execute_trades=False",
+        }
+        return {"final_decision": decision}
     
     # Bridge to execution
     # This will simulate DCA or single entries based on the mode and CRO sizing
@@ -829,7 +852,7 @@ def node_generate_report(state: AnalysisState) -> dict:
         mode=mode,
     )
     
-    # [FIX CRITICAL-1] Pass actual last close price (was 0.0 → all episodic memory inverted)
+    # [FIX CRITICAL-1] Pass actual last close price (was 0.0 ??all episodic memory inverted)
     # [FIX MEDIUM-19]  Include blackboard so post-mortem LLM has decision context
     last_close = 0.0
     if not df.empty:
@@ -875,14 +898,13 @@ def node_data_synthesis(state: AnalysisState) -> dict:
     return {}
 
 
-# ── Helper ──
+# ???? Helper ????
 
 def _build_full_context(state: AnalysisState) -> str:
     """Build full context string for agents."""
     parts = [
         state.get("narrative_text", ""),
-        state.get("cvd_context", ""),
-        state.get("liquidation_context", ""),
+        state.get("liquidation_context", ""),  # cvd_context removed (OI_DIV in funding_context)
         state.get("microstructure_context", ""),
         state.get("macro_context", ""),
         state.get("deribit_context", ""),      # DVOL / PCR / IV term / 25d skew
@@ -893,7 +915,81 @@ def _build_full_context(state: AnalysisState) -> str:
     ]
     return "\n\n".join(p for p in parts if p)
 
-# ── Build the LangGraph StateGraph ──
+# ???? Build the LangGraph StateGraph ????
+
+
+
+# ?? Daily Playbook Generation ????????????????????????????????????????????????
+
+def node_generate_playbook(state) -> dict:
+    """Generate and persist Daily Playbook (entry/exit/invalidation/risk conditions).
+    Called once per day per symbol/mode. Result stored in DB for Hourly Monitor.
+    """
+    from agents.ai_router import ai_client
+    import json as _json
+    import datetime as _dt
+
+    symbol = state["symbol"]
+    mode = state["mode"]
+    compact = state.get("market_data_compact", "")
+    funding_ctx = state.get("funding_context", "")
+    rag_ctx = state.get("rag_context", "")
+    regime = state.get("market_regime", "RANGE_BOUND")
+    final_decision = state.get("final_decision", {})
+
+    PLAYBOOK_SYSTEM = """You are a senior quant strategist creating a 24-hour trading playbook.
+Output strict JSON only:
+{
+  "bias": "LONG|SHORT|NEUTRAL",
+  "entry_conditions": ["specific measurable condition 1", ...],
+  "exit_conditions": ["TP/SL condition 1", ...],
+  "invalidation_conditions": ["condition that cancels the trade idea", ...],
+  "risk_limits": {"max_allocation_pct": 15, "max_leverage": 2, "max_hold_hours": 48},
+  "key_levels": {"95000": "resistance", "90000": "support"},
+  "summary": "one-line playbook summary"
+}"""
+
+    user_msg = (
+        f"MODE: {str(mode).upper()}  SYMBOL: {symbol}  REGIME: {regime}\n\n"
+        f"MARKET SNAPSHOT:\n{str(compact)[:3000]}\n\n"
+        f"FUNDING/OI CONTEXT:\n{str(funding_ctx)[:1000]}\n\n"
+        f"RAG CONTEXT:\n{str(rag_ctx)[:1000]}\n\n"
+        f"JUDGE DECISION: {str(final_decision.get('decision','HOLD'))}\n"
+        f"Create the Daily Playbook for the next 24 hours. Output strict JSON only."
+    )
+
+    try:
+        raw = ai_client.generate_response(
+            system_prompt=PLAYBOOK_SYSTEM,
+            user_message=user_msg,
+            role="judge",
+            temperature=0.2,
+            max_tokens=1000,
+        )
+        start, end = raw.find("{"), raw.rfind("}") + 1
+        playbook = {}
+        if start != -1 and end > start:
+            playbook = _json.loads(raw[start:end])
+
+        record = {
+            "symbol": symbol,
+            "mode": str(mode),
+            "playbook": playbook,
+            "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "ttl_hours": 24,
+            "source_decision": str(final_decision.get("decision", "HOLD")),
+        }
+        try:
+            db.client.table("daily_playbooks").upsert(
+                record, on_conflict="symbol,mode"
+            ).execute()
+            logger.info(f"Daily Playbook saved: {symbol}/{mode} bias={playbook.get('bias','?')}")
+        except Exception as db_err:
+            logger.warning(f"Playbook DB upsert failed (non-fatal): {db_err}")
+        return {}
+    except Exception as e:
+        logger.error(f"node_generate_playbook error: {e}")
+        return {}
 
 def build_analysis_graph():
     """Build the multi-agent analysis graph with parallel execution."""
@@ -904,15 +1000,11 @@ def build_analysis_graph():
     graph.add_node("context_gathering", node_context_gathering)
     graph.add_node("meta_agent", node_meta_agent)
     
-    # Triage and Experts
+    # Core decision path
     graph.add_node("triage", node_triage)
-    graph.add_node("liquidity_expert", node_liquidity_expert)
-    graph.add_node("microstructure_expert", node_microstructure_expert)
-    graph.add_node("macro_expert", node_macro_options_expert)
-    
     graph.add_node("generate_chart", node_generate_chart)
+    graph.add_node("rule_based_chart", node_rule_based_chart)
     graph.add_node("vlm_expert", node_vlm_geometric_expert)
-    graph.add_node("blackboard_synthesis", node_blackboard_synthesis)
     graph.add_node("judge_agent", node_judge_agent)
     graph.add_node("risk_manager", node_risk_manager)
     graph.add_node("portfolio_leverage_guard", node_portfolio_leverage_guard)
@@ -927,23 +1019,16 @@ def build_analysis_graph():
     graph.add_edge("context_gathering", "meta_agent")
     graph.add_edge("meta_agent", "triage")
 
-    # FAN OUT: Run all experts and chart generation in PARALLEL
-    graph.add_edge("triage", "liquidity_expert")
-    graph.add_edge("triage", "microstructure_expert")
-    graph.add_edge("triage", "macro_expert")
     graph.add_edge("triage", "generate_chart")
-    
-    # VLM expert waits for the chart
+    graph.add_edge("generate_chart", "rule_based_chart")
+
+    # VLM node exists in the graph but internally decides whether to run
+    # based on triage + deterministic chart rules.
+    graph.add_edge("rule_based_chart", "vlm_expert")
     graph.add_edge("generate_chart", "vlm_expert")
 
-    # FAN IN: Synthesis waits for all text experts + VLM expert
-    graph.add_edge(
-        ["liquidity_expert", "microstructure_expert", "macro_expert", "vlm_expert"], 
-        "blackboard_synthesis"
-    )
-
     # Sequential finalization
-    graph.add_edge("blackboard_synthesis", "judge_agent")
+    graph.add_edge("vlm_expert", "judge_agent")
     graph.add_edge("judge_agent", "risk_manager")
     graph.add_edge("risk_manager", "portfolio_leverage_guard")
     graph.add_edge("portfolio_leverage_guard", "execute_trade")
@@ -955,12 +1040,13 @@ def build_analysis_graph():
 
 
 
-# ── Orchestrator class (maintains backward compatibility) ──
+# ???? Orchestrator class (maintains backward compatibility) ????
 
 class Orchestrator:
     def __init__(self):
         self.symbols = settings.trading_symbols
         self._graph = None
+        self._analysis_locks: Dict[str, threading.Lock] = {}
 
     @property
     def mode(self) -> TradingMode:
@@ -977,33 +1063,50 @@ class Orchestrator:
                 logger.error(f"LangGraph build error: {e}")
         return self._graph
 
-    def run_analysis(self, symbol: str, is_emergency: bool = False) -> Dict:
+    def run_analysis(self, symbol: str, is_emergency: bool = False, execute_trades: bool = True) -> Dict:
         mode = self.mode
+        return self.run_analysis_with_mode(symbol, mode, is_emergency=is_emergency, execute_trades=execute_trades)
+
+    def run_analysis_with_mode(
+        self,
+        symbol: str,
+        mode: TradingMode,
+        is_emergency: bool = False,
+        execute_trades: bool = True,
+    ) -> Dict:
+        lock_key = f"{symbol}:{mode.value}"
+        lock = self._analysis_locks.setdefault(lock_key, threading.Lock())
+        if not lock.acquire(blocking=False):
+            logger.warning(f"Analysis already running for {lock_key}; skipping duplicate run.")
+            return {"decision": "HOLD", "reasoning": f"Duplicate analysis blocked for {lock_key}", "confidence": 0}
+
         logger.info(f"Starting {'EMERGENCY' if is_emergency else 'SCHEDULED'} {mode.value.upper()} analysis for {symbol}")
 
-        # [FIX CRASH-2] Clear per-symbol cache at the start of each analysis
-        _df_cache.pop(symbol, None)
-        _market_data_cache.pop(symbol, None)
-        _cvd_cache.pop(symbol, None)
-        _liq_cache.pop(symbol, None)
-        _funding_cache.pop(symbol, None)
+        try:
+            # [FIX CRASH-2] Clear per-symbol cache at the start of each analysis
+            _df_cache.pop(symbol, None)
+            _market_data_cache.pop(symbol, None)
+            _cvd_cache.pop(symbol, None)
+            _liq_cache.pop(symbol, None)
+            _funding_cache.pop(symbol, None)
 
-        if self.graph:
-            return self._run_with_langgraph(symbol, mode, is_emergency)
-        else:
-            return self._run_sequential(symbol, mode, is_emergency)
+            if self.graph:
+                return self._run_with_langgraph(symbol, mode, is_emergency, execute_trades=execute_trades)
+            return self._run_sequential(symbol, mode, is_emergency, execute_trades=execute_trades)
+        finally:
+            lock.release()
 
-    def _run_with_langgraph(self, symbol: str, mode: TradingMode, is_emergency: bool) -> Dict:
+    def _run_with_langgraph(self, symbol: str, mode: TradingMode, is_emergency: bool, execute_trades: bool = True) -> Dict:
         """Run analysis using LangGraph StateGraph."""
         initial_state: AnalysisState = {
             "symbol": symbol,
             "mode": mode.value,
             "is_emergency": is_emergency,
+            "execute_trades": execute_trades,
             "df_size": 0,
             "market_data_compact": "",
             "narrative_text": "",
             "funding_context": "",
-            "cvd_context": "",
             "liquidation_context": "",
             "rag_context": "",
             "telegram_news": "",
@@ -1035,14 +1138,14 @@ class Orchestrator:
             logger.error(f"LangGraph execution error: {e}\n{traceback.format_exc()}")
             return {"decision": "HOLD", "reasoning": f"LangGraph error: {e}", "confidence": 0}
 
-    def _run_sequential(self, symbol: str, mode: TradingMode, is_emergency: bool) -> Dict:
+    def _run_sequential(self, symbol: str, mode: TradingMode, is_emergency: bool, execute_trades: bool = True) -> Dict:
         """Fallback: sequential execution (no LangGraph)."""
         state = {
             "symbol": symbol, "mode": mode.value,
-            "is_emergency": is_emergency, "errors": [],
+            "is_emergency": is_emergency, "execute_trades": execute_trades, "errors": [],
         }
 
-        # Run each node sequentially — mirrors the LangGraph DAG order.
+        # Run each node sequentially ??mirrors the LangGraph DAG order.
         # node_context_gathering consolidates: perplexity, RAG ingest, funding, CVD,
         # liquidation, RAG query, telegram news, self-correction, microstructure,
         # macro, deribit, and fear&greed context in a single function.
@@ -1051,9 +1154,6 @@ class Orchestrator:
             node_context_gathering,
             node_meta_agent,
             node_triage,
-            node_liquidity_expert,
-            node_microstructure_expert,
-            node_macro_options_expert,
         ]:
             try:
                 update = node_fn(state)
@@ -1061,12 +1161,16 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"Node {node_fn.__name__} error: {e}")
 
-        # Chart generation → VLM analysis → Blackboard synthesis → Judge
+        # Chart generation + deterministic chart-rule extraction
         if settings.should_use_chart and state.get("df_size", 0) > 0:
             try:
                 state.update(node_generate_chart(state))
             except Exception as e:
                 logger.error(f"Chart generation error: {e}")
+            try:
+                state.update(node_rule_based_chart(state))
+            except Exception as e:
+                logger.error(f"Rule-based chart node error: {e}")
 
         # VLM: analyzes chart, posts structured output to blackboard["vlm_geometry"]
         try:
@@ -1074,26 +1178,20 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"VLM expert error: {e}")
 
-        # Synthesis: distills blackboard into conflict map for Judge
-        try:
-            state.update(node_blackboard_synthesis(state))
-        except Exception as e:
-            logger.error(f"Blackboard synthesis error: {e}")
-
-        # Judge reads blackboard (incl. synthesis + vlm_geometry). No raw chart.
+        # Judge reads blackboard (chart_rules + optional vlm_geometry). No raw chart.
         try:
             state.update(node_judge_agent(state))
         except Exception as e:
             logger.error(f"Judge error: {e}")
             state["final_decision"] = {"decision": "HOLD", "reasoning": str(e), "confidence": 0}
 
-        # [FIX CRASH-1] Risk Manager (CRO) — was completely missing from sequential fallback
+        # [FIX CRASH-1] Risk Manager (CRO) ??was completely missing from sequential fallback
         try:
             state.update(node_risk_manager(state))
         except Exception as e:
             logger.error(f"Risk Manager error (sequential): {e}")
 
-        # [FIX CRASH-1] Trade Execution — was missing, so Judge decisions were never executed
+        # [FIX CRASH-1] Trade Execution ??was missing, so Judge decisions were never executed
         try:
             state.update(node_execute_trade(state))
         except Exception as e:
@@ -1108,18 +1206,113 @@ class Orchestrator:
         return state.get("final_decision", {})
 
     def run_scheduled_analysis(self) -> None:
-        logger.info(f"Running scheduled analysis (mode={self.mode.value})")
+        logger.info("Running scheduled dual-mode analysis (SWING=futures, POSITION=spot)")
+        modes = [TradingMode.SWING, TradingMode.POSITION]
 
         for symbol in self.symbols:
-            try:
-                self.run_analysis(symbol, is_emergency=False)
-            except Exception as e:
-                logger.error(f"Analysis error for {symbol}: {e}")
-                continue
+            for mode in modes:
+                try:
+                    self.run_analysis_with_mode(symbol, mode, is_emergency=False, execute_trades=True)
+                except Exception as e:
+                    logger.error(f"Analysis error for {symbol} ({mode.value}): {e}")
+                    continue
 
     def run_emergency_analysis(self, symbol: str) -> None:
-        logger.critical(f"Running EMERGENCY analysis for {symbol} (mode={self.mode.value})")
-        self.run_analysis(symbol, is_emergency=True)
+        logger.critical(f"Running EMERGENCY analysis for {symbol} (mode=swing)")
+        self.run_analysis_with_mode(symbol, TradingMode.SWING, is_emergency=True, execute_trades=True)
+
+
+    def run_daily_playbook(self) -> None:
+        """00:00 UTC serial: BTC POSITION ??ETH POSITION ??BTC SWING ??ETH SWING.
+        Each analysis runs full pipeline (including execution) and also refreshes playbook.
+        """
+        import time as _time
+        schedule = [
+            ("BTCUSDT", TradingMode.POSITION),
+            ("ETHUSDT", TradingMode.POSITION),
+            ("BTCUSDT", TradingMode.SWING),
+            ("ETHUSDT", TradingMode.SWING),
+        ]
+        logger.info("=== Daily Precision Run (00:00 UTC) ===")
+        for i, (symbol, mode) in enumerate(schedule):
+            if i > 0:
+                logger.info(f"Sleeping 3m before {symbol}/{mode.value} ...")
+                _time.sleep(3 * 60)
+            try:
+                logger.info(f"[Daily] {symbol} {mode.value.upper()} starting...")
+                _df_cache.pop(symbol, None)
+                _market_data_cache.pop(symbol, None)
+                _liq_cache.pop(symbol, None)
+                _funding_cache.pop(symbol, None)
+
+                if self.graph:
+                    state = self._run_with_langgraph(symbol, mode, is_emergency=False, execute_trades=True)
+                else:
+                    state = self._run_sequential(symbol, mode, is_emergency=False, execute_trades=True)
+
+                # Generate & persist playbook (uses last completed state via global caches)
+                node_generate_playbook({
+                    "symbol": symbol,
+                    "mode": mode.value,
+                    "market_data_compact": _market_data_cache.get(symbol, {}).get("compact", ""),
+                    "funding_context": "",
+                    "rag_context": "",
+                    "market_regime": "RANGE_BOUND",
+                    "final_decision": state if isinstance(state, dict) else {},
+                })
+                logger.info(f"[Daily] {symbol} {mode.value.upper()} done.")
+            except Exception as e:
+                logger.error(f"Daily playbook error {symbol}/{mode.value}: {e}")
+
+    def run_hourly_monitor(self) -> None:
+        """Hourly: evaluate each symbol/mode against its Daily Playbook.
+        If TRIGGER ??run analysis and allow order execution.
+        Daily entry count capped at DAILY_MAX_ENTRIES per symbol.
+        """
+        from agents.market_monitor_agent import market_monitor_agent
+        from datetime import date
+
+        DAILY_MAX_ENTRIES = 2
+        _entry_count_key = f"_monitor_entries_{date.today().isoformat()}"
+
+        for symbol in self.symbols:
+            for mode in [TradingMode.SWING, TradingMode.POSITION]:
+                try:
+                    result = market_monitor_agent.evaluate(symbol, mode.value)
+                    status = result.get("status", "NO_ACTION")
+                    logger.info(f"[Monitor] {symbol}/{mode.value}: {status}")
+
+                    if status == "TRIGGER" and not result.get("invalidated", False):
+                        # Count guard
+                        from config.local_state import state_manager
+                        entries_today = int(state_manager.get_config(_entry_count_key + symbol, "0"))
+                        if entries_today >= DAILY_MAX_ENTRIES:
+                            logger.warning(f"[Monitor] {symbol} daily entry cap ({DAILY_MAX_ENTRIES}) reached, skipping.")
+                            continue
+
+                        logger.info(f"[Monitor] TRIGGER! Running analysis for {symbol}/{mode.value}")
+                        self.run_analysis_with_mode(symbol, mode, is_emergency=False, execute_trades=True)
+                        state_manager.set_config(_entry_count_key + symbol, str(entries_today + 1))
+
+                    # Send monitor result to Telegram
+                    if status in ("TRIGGER", "WATCH"):
+                        try:
+                            from bot.telegram_bot import trading_bot
+                            import asyncio, json as _json
+                            msg = (
+                                f"?뱻 *Hourly Monitor*\n"
+                                f"`{symbol}` ({mode.value.upper()}) ??*{status}*\n"
+                                f"{result.get('reasoning', '')}"
+                            )
+                            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, msg))
+                        except Exception:
+                            pass
+
+                except Exception as e:
+                    logger.error(f"Monitor error {symbol}/{mode.value}: {e}")
 
 
 orchestrator = Orchestrator()
+
+
+

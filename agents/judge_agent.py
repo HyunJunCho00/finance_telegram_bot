@@ -17,7 +17,7 @@ class JudgeAgent:
 You receive ALL available data:
 1. Multi-timeframe indicators (1h, 4h, 1d) with Fibonacci levels
 2. Structural analysis (support/resistance, divergences, volume profile)
-3. Funding rate + Global OI (Binance+Bybit+OKX) + CVD (volume delta)
+3. Funding rate + Global OI (Binance+Bybit+OKX) + OI Divergence + MFI (money flow index proxy)
 4. Perplexity market narrative (WHY price is moving)
 5. LightRAG relationship context (connected events and entities)
 6. Expert Agent analyses from the Blackboard (Liquidity, Microstructure, Macro/Options)
@@ -44,7 +44,7 @@ Output your decision as JSON:
     "counter_scenario": "The strongest argument for why my decision might be WRONG",
     "meta_agent_context": "How the current market regime influenced your weighting of experts",
     "technical": "MTF indicators, Structure, Fibonacci levels",
-    "derivatives": "Funding, Global OI, CVD context",
+    "derivatives": "Funding, Global OI (OI_DIV status), MFI proxy, Volume Profile",
     "experts": "Blackboard expert summaries (Liq, Micro, Macro)",
     "narrative": "Perplexity narrative and RAG events",
     "final_logic": "Concluding synthesis"
@@ -64,9 +64,10 @@ Be aware of your previous decision for consistency."""
 - Top-down analysis: 1d determines bias, 4h identifies setup, 1h confirms entry
 - Fibonacci 38.2%/50%/61.8% are key retracement entry zones
 - Extreme funding rates are contrarian signals (high positive = potential top)
-- OI-price divergence warns of fragile moves (rising OI + flat price = danger)
+- OI divergence: rising OI + flat/falling price = fragile long squeeze risk (OI_DIV=DIVERGENCE)
+- MFI proxy INFLOW (OI↑ + Price↑) confirms trend; OUTFLOW (OI↓ + Price↓) confirms liquidation
 - Volume profile POC acts as price magnet
-- CVD divergence: rising CVD + flat price = accumulation; falling CVD + rising price = distribution
+- OI-price divergence warns of fragile moves (rising OI + flat price = danger)
 - Global OI: sum across 3 exchanges eliminates single-exchange noise
 - Market narrative from Perplexity provides the "WHY" behind moves
 - Position sizing: 10-25% of Kelly criterion (conservative)
@@ -83,7 +84,7 @@ Be aware of your previous decision for consistency."""
 - CME BASIS (BTC/ETH): Monitor the premium/discount of CME Futures vs Spot. Persistent Backwardation (Spot > Futures) indicates institutional hedging or lack of buy-side conviction. Contango (Futures > Spot) indicates institutional long-bias.
 - OTC FOOTPRINT: Even if OTC is hidden, watch for "footprints":
     1. Deribit Skew: Large players hedge OTC buys with put options.
-    2. CVD Trends: OTC desks rebalancing inventory on public exchanges.
+- OI Trends: OTC desks rebalancing inventory show as OI divergence spikes on public exchanges.
 - Position sizing: 5-15% of Kelly criterion (highly conservative, room for deep drawdowns)
 - Leverage: 1x (Spot) or maximum 1.5x. Liquidation must be nearly impossible.
 - Stop Loss & Take Profit: Stops must be wide enough to survive multi-week volatility and deep drawdowns (e.g., 10-25%), but the profit target should capture major cycle moves, aiming for 3:1 or higher Reward/Risk ratio. Risk is managed entirely via minimal leverage and small portfolio allocation.
@@ -93,8 +94,8 @@ Be aware of your previous decision for consistency."""
 Swarm reasoning controls & Data Trust Hierarchy:
 - Synthesize all expert insights from the Blackboard into a cohesive probability map.
 - CONVICTION HIERARCHY (Resolve deadlocks using this rule):
-  1. For SCALP/Short-term: Microstructure (Orderbook/Slippage) > Liquidity (CVD) > Macro > Visual Geometry.
-  2. For SWING/Position: Macro/Options > Liquidity (CVD) > Visual Geometry > Microstructure.
+  1. For SCALP/Short-term: Microstructure (Orderbook/Slippage) > Liquidity (OI/Funding/MFI) > Macro > Visual Geometry.
+  2. For SWING/Position: Macro/Options > OI Divergence & Funding > Volume Profile > Visual Geometry > Microstructure.
 - Weigh conflicting evidence against the Hierarchy above.
 - Explicitly list strongest pro-trade and strongest anti-trade factors in key_factors.
 - Do not reward agreement itself; reward evidence quality and falsifiability.

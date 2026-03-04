@@ -1,6 +1,6 @@
 from fastmcp import FastMCP
 from mcp_server.tools import mcp_tools
-from config.settings import settings, TradingMode
+from config.settings import settings
 from loguru import logger
 
 mcp = FastMCP("Crypto Trading System")
@@ -85,11 +85,10 @@ def execute_trade(symbol: str, side: str, amount: float, leverage: int = 1) -> d
 
 
 @mcp.tool()
-def get_chart_image(symbol: str, timeframe: str = None) -> dict:
-    """Generate and return a base64-encoded chart image for a symbol.
-    Chart type depends on mode, but can be overridden by timeframe (e.g. '1d', '4h')."""
-    logger.info(f"MCP tool: get_chart_image {symbol} (tf={timeframe})")
-    return mcp_tools.get_chart_image(symbol, timeframe=timeframe)
+def get_chart_image(symbol: str, lane: str = "swing") -> dict:
+    """Generate chart image by fixed lane only: 'swing' or 'position'."""
+    logger.info(f"MCP tool: get_chart_image {symbol} (lane={lane})")
+    return mcp_tools.get_chart_image(symbol, lane=lane)
 
 
 @mcp.tool()
@@ -100,21 +99,17 @@ def get_indicator_summary(symbol: str) -> dict:
 
 
 @mcp.tool()
-def switch_trading_mode(mode: str) -> dict:
-    """Switch between 'swing', and 'position' trading modes.
-    This changes which timeframes and indicators are used for analysis."""
-    logger.info(f"MCP tool: switch_trading_mode to {mode}")
-    return mcp_tools.switch_mode(mode)
-
-
-@mcp.tool()
 def get_trading_mode() -> dict:
-    """Get the current trading mode and its configuration."""
+    """Get fixed dual-mode policy configuration."""
     return {
-        "mode": settings.trading_mode.value,
-        "candle_limit": settings.candle_limit,
+        "mode": "dual",
+        "swing": {"venue": "binance_futures", "direction": "long_short"},
+        "position": {"venue": "binance_spot_upbit", "direction": "long_only"},
         "chart_enabled": settings.should_use_chart,
-        "analysis_interval_hours": settings.analysis_interval_hours,
+        "analysis_interval_hours": {
+            "swing": settings.SWING_INTERVAL_HOURS,
+            "position": settings.POSITION_INTERVAL_HOURS,
+        },
     }
 
 
