@@ -464,14 +464,7 @@ def main():
         max_instances=1
     )
 
-    # [FIX MEDIUM-18] WebSocket thread health check — every 5 minutes
-    scheduler.add_job(
-        job_5m_ws_health_check,
-        'interval',
-        minutes=5,
-        id='job_5m_ws_health',
-        max_instances=1
-    )
+
 
     scheduler.start()
     logger.info("Scheduler started.")
