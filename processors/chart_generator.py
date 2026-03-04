@@ -82,7 +82,7 @@ class ChartGenerator:
         else:  # SWING (default)
             config = {
                 'resample_rule': '1D',
-                'tail_candles': 180,   # ~6 months
+                'tail_candles': 365,   # ~12 months
                 'min_candles': 30,
                 'title_suffix': '1D SWING',
                 'fib_tf': '1d',
@@ -415,7 +415,7 @@ class ChartGenerator:
                 self._draw_liquidation_markers(price_ax, chart_df, liquidation_df)
 
             # ── Overlay 9: Fair Value Gaps (FVG) ──
-            self._draw_fair_value_gaps(price_ax, chart_df)
+            self._draw_fair_value_gaps(price_ax, chart_df, mode)
 
             # ── [NEW] Overlay 10: Macro Order Blocks (OB) ──
             # count=4 → returns up to 8 candidates (obs[:count*2])
@@ -478,9 +478,10 @@ class ChartGenerator:
                     color='#7F8C8D', linewidth=0.8,
                     linestyle='--', alpha=0.6, zorder=4)
             
-            last_val = ema.dropna().iloc[-1] if not ema.dropna().empty else None
-            if last_val:
-                ax.text(x_range[-1], float(last_val),
+            ema_clean = ema.dropna()
+            last_val = float(ema_clean.iloc[-1]) if not ema_clean.empty else None
+            if last_val is not None:
+                ax.text(x_range[-1], last_val,
                         ' EMA200', color='#7F8C8D',
                         fontsize=6, va='center', ha='left', alpha=0.7)
         except Exception as e:
@@ -821,10 +822,12 @@ class ChartGenerator:
         except Exception as e:
             logger.debug(f"Liquidation markers draw error: {e}")
 
-    def _draw_fair_value_gaps(self, ax, chart_df: pd.DataFrame):
+    def _draw_fair_value_gaps(self, ax, chart_df: pd.DataFrame,
+                               mode: TradingMode = TradingMode.SWING):
         """Identify and draw Fair Value Gaps (FVG) as shaded boxes.
         Bullish FVG: Low[n+1] > High[n-1]
         Bearish FVG: High[n+1] < Low[n-1]
+        POSITION mode: filter gaps < 1% (same as math_engine.calculate_fvg)
         """
         try:
             high = chart_df['high'].astype(float).values
@@ -834,30 +837,34 @@ class ChartGenerator:
             n = len(chart_df)
             if n < 3:
                 return
+            min_gap_pct = 1.0 if mode == TradingMode.POSITION else 0.0
 
             bull_gaps = []
             bear_gaps = []
             
             for i in range(1, n - 1):
-                # Bullish FVG
+                # Bullish FVG: Low[i+1] > High[i-1]
                 if low[i + 1] > high[i - 1]:
-                    # [VLM OPT] Only show UNMITIGATED gaps (Price has not returned to fill them)
                     top = low[i + 1]
                     bottom = high[i - 1]
-                    # Mitigation check: Has any candle since i+1 entered this zone?
+                    # Skip tiny gaps in POSITION mode (< 1%)
+                    if bottom > 0 and (top - bottom) / bottom * 100 < min_gap_pct:
+                        continue
+                    # [VLM OPT] Only show UNMITIGATED gaps (Price has not returned to fill them)
                     post_gap_lows = low[i + 2:]
                     is_mitigated = (post_gap_lows < top).any() if len(post_gap_lows) > 0 else False
-                    
                     if not is_mitigated:
                         bull_gaps.append({'idx': i, 'top': top, 'bottom': bottom})
-                
-                # Bearish FVG
+
+                # Bearish FVG: High[i+1] < Low[i-1]
                 elif high[i + 1] < low[i - 1]:
                     top = low[i - 1]
                     bottom = high[i + 1]
+                    # Skip tiny gaps in POSITION mode (< 1%)
+                    if bottom > 0 and (top - bottom) / bottom * 100 < min_gap_pct:
+                        continue
                     post_gap_highs = high[i + 2:]
                     is_mitigated = (post_gap_highs > bottom).any() if len(post_gap_highs) > 0 else False
-                    
                     if not is_mitigated:
                         bear_gaps.append({'idx': i, 'top': top, 'bottom': bottom})
 

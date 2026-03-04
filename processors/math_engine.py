@@ -102,6 +102,17 @@ class MathEngine:
 
         resampled = resampled.dropna(subset=['open']).reset_index()
 
+        # [Fix] Replace any NaT high_time/low_time (from empty periods) with the candle's own timestamp
+        # NaT occurs when a resampled period has no 1m data (gap). Fallback to period open time.
+        if 'high_time' in resampled.columns:
+            nat_mask = resampled['high_time'].isna()
+            if nat_mask.any():
+                resampled.loc[nat_mask, 'high_time'] = resampled.loc[nat_mask, 'timestamp']
+        if 'low_time' in resampled.columns:
+            nat_mask = resampled['low_time'].isna()
+            if nat_mask.any():
+                resampled.loc[nat_mask, 'low_time'] = resampled.loc[nat_mask, 'timestamp']
+
         return resampled
 
     # ─────────────── Structure Analysis ───────────────
@@ -179,6 +190,8 @@ class MathEngine:
                 'point1': (ts1, y1),
                 'point2': (ts2, y2),
                 'pivot_count': len(local_min_idx),
+                '_x1': int(x1),
+                '_x2': int(x2),
             }
         except Exception as e:
             logger.error(f"TD Support error: {e}")
@@ -216,6 +229,8 @@ class MathEngine:
                 'point1': (ts1, y1),
                 'point2': (ts2, y2),
                 'pivot_count': len(local_max_idx),
+                '_x1': int(x1),
+                '_x2': int(x2),
             }
         except Exception as e:
             logger.error(f"TD Resistance error: {e}")
@@ -378,8 +393,8 @@ class MathEngine:
             if len(local_min_idx) == 0 or len(local_max_idx) == 0:
                 return None
 
-            swing_low = float(df.iloc[local_min_idx[-1]]['close'])
-            swing_high = float(df.iloc[local_max_idx[-1]]['close'])
+            swing_low = float(df.iloc[local_min_idx[-1]]['low'])
+            swing_high = float(df.iloc[local_max_idx[-1]]['high'])
 
             # Determine trend direction
             is_uptrend = local_min_idx[-1] < local_max_idx[-1]
@@ -920,18 +935,32 @@ class MathEngine:
         if not line_info or len(df) < 10:
             return None
         try:
-            price_key   = 'support_price' if line_type == 'support' else 'resistance_price'
-            current_val = line_info.get(price_key)
-            slope       = line_info.get('slope', 0)
-            if current_val is None:
+            # ── Derive slope + current_val from stored pivot row indices ──
+            # calculate_diagonal_support/resistance stores '_x1', '_x2', 'point1', 'point2'
+            x1 = line_info.get('_x1')
+            x2 = line_info.get('_x2')
+            pt1 = line_info.get('point1')
+            pt2 = line_info.get('point2')
+
+            if x1 is None or x2 is None or pt1 is None or pt2 is None:
                 return None
+            if x2 == x1:
+                return None
+
+            y1_val = float(pt1[1])
+            y2_val = float(pt2[1])
+            slope  = (y2_val - y1_val) / (x2 - x1)   # price per candle
+
+            n = len(df)
+            # Extrapolate trendline to the most recent candle
+            current_val = y2_val + slope * (n - 1 - x2)
 
             avg_price = float(df['close'].mean())
             if avg_price == 0:
                 return None
 
             # ── 1. Angle score ──────────────────────────────────────
-            norm_slope = abs(float(slope)) / avg_price * 100   # % per candle
+            norm_slope = abs(slope) / avg_price * 100   # % per candle
             if 0.005 <= norm_slope <= 0.35:
                 angle_score, angle_tag = 30, 'optimal'
             elif norm_slope < 0.005:
@@ -940,10 +969,9 @@ class MathEngine:
                 angle_score, angle_tag = 6,  'too_steep'
 
             # ── 2. Touch count score ────────────────────────────────
-            n          = len(df)
             x          = np.arange(n)
-            intercept  = float(current_val) - float(slope) * (n - 1)
-            line_vals  = float(slope) * x + intercept
+            intercept  = current_val - slope * (n - 1)
+            line_vals  = slope * x + intercept
             close_vals = df['close'].astype(float).values
             tolerance  = avg_price * 0.006   # 0.6 % band around the line
 
@@ -970,7 +998,8 @@ class MathEngine:
                 recency_score = 7
 
             # ── 4. Distance score ───────────────────────────────────
-            dist_pct = abs(line_info.get('distance_pct', 100))
+            current_price = float(df['close'].iloc[-1])
+            dist_pct = abs(current_price - current_val) / avg_price * 100
             if dist_pct <= 0.5:
                 dist_score, dist_tag = 10, 'testing_now'
             elif dist_pct <= 2.0:
@@ -1285,6 +1314,8 @@ class MathEngine:
             result['swing_levels']['1d'] = self.calculate_swing_levels(tf_1d)
 
         # Multi-TF confluence zones
+        result['confluence_zones'] = self.detect_confluence_zones(result)
+
         # Recent 1d candles
         if len(tf_1d) >= 3:
             result['recent_1d_candles'] = self._recent_candle_data(tf_1d, count=10)

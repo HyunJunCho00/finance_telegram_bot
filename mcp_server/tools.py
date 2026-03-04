@@ -29,30 +29,24 @@ class MCPTools:
 
             if gcs_parquet_store.enabled:
                 try:
-                    # Calculate m_back based on TradingMode requirements
-                    # SWING: 12 months, POSITION: since 2021-01-01
-                    import datetime
-                    now_utc = datetime.datetime.now(datetime.timezone.utc)
-                    if mode == TradingMode.POSITION:
-                        m_back = (now_utc.year - 2021) * 12 + now_utc.month
-                    else:
-                        m_back = 12
+                    # Fixed lookback: SWING=12 months, POSITION=60 months (5 years)
+                    m_back = 60 if mode == TradingMode.POSITION else 12
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
                     if mode == TradingMode.POSITION:
-                        df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
-                    
+                        df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
+
                     # Also load CVD/Funding history for a complete analysis
                     cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
                     fnd_hist = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
-                    
+
                     # Merge with recent DB data
-                    cvd_recent = db.get_cvd_data(symbol, limit=settings.data_lookback_hours * 60)
+                    cvd_recent = db.get_cvd_data(symbol, limit=45000)
                     if not cvd_hist.empty:
                         cvd_df = pd.concat([cvd_hist, cvd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
                     else:
                         cvd_df = cvd_recent
 
-                    fnd_recent = db.get_funding_history(symbol, limit=settings.data_lookback_hours * 60)
+                    fnd_recent = db.get_funding_history(symbol, limit=45000)
                     if not fnd_hist.empty:
                         funding_df = pd.concat([fnd_hist, fnd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
                     else:
@@ -251,21 +245,12 @@ class MCPTools:
             
             if gcs_parquet_store.enabled:
                 try:
-                    # For custom timeframe charts, we should still provide enough context if it's a high TF
-                    # Calculate m_back based on TradingMode requirements
-                    # SWING: 12 months, POSITION: since 2021-01-01
-                    import datetime
-                    now_utc = datetime.datetime.now(datetime.timezone.utc)
-                    if mode == TradingMode.POSITION:
-                        m_back = (now_utc.year - 2021) * 12 + now_utc.month
-                    else:
-                        m_back = 12
+                    # Fixed lookback: SWING=12 months, POSITION=60 months (5 years)
+                    m_back = 60 if mode == TradingMode.POSITION else 12
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
                     if timeframe and timeframe.lower() in ('1w', 'w') or mode == TradingMode.POSITION:
-                        df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
+                        df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
 
-                    # [V14.5 Fix] Synchronize lookback with OHLCV (24 months)
-                    # This ensures indicators don't stop at Nov 2025 like in previous bug.
                     m_back_timeseries = m_back
 
                     # Bridge GCS gap: 45,000 rows covers ~31 days of 1m data
