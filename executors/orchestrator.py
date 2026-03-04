@@ -616,20 +616,36 @@ def node_generate_chart(state: AnalysisState) -> dict:
                     'taker_sell_volume': 'whale_sell_vol'
                 })
                 
-                # Setup Daily Prices for entire trace to scale COIN into USD uniformly
+                # [FIX] Setup Unified Prices to scale COIN into USD uniformly.
+                # Prioritize high-resolution 1m data (df) for recent history, 
+                # falling back to 1D daily closes for deep history.
+                price_dfs = []
                 if df_1d is not None and not df_1d.empty:
-                    price_map = df_1d.copy()
-                    price_map['timestamp'] = pd.to_datetime(price_map['timestamp'], utc=True).dt.floor('D')
-                    price_map = price_map.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
-                    price_map = price_map[~price_map.index.duplicated(keep='last')]
-                    daily_prices = merged_cvd['timestamp'].dt.floor('D').map(price_map).ffill().bfill()
-                    if daily_prices.isna().any():
-                        daily_prices = daily_prices.fillna(df['close'].iloc[-1] if not df.empty else 60000)
-                else:
-                    daily_prices = df['close'].iloc[-1] if not df.empty else 60000
+                    d_hist = df_1d[['timestamp', 'close']].copy()
+                    d_hist['timestamp'] = pd.to_datetime(d_hist['timestamp'].astype(str), format='mixed', utc=True, errors='coerce')
+                    price_dfs.append(d_hist.dropna())
+                if df is not None and not df.empty:
+                    d_live = df[['timestamp', 'close']].copy()
+                    d_live['timestamp'] = pd.to_datetime(d_live['timestamp'].astype(str), format='mixed', utc=True, errors='coerce')
+                    price_dfs.append(d_live.dropna())
+                
+                if price_dfs:
+                    unified_prices = pd.concat(price_dfs).drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
+                    merged_cvd['timestamp'] = pd.to_datetime(merged_cvd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce')
                     
-                merged_cvd['whale_buy_vol'] = merged_cvd['whale_buy_vol'].fillna(0) * daily_prices
-                merged_cvd['whale_sell_vol'] = merged_cvd['whale_sell_vol'].fillna(0) * daily_prices
+                    cvd_priced = pd.merge_asof(
+                        merged_cvd.sort_values('timestamp'), 
+                        unified_prices, 
+                        on='timestamp', 
+                        direction='backward'
+                    )
+                    
+                    fill_prices = cvd_priced['close'].bfill()
+                else:
+                    fill_prices = pd.Series(60000, index=merged_cvd.index)
+                    
+                merged_cvd['whale_buy_vol'] = merged_cvd['whale_buy_vol'].fillna(0) * fill_prices
+                merged_cvd['whale_sell_vol'] = merged_cvd['whale_sell_vol'].fillna(0) * fill_prices
                 
                 cvd_df = merged_cvd
     except Exception as e:

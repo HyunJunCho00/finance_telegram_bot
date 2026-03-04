@@ -308,20 +308,40 @@ class MCPTools:
                         cvd_recent = cvd_recent.loc[:, ~cvd_recent.columns.duplicated()].reset_index(drop=True)
                         cvd_recent['timestamp'] = pd.to_datetime(cvd_recent['timestamp'], utc=True)
                         
-                        # Convert recent coin volume → USD using price_map for GCS-consistent scaling
+                        # Convert recent coin volume → USD using per-MINUTE prices from df (1m OHLCV).
+                        # df already holds ~31 days of 1m candles (limit=45000), so per-minute
+                        # price lookup is exact — no intraday approximation error unlike daily close.
                         _fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
-                        if price_map is not None:
+
+                        if not df.empty:
+                            # Build per-minute price map: timestamp floored to minute → 1m close
+                            _df_min = df.copy()
+                            _df_min['timestamp'] = pd.to_datetime(_df_min['timestamp'], utc=True).dt.floor('min')
+                            _df_min = (_df_min
+                                       .drop_duplicates(subset='timestamp')
+                                       .set_index('timestamp')['close']
+                                       .sort_index())
+
+                            ts_col_r = pd.to_datetime(cvd_recent['timestamp'], utc=True).dt.floor('min')
+                            recent_prices = ts_col_r.map(_df_min)
+
+                            # Fill any gaps (bot restarts / sparse periods) with daily price_map
+                            if recent_prices.isna().any() and price_map is not None:
+                                daily_fill = ts_col_r.dt.floor('D').map(price_map)
+                                recent_prices = recent_prices.fillna(daily_fill)
+
+                            recent_prices = recent_prices.fillna(_fallback_px).values
+                        elif price_map is not None:
+                            # df unavailable → fall back to daily price_map
                             ts_col_r = pd.to_datetime(cvd_recent['timestamp'], utc=True).dt.floor('D')
                             recent_prices = ts_col_r.map(price_map).ffill().bfill().fillna(_fallback_px).values
-                            if 'whale_buy_vol' in cvd_recent.columns:
-                                cvd_recent['whale_buy_vol'] = cvd_recent['whale_buy_vol'] * recent_prices
-                            if 'whale_sell_vol' in cvd_recent.columns:
-                                cvd_recent['whale_sell_vol'] = cvd_recent['whale_sell_vol'] * recent_prices
                         else:
-                            if 'whale_buy_vol' in cvd_recent.columns:
-                                cvd_recent['whale_buy_vol'] = cvd_recent['whale_buy_vol'] * _fallback_px
-                            if 'whale_sell_vol' in cvd_recent.columns:
-                                cvd_recent['whale_sell_vol'] = cvd_recent['whale_sell_vol'] * _fallback_px
+                            recent_prices = _fallback_px
+
+                        if 'whale_buy_vol' in cvd_recent.columns:
+                            cvd_recent['whale_buy_vol'] = cvd_recent['whale_buy_vol'] * recent_prices
+                        if 'whale_sell_vol' in cvd_recent.columns:
+                            cvd_recent['whale_sell_vol'] = cvd_recent['whale_sell_vol'] * recent_prices
                             
                         cvd_df = pd.concat([cvd_hist, cvd_recent], ignore_index=True) if not cvd_hist.empty else cvd_recent
                         cvd_df = cvd_df.loc[:, ~cvd_df.columns.duplicated()]\
