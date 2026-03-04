@@ -207,6 +207,7 @@ class ChartGenerator:
 
             # 4. Integrate CVD if provided
             apds = []
+            _cvd_added = False  # tracks whether a CVD panel was actually appended to mpf
             if cvd_df is not None and not cvd_df.empty:
                 cvd = cvd_df.copy()
                 if pd.api.types.is_numeric_dtype(cvd['timestamp']):
@@ -242,9 +243,10 @@ class ChartGenerator:
                                            color='#8E44AD', width=1.5, 
                                            ylabel='CVD', secondary_y=False))
                 colors = ['#27AE60' if d >= 0 else '#C0392B' for d in cvd_delta_plot]
-                apds.append(mpf.make_addplot(cvd_delta_plot, panel=2, 
-                                           type='bar', color=colors, alpha=0.3, 
+                apds.append(mpf.make_addplot(cvd_delta_plot, panel=2,
+                                           type='bar', color=colors, alpha=0.3,
                                            secondary_y=True))
+                _cvd_added = True  # CVD panel successfully registered
 
             # 5. Integrate OI and Funding if provided
             _has_oi = True  # track for panel count correction below
@@ -271,22 +273,27 @@ class ChartGenerator:
                     fnd_resampled = fnd.resample(config['resample_rule']).agg(agg_map)
                     fnd_aligned = fnd_resampled.reindex(chart_df.index)
                     
+                    # Compute base panel: if CVD was added it occupies panel=2,
+                    # so OI starts at panel=3; otherwise OI starts at panel=2.
+                    _oi_panel = 3 if _cvd_added else 2
+
                     # OI Panel — only if column exists
                     if has_oi:
                         fnd_oi_plot = fnd_aligned['open_interest'].ffill()
-                        apds.append(mpf.make_addplot(fnd_oi_plot, panel=3,
+                        apds.append(mpf.make_addplot(fnd_oi_plot, panel=_oi_panel,
                                                    color='#2980B9', width=1.2,
                                                    ylabel='OI', secondary_y=False))
                     else:
                         # No OI — flag for panel count correction below
                         _has_oi = False
-                    
+
                     # Funding Rate Tape — only if column exists
+                    # Funding always goes one panel above OI; if OI is absent it takes OI's slot.
                     if has_funding:
                         fnd_rate_plot = fnd_aligned['funding_rate'].fillna(0)
-                        f_colors = ['#27AE60' if r > 0.0001 else '#C0392B' if r < -0.0001 else '#BDC3C7' 
+                        f_colors = ['#27AE60' if r > 0.0001 else '#C0392B' if r < -0.0001 else '#BDC3C7'
                                    for r in fnd_rate_plot]
-                        tape_panel = 4 if has_oi else 3  # shift panel if OI missing
+                        tape_panel = (_oi_panel + 1) if has_oi else _oi_panel
                         apds.append(mpf.make_addplot(fnd_rate_plot, panel=tape_panel,
                                                    type='bar', color=f_colors, alpha=0.8,
                                                    ylabel='Fnd', secondary_y=False))
@@ -336,17 +343,18 @@ class ChartGenerator:
             plt.rcParams['xtick.color'] = '#787B86'
             plt.rcParams['ytick.color'] = '#787B86'
 
-            # Plot — Adaptive panel layout (Price 0, Vol 1, CVD 2, OI 3, Funding 4)
-            num_panels = 2 # Basic: Price + Vol
-            if cvd_df is not None: num_panels += 1
+            # Plot — Adaptive panel layout (Price 0, Vol 1, [CVD 2], [OI 2/3], [Funding 3/4])
+            # Use _cvd_added (not cvd_df is not None) — empty cvd_df must not reserve a panel
+            num_panels = 2  # Basic: Price + Vol
+            if _cvd_added: num_panels += 1
             if funding_df is not None:
                 num_panels += 2 if _has_oi else 1  # OI + Funding, or just Funding
 
-            p_ratios = [5, 1.2] # Price, Vol
-            if cvd_df is not None: p_ratios.append(1.8)
+            p_ratios = [5, 1.2]  # Price, Vol
+            if _cvd_added: p_ratios.append(1.8)   # CVD panel
             if funding_df is not None:
-                if _has_oi: p_ratios.append(1.5) # OI
-                p_ratios.append(0.6) # Funding Tape (Thin)
+                if _has_oi: p_ratios.append(1.5)  # OI
+                p_ratios.append(0.6)               # Funding Tape (Thin)
                 
             logger.debug(f"Calling mpf.plot with {len(apds)} addplots, {num_panels} panels, ratios {p_ratios}")
 
@@ -645,8 +653,9 @@ class ChartGenerator:
             chart_end = chart_df.index[-1]
             
             # Ensure both are timezone aware for subtraction
-            if ts1.tzinfo is None: ts1 = ts1.replace(tzinfo=pd.Timestamp.utcnow().tzinfo)
-            if ts2.tzinfo is None: ts2 = ts2.replace(tzinfo=pd.Timestamp.utcnow().tzinfo)
+            # pd.Timestamp.utcnow().tzinfo returns None in pandas 2.x → use tz_localize instead
+            if ts1.tzinfo is None: ts1 = ts1.tz_localize('UTC')
+            if ts2.tzinfo is None: ts2 = ts2.tz_localize('UTC')
             
             # Calculate slope in units of price per second
             dt = (ts2 - ts1).total_seconds()
@@ -687,7 +696,7 @@ class ChartGenerator:
             if timestamps.tz is None:
                 timestamps = timestamps.tz_localize('UTC')
             if ts1.tzinfo is None:
-                ts1 = ts1.replace(tzinfo=pd.Timestamp.utcnow().tzinfo)
+                ts1 = ts1.tz_localize('UTC')
             
             # Calculate Y for every point based on exact timestamp
             seconds_diff = (timestamps - ts1).total_seconds()

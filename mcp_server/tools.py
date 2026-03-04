@@ -278,23 +278,29 @@ class MCPTools:
                             'taker_sell_volume': 'whale_sell_vol'
                         }, inplace=True)
                         
-                        # Convert coin volume → USD using historical daily prices
+                        # Build daily price map once — shared for BOTH hist and recent scaling
+                        price_map = None
                         if df_1d is not None and not df_1d.empty:
-                            price_map = df_1d.copy()
-                            price_map['timestamp'] = pd.to_datetime(price_map['timestamp'], utc=True).dt.floor('D')
-                            price_map = price_map.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
-                            price_map = price_map[~price_map.index.duplicated(keep='last')]
+                            _pm = df_1d.copy()
+                            _pm['timestamp'] = pd.to_datetime(_pm['timestamp'], utc=True).dt.floor('D')
+                            _pm = _pm.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
+                            price_map = _pm[~_pm.index.duplicated(keep='last')]
+
+                        # Convert historical coin volume → USD using per-day price
+                        _fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
+                        if price_map is not None:
                             ts_col = pd.to_datetime(cvd_hist['timestamp'], utc=True).dt.floor('D')
                             # Use .values to avoid Series index mismatch during multiplication
-                            daily_prices = ts_col.map(price_map).ffill().bfill().fillna(float(df['close'].iloc[-1])).values
+                            daily_prices = ts_col.map(price_map).ffill().bfill().fillna(_fallback_px).values
                         else:
-                            daily_prices = float(df['close'].iloc[-1]) if not df.empty else 60000.0
-                        
+                            daily_prices = _fallback_px
+
                         cvd_hist['whale_buy_vol'] = cvd_hist['whale_buy_vol'] * daily_prices
                         cvd_hist['whale_sell_vol'] = cvd_hist['whale_sell_vol'] * daily_prices
                         cvd_hist['timestamp'] = pd.to_datetime(cvd_hist['timestamp'], utc=True)
                     else:
-                        cvd_hist = pd.DataFrame() # Ensure empty DF if concat failed
+                        price_map = None         # No historical data → price_map unavailable
+                        cvd_hist = pd.DataFrame()  # Ensure empty DF if concat failed
                     
                     # Merge with recent DB data
                     cvd_recent = db.get_cvd_data(symbol, limit=db_limit)
@@ -302,12 +308,20 @@ class MCPTools:
                         cvd_recent = cvd_recent.loc[:, ~cvd_recent.columns.duplicated()].reset_index(drop=True)
                         cvd_recent['timestamp'] = pd.to_datetime(cvd_recent['timestamp'], utc=True)
                         
-                        # [Fix] Convert recent DB coin volume → USD using latest price to match GCS scale
-                        current_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
-                        if 'whale_buy_vol' in cvd_recent.columns:
-                            cvd_recent['whale_buy_vol'] = cvd_recent['whale_buy_vol'] * current_px
-                        if 'whale_sell_vol' in cvd_recent.columns:
-                            cvd_recent['whale_sell_vol'] = cvd_recent['whale_sell_vol'] * current_px
+                        # Convert recent coin volume → USD using price_map for GCS-consistent scaling
+                        _fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
+                        if price_map is not None:
+                            ts_col_r = pd.to_datetime(cvd_recent['timestamp'], utc=True).dt.floor('D')
+                            recent_prices = ts_col_r.map(price_map).ffill().bfill().fillna(_fallback_px).values
+                            if 'whale_buy_vol' in cvd_recent.columns:
+                                cvd_recent['whale_buy_vol'] = cvd_recent['whale_buy_vol'] * recent_prices
+                            if 'whale_sell_vol' in cvd_recent.columns:
+                                cvd_recent['whale_sell_vol'] = cvd_recent['whale_sell_vol'] * recent_prices
+                        else:
+                            if 'whale_buy_vol' in cvd_recent.columns:
+                                cvd_recent['whale_buy_vol'] = cvd_recent['whale_buy_vol'] * _fallback_px
+                            if 'whale_sell_vol' in cvd_recent.columns:
+                                cvd_recent['whale_sell_vol'] = cvd_recent['whale_sell_vol'] * _fallback_px
                             
                         cvd_df = pd.concat([cvd_hist, cvd_recent], ignore_index=True) if not cvd_hist.empty else cvd_recent
                         cvd_df = cvd_df.loc[:, ~cvd_df.columns.duplicated()]\

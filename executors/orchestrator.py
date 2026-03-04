@@ -579,7 +579,15 @@ def node_generate_chart(state: AnalysisState) -> dict:
         # [NEW] Merge with GCS historical CVD for long-term charts
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
-            m_back = 6 if mode == TradingMode.SWING else 12
+            # Important: m_back MUST match the df_1w timescale (120 months) for POSITION,
+            # otherwise CVD will be NaN for older periods and plot as a flatline.
+            if mode == TradingMode.POSITION:
+                m_back = 120
+            elif mode == TradingMode.SWING:
+                m_back = 24
+            else:
+                m_back = 6
+                
             hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
             if not hist_cvd.empty:
                 hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
@@ -649,7 +657,13 @@ def node_generate_chart(state: AnalysisState) -> dict:
         # [NEW] Merge with GCS historical funding for long-term charts
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
-            m_back = 6 if mode == TradingMode.SWING else 12
+            if mode == TradingMode.POSITION:
+                m_back = 120
+            elif mode == TradingMode.SWING:
+                m_back = 24
+            else:
+                m_back = 6
+                
             hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
             if not hist_fnd.empty:
                 hist_fnd = hist_fnd.loc[:, ~hist_fnd.columns.duplicated()].reset_index(drop=True)
