@@ -63,6 +63,32 @@ def init_db():
         )
     ''')
 
+    # [NEW] Paper Trading Tables (V13.5 Support)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS paper_positions (
+            position_id    TEXT PRIMARY KEY,
+            exchange      TEXT NOT NULL,
+            symbol        TEXT NOT NULL,
+            side          TEXT NOT NULL,
+            size          REAL NOT NULL,
+            entry_price   REAL NOT NULL,
+            leverage      REAL DEFAULT 1.0,
+            is_open       INTEGER DEFAULT 1,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            tp_price      REAL DEFAULT 0.0,
+            sl_price      REAL DEFAULT 0.0
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS paper_wallets (
+            exchange      TEXT PRIMARY KEY,
+            balance       REAL NOT NULL,
+            updated_at    TEXT NOT NULL
+        )
+    ''')
+
     # Default configs
     cursor.execute(
         "INSERT OR IGNORE INTO system_config (key, value) VALUES ('enable_ai_analysis', 'true')"
@@ -74,6 +100,14 @@ def init_db():
     cursor.execute(
         "INSERT OR IGNORE INTO system_config (key, value) VALUES ('trading_mode', 'swing')"
     )
+
+    # [NEW] Initial Paper Balance (Seed data)
+    now = datetime.now(timezone.utc).isoformat()
+    cursor.execute(
+        "INSERT OR IGNORE INTO paper_wallets (exchange, balance, updated_at) VALUES ('binance', 100000.0, ?)",
+        (now,)
+    )
+
     conn.commit()
     conn.close()
 
