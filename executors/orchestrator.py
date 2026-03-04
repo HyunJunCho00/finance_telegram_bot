@@ -638,10 +638,8 @@ def node_generate_chart(state: AnalysisState) -> dict:
         logger.warning(f"Funding/OI data load for chart skipped/merged: {e}")
 
 
-    import concurrent.futures
-    with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(
-            chart_generator.generate_chart, 
+    try:
+        chart_bytes = chart_generator.generate_chart(
             df, market_data, symbol,
             mode=mode,
             timeframe=None,
@@ -651,7 +649,9 @@ def node_generate_chart(state: AnalysisState) -> dict:
             df_1d=df_1d,
             df_1w=df_1w
         )
-        chart_bytes = future.result()
+    except Exception as e:
+        logger.error(f'Chart generation FAILED: {e}')
+        chart_bytes = None
 
     if not chart_bytes:
         logger.warning(f"Chart generation FAILED for {symbol} ({mode.value})")
