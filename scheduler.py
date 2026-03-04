@@ -22,6 +22,9 @@ from executors.paper_exchange import paper_engine
 from loguru import logger
 import sys
 import threading
+from apscheduler.schedulers.background import BackgroundScheduler
+
+scheduler = BackgroundScheduler()
 
 
 def job_1min_tick():
@@ -292,6 +295,17 @@ def _build_analysis_trigger(mode: TradingMode):
         return CronTrigger(hour='0,8,16', minute=0)
 
 
+def reschedule_analysis_job(new_mode: str):
+    """Dynamically update the analysis job frequency when mode changes."""
+    try:
+        mode_enum = TradingMode(new_mode.lower())
+        new_trigger = _build_analysis_trigger(mode_enum)
+        scheduler.reschedule_job('job_analysis', trigger=new_trigger)
+        logger.success(f"Analysis job rescheduled for {new_mode.upper()} mode triggers.")
+    except Exception as e:
+        logger.error(f"Failed to reschedule analysis job: {e}")
+
+
 def main():
     mode = settings.trading_mode
     interval = settings.analysis_interval_hours
@@ -318,7 +332,7 @@ def main():
     except Exception as e:
         logger.warning(f"WebSocket collector unavailable: {e}")
 
-    # [FIX MEDIUM-18] WebSocket thread health check
+    # [FIX] WebSocket thread health check — every 5 minutes
     def job_5m_ws_health_check():
         try:
             from collectors.websocket_collector import websocket_collector
@@ -329,8 +343,13 @@ def main():
         except Exception as e:
             logger.error(f"WS health check error: {e}")
 
-    # Use BackgroundScheduler so we can also run the Telegram bot
-    scheduler = BackgroundScheduler()
+    scheduler.add_job(
+        job_5m_ws_health_check,
+        'interval',
+        minutes=5,
+        id='job_5m_ws_health',
+        max_instances=1
+    )
 
     # 1-minute tick: price, funding, microstructure, volatility
     scheduler.add_job(

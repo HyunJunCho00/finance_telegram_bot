@@ -377,10 +377,18 @@ class TradingBot:
             await update.message.reply_text("Invalid. Use: /mode swing | position")
             return
 
-        # [FIX] SQLite DB에도 함께 저장 → 재시작 후에도 mode가 유지됨
+        # [FIX] SQLite DB + 환경변수 + 필드 싱글톤 모두 업데이트
         from config.local_state import state_manager
         state_manager.set_trading_mode(new_mode)
         os.environ['TRADING_MODE'] = new_mode
+        settings.TRADING_MODE = new_mode  # [NEW] 메모리 싱글톤 즉시 업데이트
+
+        # [NEW] 스케줄러 주기 즉시 재설정
+        try:
+            from scheduler import reschedule_analysis_job
+            reschedule_analysis_job(new_mode)
+        except Exception as e:
+            logger.error(f"Failed to reschedule analysis: {e}")
 
         await update.message.reply_text(
             f"Mode switched to {new_mode.upper()}\n"
@@ -574,7 +582,11 @@ class TradingBot:
                     "chart_enabled": settings.should_use_chart,
                     "analysis_interval_hours": settings.analysis_interval_hours,
                 },
-                "switch_trading_mode":       lambda a: mcp_tools.switch_mode(a["mode"]),
+                "switch_trading_mode":       lambda a: (
+                    mcp_tools.switch_mode(a["mode"]),
+                    (settings.__setattr__('TRADING_MODE', a["mode"].lower()), 
+                     __import__('scheduler').reschedule_analysis_job(a["mode"].lower()))[1]
+                )[0],
                 "toggle_ai_analysis":        lambda a: (state_manager.set_analysis_enabled(a["enabled"]), {"status": f"AI 분석 {'활성화' if a['enabled'] else '비활성화'} 완료"})[1],
                 "get_feedback_history":      lambda a: mcp_tools.get_feedback_history(a.get("limit", 5)),
                 "query_knowledge_graph":     lambda a: mcp_tools.query_rag(a["query"], mode=a.get("mode", "hybrid")),

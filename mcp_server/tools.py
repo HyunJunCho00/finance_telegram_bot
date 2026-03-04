@@ -453,12 +453,21 @@ class MCPTools:
             if mode_lower not in ('swing', 'position'):
                 return {"error": f"Invalid mode '{mode}'. Use 'swing', or 'position'."}
 
-            # [FIX] DB 저장으로 재시작 후에도 mode 유지
+            # [FIX] SQLite DB + 환경변수 + 필드 싱글톤 모두 업데이트
             from config.local_state import state_manager
             state_manager.set_trading_mode(mode_lower)
             os.environ['TRADING_MODE'] = mode_lower
             
+            # [NEW] 메모리 싱글톤 즉시 업데이트
             settings = get_settings()
+            settings.TRADING_MODE = mode_lower
+
+            # [NEW] 스케줄러 주기 즉시 재설정
+            try:
+                from scheduler import reschedule_analysis_job
+                reschedule_analysis_job(mode_lower)
+            except Exception as e:
+                logger.error(f"Failed to reschedule analysis via tool: {e}")
 
             mode_cfg = {
                 "swing": {"candle_limit": settings.SWING_CANDLE_LIMIT, "chart_for_vlm": settings.USE_CHART_IMAGES},
