@@ -260,21 +260,16 @@ class MCPTools:
                     db_limit = 45000
 
                     # ── 1. CVD ──
-                    # Load historical months from GCS cache (past months only, always skips current)
-                    cvd_hist_dfs = []
-                    now_utc = pd.Timestamp.now(tz='UTC')
-                    current_month_str = now_utc.strftime("%Y-%m")
-                    for m in range(1, m_back_timeseries + 1):  # start from 1 to SKIP current month
-                        month_str = (now_utc - pd.DateOffset(months=m)).strftime("%Y-%m")
-                        path = f"cvd/{symbol}/{month_str}.parquet"
-                        df_part = gcs_parquet_store._download_parquet(path)
-                        if df_part is not None:
-                            cvd_hist_dfs.append(df_part)
-                    
-                    cvd_hist = pd.concat(cvd_hist_dfs, ignore_index=True) if cvd_hist_dfs else pd.DataFrame()
+                    # [UPGRADE] Use specialized loaders for cleaner code
+                    cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back_timeseries)
                     
                     if not cvd_hist.empty:
-                        # [V14.6] Robustness: Remove duplicate columns and reset index before processing
+                        # Skip data from current month that might overlap with DB
+                        now_utc = pd.Timestamp.now(tz='UTC')
+                        cvd_hist['timestamp'] = pd.to_datetime(cvd_hist['timestamp'], utc=True)
+                        cvd_hist = cvd_hist[cvd_hist['timestamp'] < now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)].copy()
+
+                        # [V14.6] Robustness: Remove duplicate columns and standardize nomenclature
                         cvd_hist = cvd_hist.loc[:, ~cvd_hist.columns.duplicated()].reset_index(drop=True)
                         cvd_hist.rename(columns={
                             'taker_buy_volume': 'whale_buy_vol',
@@ -289,21 +284,28 @@ class MCPTools:
                             _pm = _pm.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
                             price_map = _pm[~_pm.index.duplicated(keep='last')]
 
-                        # Convert historical coin volume → USD using per-day price
-                        _fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
-                        if price_map is not None:
-                            ts_col = pd.to_datetime(cvd_hist['timestamp'], utc=True).dt.floor('D')
-                            # Use .values to avoid Series index mismatch during multiplication
-                            daily_prices = ts_col.map(price_map).ffill().bfill().fillna(_fallback_px).values
-                        else:
-                            daily_prices = _fallback_px
+                        # Determine if data is in COIN vs USD units before scaling
+                        is_coin_units = cvd_hist['whale_buy_vol'].mean() < 1000
+                        
+                        if is_coin_units:
+                            # Convert historical coin volume → USD using EXACT historical prices for each day
+                            # If price_map (from GCS OHLCV) is available, use it.
+                            _fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
+                            ts_col = cvd_hist['timestamp'].dt.floor('D')
+                            
+                            if price_map is not None:
+                                # Match each CVD row to its specific historical day's price
+                                daily_prices = ts_col.map(price_map).ffill().bfill().fillna(_fallback_px).values
+                            else:
+                                daily_prices = _fallback_px
 
-                        cvd_hist['whale_buy_vol'] = cvd_hist['whale_buy_vol'] * daily_prices
-                        cvd_hist['whale_sell_vol'] = cvd_hist['whale_sell_vol'] * daily_prices
+                            cvd_hist['whale_buy_vol'] = cvd_hist['whale_buy_vol'] * daily_prices
+                            cvd_hist['whale_sell_vol'] = cvd_hist['whale_sell_vol'] * daily_prices
+                        
                         cvd_hist['timestamp'] = pd.to_datetime(cvd_hist['timestamp'], utc=True)
                     else:
-                        price_map = None         # No historical data → price_map unavailable
-                        cvd_hist = pd.DataFrame()  # Ensure empty DF if concat failed
+                        price_map = None
+                        cvd_hist = pd.DataFrame()
                     
                     # Merge with recent DB data
                     cvd_recent = db.get_cvd_data(symbol, limit=db_limit)

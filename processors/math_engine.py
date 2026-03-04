@@ -36,7 +36,6 @@ class MathEngine:
 
     Supports two modes:
     - SWING: Weekly/Daily/4H focus with Fibonacci, OI divergence, funding extremes
-    - SCALP: 5m/15m/1H focus with VWAP, order flow proxies, Keltner channels
     """
 
     def __init__(self):
