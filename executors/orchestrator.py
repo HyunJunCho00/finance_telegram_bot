@@ -26,6 +26,7 @@ from config.settings import settings, TradingMode
 from processors.math_engine import math_engine
 from processors.chart_generator import chart_generator
 from processors.light_rag import light_rag
+from processors.cvd_normalizer import build_price_timeline, merge_cvd_sources, normalize_cvd_to_usd
 from collectors.perplexity_collector import perplexity_collector
 from collectors.macro_collector import macro_collector
 from agents.liquidity_agent import liquidity_agent
@@ -139,12 +140,12 @@ def node_collect_data(state: AnalysisState) -> dict:
     try:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
-            # Provide VLM with more context (18 months for broad macro trends)
+            m_back = settings.history_lookback_months
             if mode == TradingMode.SWING:
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=18)
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
             elif mode == TradingMode.POSITION:
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=24)
-                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
+                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
     except Exception as e:
         logger.warning(f"GCS load skipped: {e}")
 
@@ -553,12 +554,12 @@ def node_generate_chart(state: AnalysisState) -> dict:
     try:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
-            # Provide VLM with more context (18 months for broad macro trends)
+            m_back = settings.history_lookback_months
             if mode == TradingMode.SWING:
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=18)
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
             elif mode == TradingMode.POSITION:
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=24)
-                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
+                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
     except Exception as e:
         logger.warning(f"GCS load for chart skipped: {e}")
 
@@ -579,78 +580,16 @@ def node_generate_chart(state: AnalysisState) -> dict:
         # [NEW] Merge with GCS historical CVD for long-term charts
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
-            # Important: m_back MUST match the df_1w timescale (120 months) for POSITION,
-            # otherwise CVD will be NaN for older periods and plot as a flatline.
-            if mode == TradingMode.POSITION:
-                m_back = 120
-            elif mode == TradingMode.SWING:
-                m_back = 24
-            else:
-                m_back = 6
-                
+            m_back = settings.history_lookback_months
             hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
             if not hist_cvd.empty:
-                hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-                since_cvd = hist_cvd['timestamp'].max()
-                bridge_cvd = db.get_cvd_data(symbol, limit=50000, since=since_cvd)
-                
-                dfs = [hist_cvd]
-                if not bridge_cvd.empty: 
-                    bridge_cvd = bridge_cvd.loc[:, ~bridge_cvd.columns.duplicated()].reset_index(drop=True)
-                    dfs.append(bridge_cvd)
-                if cvd_df is not None and not cvd_df.empty: 
-                    cvd_df = cvd_df.loc[:, ~cvd_df.columns.duplicated()].reset_index(drop=True)
-                    dfs.append(cvd_df)
-                
-                merged_cvd = pd.concat(dfs).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-                merged_cvd = merged_cvd.loc[:, ~merged_cvd.columns.duplicated()].reset_index(drop=True)
-                
-                # Unify columns: ALWAYS use 'taker_buy_volume' to calculate continuous CVD in USD.
-                # Live DB (bridge_cvd) has 'taker_buy_volume' (COIN), GCS (hist_cvd) has 'taker_buy_volume' (COIN).
-                cols_to_drop = [c for c in ['whale_buy_vol', 'whale_sell_vol', 'whale_delta', 'whale_cvd'] if c in merged_cvd.columns]
-                if cols_to_drop:
-                    merged_cvd = merged_cvd.drop(columns=cols_to_drop)
-                    
-                merged_cvd = merged_cvd.rename(columns={
-                    'taker_buy_volume': 'whale_buy_vol',
-                    'taker_sell_volume': 'whale_sell_vol'
-                })
-                
-                # [FIX] Setup Unified Prices to scale COIN into USD uniformly.
-                # Prioritize high-resolution 1m data (df) for recent history, 
-                # falling back to 1D daily closes for deep history.
-                price_dfs = []
-                if df_1d is not None and not df_1d.empty:
-                    d_hist = df_1d[['timestamp', 'close']].copy()
-                    d_hist['timestamp'] = pd.to_datetime(d_hist['timestamp'].astype(str), format='mixed', utc=True, errors='coerce')
-                    price_dfs.append(d_hist.dropna())
-                if df is not None and not df.empty:
-                    d_live = df[['timestamp', 'close']].copy()
-                    d_live['timestamp'] = pd.to_datetime(d_live['timestamp'].astype(str), format='mixed', utc=True, errors='coerce')
-                    price_dfs.append(d_live.dropna())
-                
-                if price_dfs:
-                    unified_prices = pd.concat(price_dfs).drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
-                    merged_cvd['timestamp'] = pd.to_datetime(merged_cvd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce')
-                    
-                    # [FIX] Sort in-place so indexing matches exactly with cvd_priced return array
-                    merged_cvd = merged_cvd.sort_values('timestamp').reset_index(drop=True)
-                    
-                    cvd_priced = pd.merge_asof(
-                        merged_cvd, 
-                        unified_prices, 
-                        on='timestamp', 
-                        direction='backward'
-                    )
-                    
-                    fill_prices = cvd_priced['close'].bfill()
-                else:
-                    fill_prices = pd.Series(60000, index=merged_cvd.index)
-                    
-                merged_cvd['whale_buy_vol'] = merged_cvd['whale_buy_vol'].fillna(0) * fill_prices
-                merged_cvd['whale_sell_vol'] = merged_cvd['whale_sell_vol'].fillna(0) * fill_prices
-                
-                cvd_df = merged_cvd
+                hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'], utc=True, errors='coerce')
+            since_cvd = hist_cvd['timestamp'].max() if not hist_cvd.empty else None
+            bridge_cvd = db.get_cvd_data(symbol, limit=50000, since=since_cvd) if since_cvd is not None else pd.DataFrame()
+            merged_cvd = merge_cvd_sources(hist_cvd, bridge_cvd, cvd_df)
+            fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
+            price_timeline = build_price_timeline(df_1m=df, df_1d=df_1d, fallback_price=fallback_px)
+            cvd_df = normalize_cvd_to_usd(merged_cvd, price_timeline, fallback_price=fallback_px)
     except Exception as e:
         logger.warning(f"CVD data load for chart skipped/merged: {e}")
 
@@ -676,13 +615,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
         # [NEW] Merge with GCS historical funding for long-term charts
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
-            if mode == TradingMode.POSITION:
-                m_back = 120
-            elif mode == TradingMode.SWING:
-                m_back = 24
-            else:
-                m_back = 6
-                
+            m_back = settings.history_lookback_months
             hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
             if not hist_fnd.empty:
                 hist_fnd = hist_fnd.loc[:, ~hist_fnd.columns.duplicated()].reset_index(drop=True)

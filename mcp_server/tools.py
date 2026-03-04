@@ -4,6 +4,7 @@ from config.settings import get_settings, TradingMode
 from processors.math_engine import math_engine
 from processors.chart_generator import chart_generator
 from processors.gcs_parquet import gcs_parquet_store
+from processors.cvd_normalizer import build_price_timeline, merge_cvd_sources, normalize_cvd_to_usd
 from loguru import logger
 import os
 import json
@@ -30,8 +31,7 @@ class MCPTools:
 
             if gcs_parquet_store.enabled:
                 try:
-                    # Fixed lookback: SWING=12 months, POSITION=60 months (5 years)
-                    m_back = 60 if mode == TradingMode.POSITION else 12
+                    m_back = settings.history_lookback_months
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
                     if mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
@@ -248,8 +248,7 @@ class MCPTools:
             
             if gcs_parquet_store.enabled:
                 try:
-                    # Fixed lookback: SWING=12 months, POSITION=60 months (5 years)
-                    m_back = 60 if mode == TradingMode.POSITION else 12
+                    m_back = settings.history_lookback_months
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
                     if timeframe and timeframe.lower() in ('1w', 'w') or mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
@@ -260,102 +259,21 @@ class MCPTools:
                     db_limit = 45000
 
                     # ── 1. CVD ──
-                    # [UPGRADE] Use specialized loaders for cleaner code
+                    now_utc = pd.Timestamp.now(tz='UTC')
                     cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back_timeseries)
-                    
                     if not cvd_hist.empty:
-                        # Skip data from current month that might overlap with DB
-                        now_utc = pd.Timestamp.now(tz='UTC')
-                        cvd_hist['timestamp'] = pd.to_datetime(cvd_hist['timestamp'], utc=True)
-                        cvd_hist = cvd_hist[cvd_hist['timestamp'] < now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)].copy()
+                        cvd_hist['timestamp'] = pd.to_datetime(cvd_hist['timestamp'], utc=True, errors='coerce')
+                        month_start = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                        cvd_hist = cvd_hist[cvd_hist['timestamp'] < month_start].copy()
 
-                        # [V14.6] Robustness: Remove duplicate columns and standardize nomenclature
-                        cvd_hist = cvd_hist.loc[:, ~cvd_hist.columns.duplicated()].reset_index(drop=True)
-                        cvd_hist.rename(columns={
-                            'taker_buy_volume': 'whale_buy_vol',
-                            'taker_sell_volume': 'whale_sell_vol'
-                        }, inplace=True)
-                        
-                        # Build daily price map once — shared for BOTH hist and recent scaling
-                        price_map = None
-                        if df_1d is not None and not df_1d.empty:
-                            _pm = df_1d.copy()
-                            _pm['timestamp'] = pd.to_datetime(_pm['timestamp'], utc=True).dt.floor('D')
-                            _pm = _pm.drop_duplicates(subset='timestamp').set_index('timestamp')['close']
-                            price_map = _pm[~_pm.index.duplicated(keep='last')]
-
-                        # Determine if data is in COIN vs USD units before scaling
-                        is_coin_units = cvd_hist['whale_buy_vol'].mean() < 1000
-                        
-                        if is_coin_units:
-                            # Convert historical coin volume → USD using EXACT historical prices for each day
-                            # If price_map (from GCS OHLCV) is available, use it.
-                            _fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
-                            ts_col = cvd_hist['timestamp'].dt.floor('D')
-                            
-                            if price_map is not None:
-                                # Match each CVD row to its specific historical day's price
-                                daily_prices = ts_col.map(price_map).ffill().bfill().fillna(_fallback_px).values
-                            else:
-                                daily_prices = _fallback_px
-
-                            cvd_hist['whale_buy_vol'] = cvd_hist['whale_buy_vol'] * daily_prices
-                            cvd_hist['whale_sell_vol'] = cvd_hist['whale_sell_vol'] * daily_prices
-                        
-                        cvd_hist['timestamp'] = pd.to_datetime(cvd_hist['timestamp'], utc=True)
-                    else:
-                        price_map = None
-                        cvd_hist = pd.DataFrame()
-                    
-                    # Merge with recent DB data
+                    since_cvd = cvd_hist['timestamp'].max() if not cvd_hist.empty else None
+                    bridge_cvd = db.get_cvd_data(symbol, limit=db_limit, since=since_cvd) if since_cvd is not None else pd.DataFrame()
                     cvd_recent = db.get_cvd_data(symbol, limit=db_limit)
-                    if not cvd_recent.empty:
-                        cvd_recent = cvd_recent.loc[:, ~cvd_recent.columns.duplicated()].reset_index(drop=True)
-                        cvd_recent['timestamp'] = pd.to_datetime(cvd_recent['timestamp'], utc=True)
-                        
-                        # Convert recent coin volume → USD using per-MINUTE prices from df (1m OHLCV).
-                        # df already holds ~31 days of 1m candles (limit=45000), so per-minute
-                        # price lookup is exact — no intraday approximation error unlike daily close.
-                        _fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
+                    merged_cvd = merge_cvd_sources(cvd_hist, bridge_cvd, cvd_recent)
 
-                        if not df.empty:
-                            # Build per-minute price map: timestamp floored to minute → 1m close
-                            _df_min = df.copy()
-                            _df_min['timestamp'] = pd.to_datetime(_df_min['timestamp'], utc=True).dt.floor('min')
-                            _df_min = (_df_min
-                                       .drop_duplicates(subset='timestamp')
-                                       .set_index('timestamp')['close']
-                                       .sort_index())
-
-                            ts_col_r = pd.to_datetime(cvd_recent['timestamp'], utc=True).dt.floor('min')
-                            recent_prices = ts_col_r.map(_df_min)
-
-                            # Fill any gaps (bot restarts / sparse periods) with daily price_map
-                            if recent_prices.isna().any() and price_map is not None:
-                                daily_fill = ts_col_r.dt.floor('D').map(price_map)
-                                recent_prices = recent_prices.fillna(daily_fill)
-
-                            recent_prices = recent_prices.fillna(_fallback_px).values
-                        elif price_map is not None:
-                            # df unavailable → fall back to daily price_map
-                            ts_col_r = pd.to_datetime(cvd_recent['timestamp'], utc=True).dt.floor('D')
-                            recent_prices = ts_col_r.map(price_map).ffill().bfill().fillna(_fallback_px).values
-                        else:
-                            recent_prices = _fallback_px
-
-                        if 'whale_buy_vol' in cvd_recent.columns:
-                            cvd_recent['whale_buy_vol'] = cvd_recent['whale_buy_vol'] * recent_prices
-                        if 'whale_sell_vol' in cvd_recent.columns:
-                            cvd_recent['whale_sell_vol'] = cvd_recent['whale_sell_vol'] * recent_prices
-                            
-                        cvd_df = pd.concat([cvd_hist, cvd_recent], ignore_index=True) if not cvd_hist.empty else cvd_recent
-                        cvd_df = cvd_df.loc[:, ~cvd_df.columns.duplicated()]\
-                                       .drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-                        cvd_df = cvd_df.reset_index(drop=True)
-                    else:
-                        cvd_df = cvd_hist
-                    
-                    earliest_hist = cvd_df['timestamp'].min() if not cvd_df.empty else None
+                    fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
+                    price_timeline = build_price_timeline(df_1m=df, df_1d=df_1d, fallback_price=fallback_px)
+                    cvd_df = normalize_cvd_to_usd(merged_cvd, price_timeline, fallback_price=fallback_px)
                     
                     # ── 2. Funding / OI ──
                     fnd_hist_dfs = []

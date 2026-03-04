@@ -197,6 +197,12 @@ class Settings(BaseSettings):
     SWING_INTERVAL_HOURS: int = 8
     POSITION_INTERVAL_HOURS: int = 24
 
+    # ===== Historical Window per Mode (for chart/context loading from GCS) =====
+    # SWING: 12 months
+    # POSITION: 60 months (5 years)
+    SWING_HISTORY_MONTHS: int = 12
+    POSITION_HISTORY_MONTHS: int = 60
+
     # ===== Data Retention (days) =====
     # PostgreSQL(Supabase): 시계열 데이터만 보존 (30일)
     # Neo4j/Milvus: 뉴스/그래프 데이터 영구 보존 (cleanup 없음)
@@ -268,6 +274,14 @@ class Settings(BaseSettings):
         if mode == TradingMode.POSITION:
             return ["4h", "1d", "1w"]
         return ["1h", "4h", "1d"]
+
+    @property
+    def history_lookback_months(self) -> int:
+        """Mode-specific historical lookback window (months)."""
+        mode = self.trading_mode
+        if mode == TradingMode.POSITION:
+            return self.POSITION_HISTORY_MONTHS
+        return self.SWING_HISTORY_MONTHS
 
     @property
     def trading_symbols(self) -> List[str]:
