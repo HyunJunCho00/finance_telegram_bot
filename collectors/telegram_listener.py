@@ -276,29 +276,48 @@ class TelegramListener:
         logger.info("Unified Telegram Agent (V13.2) started.")
 
         # 1. Historical Backfill (Resume from where we left off)
-        asyncio.create_task(self.run_backfill(hours=1))
+        # Use a wider startup window to reduce cold-restart blind spots
+        # for channels with no prior checkpoint in DB.
+        asyncio.create_task(self.run_backfill(hours=24))
 
         # 2. Start Micro-batch loop
         asyncio.create_task(self._batch_processor_loop())
         
         await self.client.run_until_disconnected()
 
-    async def run_backfill(self, hours: int = 1):
+    async def run_backfill(self, hours: int = 24):
         """Pull missed messages since last run."""
         logger.info(f"Starting historical backfill (last {hours}h)...")
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
         for channel_name, username in self.channels.items():
-            try:
-                entity = await self.client.get_entity(username)
-                min_id = self._get_max_id(channel_name)
-                
-                async for message in self.client.iter_messages(entity, limit=100, min_id=min_id):
-                    if message.date.replace(tzinfo=timezone.utc) < cutoff_time and min_id == 0:
-                        break
-                    await self._process_single_message(message, channel_name)
-            except Exception as e:
-                logger.error(f"Backfill error for {channel_name}: {e}")
+            while True:
+                try:
+                    entity = await self.client.get_entity(username)
+                    min_id = self._get_max_id(channel_name)
+                    fetched = 0
+
+                    # IMPORTANT: do not cap with a small limit when min_id exists.
+                    # We must drain all message_id > min_id to avoid restart gaps.
+                    async for message in self.client.iter_messages(
+                        entity,
+                        limit=None,
+                        min_id=min_id,
+                        wait_time=1,
+                    ):
+                        if min_id == 0 and message.date.replace(tzinfo=timezone.utc) < cutoff_time:
+                            break
+                        await self._process_single_message(message, channel_name)
+                        fetched += 1
+                    logger.info(f"Backfill [{channel_name}] completed ({fetched} messages).")
+                    break
+                except FloodWaitError as e:
+                    wait = int(getattr(e, "seconds", 0) or 0) + 5
+                    logger.warning(f"Backfill FloodWait for {channel_name}: sleeping {wait}s")
+                    await asyncio.sleep(wait)
+                except Exception as e:
+                    logger.error(f"Backfill error for {channel_name}: {e}")
+                    break
         logger.info("Backfill completed.")
 
     def _get_max_id(self, channel: str) -> int:

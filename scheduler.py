@@ -475,11 +475,22 @@ def main():
 
     # [FIX Cold Start] Run initial data collection immediately so first analysis has data
     logger.info("Running initial data collection (cold start bootstrap)...")
+    def _startup_telegram_catchup():
+        from collectors.telegram_collector import telegram_collector
+        from processors.telegram_batcher import telegram_batcher
+
+        # Gap recovery:
+        # - collector: resume by message_id for all missed raw messages
+        # - batcher: ingest recent backlog so restart does not leave an analysis blind window
+        telegram_collector.run(hours=24)
+        telegram_batcher.process_and_ingest(lookback_hours=24)
+
     _initial_collectors = [
         ("Price + Funding + Microstructure", lambda: (collector.run(), funding_collector.run(), microstructure_collector.run())),
         ("Volatility", lambda: volatility_monitor.run()),
         ("Deribit", lambda: deribit_collector.run()),
         ("Fear & Greed", lambda: fear_greed_collector.run()),
+        ("Telegram catch-up (24h)", _startup_telegram_catchup),
     ]
     for name, fn in _initial_collectors:
         try:

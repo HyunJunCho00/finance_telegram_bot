@@ -191,6 +191,8 @@ class TelegramCollector:
         # This prevents Telegram session errors from crashing the entire process.
         self._client = None
         self._init_failed = False
+        self._last_init_failed_at: Optional[datetime] = None
+        self._reinit_cooldown_seconds = 300
 
         self.channels = {
             # 기존 채널 및 크립토 주요 채널
@@ -216,8 +218,14 @@ class TelegramCollector:
 
     @property
     def client(self):
-        """Lazy-init Telethon client. If init failed before, skip to avoid repeated errors."""
-        if self._client is None and not self._init_failed:
+        """Lazy-init Telethon client with cooldown-based retry after failures."""
+        if self._client is None:
+            if self._init_failed and self._last_init_failed_at is not None:
+                elapsed = (datetime.now(timezone.utc) - self._last_init_failed_at).total_seconds()
+                if elapsed < self._reinit_cooldown_seconds:
+                    return None
+                logger.warning("Retrying Telethon client init after cooldown.")
+                self._init_failed = False
             try:
                 from telethon import TelegramClient
                 _ensure_session_security()
@@ -229,6 +237,7 @@ class TelegramCollector:
                 logger.info("Telethon client initialized successfully")
             except Exception as e:
                 self._init_failed = True
+                self._last_init_failed_at = datetime.now(timezone.utc)
                 logger.error(f"Telethon client init failed (will skip Telegram collection): {e}")
         return self._client
 
@@ -469,6 +478,7 @@ Now analyze the provided chart:"""
         except Exception as e:
             logger.error(f"Telegram session error: {e}")
             self._init_failed = True
+            self._last_init_failed_at = datetime.now(timezone.utc)
             self._client = None
 
         return messages
@@ -514,14 +524,11 @@ Now analyze the provided chart:"""
         except Exception as e:
             logger.error(f"Database save error: {e}")
 
-    async def run_async(self, hours: int = 4) -> None:
+    async def run_async(self, hours: Optional[int] = 4) -> None:
         messages = await self.fetch_recent_messages(hours)
         self.save_to_database(messages)
 
-    def run(self, hours: int = 4) -> None:
-        if self._init_failed:
-            logger.debug("Telegram collection skipped (previous init failure)")
-            return
+    def run(self, hours: Optional[int] = 4) -> None:
         try:
             import asyncio
             asyncio.run(self.run_async(hours))

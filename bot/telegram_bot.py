@@ -533,7 +533,6 @@ class TradingBot:
                 if report:
                     from executors.report_generator import report_generator
                     # Determine mode - default to current settings if not found
-                    settings = get_settings()
                     mode = settings.trading_mode 
                     if "POSITION" in report.get('final_decision', ''):
                         mode = TradingMode.POSITION
@@ -594,7 +593,7 @@ class TradingBot:
                     (settings.__setattr__('TRADING_MODE', a["mode"].lower()), 
                      __import__('config', fromlist=['scheduler_config']).scheduler_config.reschedule_analysis_job(a["mode"].lower()))[1]
                 )[0],
-                "toggle_ai_analysis":        lambda a: (state_manager.set_analysis_enabled(a["enabled"]), {"status": f"AI 분석 {'활성화' if a['enabled'] else '비활성화'} 완료"})[1],
+                "toggle_ai_analysis":        lambda a: (__import__('config.local_state', fromlist=['state_manager']).state_manager.set_analysis_enabled(a["enabled"]), {"status": f"AI 분석 {'활성화' if a['enabled'] else '비활성화'} 완료"})[1],
                 "get_feedback_history":      lambda a: _get_mcp_tools().get_feedback_history(a.get("limit", 5)),
                 "query_knowledge_graph":     lambda a: _get_mcp_tools().query_rag(a["query"], mode=a.get("mode", "hybrid")),
                 "search_narrative":          lambda a: _get_mcp_tools().search_market_narrative(a["symbol"]),
@@ -646,7 +645,7 @@ class TradingBot:
             for _ in range(5):  # 최대 5회 agentic 루프
                 response = await asyncio.to_thread(
                     gemini.models.generate_content,
-                    model=get_settings().MODEL_CHAT,
+                    model=settings.MODEL_CHAT,
                     contents=contents,
                     config=config,
                 )
