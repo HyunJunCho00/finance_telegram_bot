@@ -1318,14 +1318,34 @@ CRITICAL RULES:
         return None
 
     def _repair_json(self, text: str) -> str:
-        """Helper to repair common LLM JSON errors like missing commas between objects."""
+        """Helper to repair common LLM JSON errors like missing commas or truncation."""
         if not text:
             return ""
-        # 1. Fix missing commas between objects: } {  ->  }, {
+        
+        # 1. Fix missing commas between objects/arrays: } { -> }, {  or ] [ -> ], [
         text = re.sub(r'}\s*{', '}, {', text)
-        # 2. Fix trailing commas before closing brackets: , ]  ->  ]  or , }  ->  }
+        text = re.sub(r']\s*\[', '], [', text)
+        
+        # 2. Fix trailing commas before closing brackets: , ] -> ] or , } -> }
         text = re.sub(r',\s*]', ']', text)
         text = re.sub(r',\s*}', '}', text)
+        
+        # 3. Handle truncation - close unclosed brackets/braces
+        # count from start to find net depth
+        open_braces = text.count('{') - text.count('}')
+        open_brackets = text.count('[') - text.count(']')
+        
+        if open_brackets > 0:
+            # Check if we ended mid-object and need to close that first
+            if open_braces > 0:
+                text = text.rstrip(',') + '}' * open_braces
+            text = text.rstrip(',') + ']' * open_brackets
+            # Re-count root brace if we closed nested ones
+            open_braces = text.count('{') - text.count('}')
+        
+        if open_braces > 0:
+            text = text.rstrip(',') + '}' * open_braces
+            
         return text.strip()
 
     def _extract_with_llm(self, text: str) -> Dict:
@@ -1344,7 +1364,7 @@ CRITICAL RULES:
                 system_prompt="You are a knowledge graph extraction engine. Return only valid JSON.",
                 user_message=prompt,
                 temperature=0.1,
-                max_tokens=800,
+                max_tokens=1500,
                 use_premium=False,  # cost-efficient model for extraction
                 role="rag_extraction",
             )
