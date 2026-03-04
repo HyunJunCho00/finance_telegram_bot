@@ -32,6 +32,7 @@ from loguru import logger
 import json
 import os
 from pathlib import Path
+from config.settings import settings
 
 # [FIX HIGH-11] Persistent path for ingested IDs cache
 _BASE_DIR = Path(__file__).parent.parent
