@@ -253,7 +253,7 @@ class MCPTools:
                     if timeframe and timeframe.lower() in ('1w', 'w') or mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
 
-                    m_back_timeseries = m_back
+                    m_back_timeseries = min(m_back, 1)  # [FIX] Limit to 1 month to prevent OOM in app_bot
 
                     # Bridge GCS gap: 45,000 rows covers ~31 days of 1m data
                     db_limit = 45000

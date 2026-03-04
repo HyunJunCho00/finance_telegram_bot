@@ -581,7 +581,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
             m_back = settings.history_lookback_months
-            hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
+            hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=min(m_back, 1))
             if not hist_cvd.empty:
                 hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'], utc=True, errors='coerce')
             since_cvd = hist_cvd['timestamp'].max() if not hist_cvd.empty else None
@@ -616,7 +616,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
             m_back = settings.history_lookback_months
-            hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
+            hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=min(m_back, 1))
             if not hist_fnd.empty:
                 hist_fnd = hist_fnd.loc[:, ~hist_fnd.columns.duplicated()].reset_index(drop=True)
                 # [FIX CRITICAL] Map historical columns to live schema for chart_generator
@@ -1110,9 +1110,6 @@ class Orchestrator:
     def run_scheduled_analysis(self) -> None:
         logger.info(f"Running scheduled analysis (mode={self.mode.value})")
 
-        # Collect telegram messages first
-        telegram_collector.run(hours=4)
-
         for symbol in self.symbols:
             try:
                 self.run_analysis(symbol, is_emergency=False)
@@ -1122,7 +1119,6 @@ class Orchestrator:
 
     def run_emergency_analysis(self, symbol: str) -> None:
         logger.critical(f"Running EMERGENCY analysis for {symbol} (mode={self.mode.value})")
-        telegram_collector.run(hours=1)
         self.run_analysis(symbol, is_emergency=True)
 
 
