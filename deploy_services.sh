@@ -20,7 +20,6 @@ Group=$GROUP
 WorkingDirectory=$APP_DIR
 Environment="PATH=$VENV_DIR/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="USE_SECRET_MANAGER=true"
-Environment="PROJECT_ID=finance-telegram-bot-452101"
 ExecStart=$VENV_DIR/bin/python $APP_DIR/app_collector.py
 Restart=always
 RestartSec=10
@@ -41,7 +40,6 @@ Group=$GROUP
 WorkingDirectory=$APP_DIR
 Environment="PATH=$VENV_DIR/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="USE_SECRET_MANAGER=true"
-Environment="PROJECT_ID=finance-telegram-bot-452101"
 ExecStart=$VENV_DIR/bin/python $APP_DIR/app_trading.py
 Restart=always
 RestartSec=10
@@ -62,7 +60,6 @@ Group=$GROUP
 WorkingDirectory=$APP_DIR
 Environment="PATH=$VENV_DIR/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 Environment="USE_SECRET_MANAGER=true"
-Environment="PROJECT_ID=finance-telegram-bot-452101"
 ExecStart=$VENV_DIR/bin/python $APP_DIR/app_bot.py
 Restart=always
 RestartSec=5
