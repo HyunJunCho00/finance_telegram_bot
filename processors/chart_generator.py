@@ -227,6 +227,7 @@ class ChartGenerator:
                     'sell_vol': 'whale_sell_vol'
                 }
                 cvd = cvd.rename(columns={k: v for k, v in col_map.items() if k in cvd.columns})
+                cvd = cvd.loc[:, ~cvd.columns.duplicated()] # [FIX] Ensure no duplicate columns after renaming
                 
                 # Resample CVD to match OHLCV rule
                 cvd_resampled = cvd.resample(config['resample_rule']).sum(min_count=1)

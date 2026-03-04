@@ -131,10 +131,8 @@ class Settings(BaseSettings):
 
     # ===== AI Models =====
     # Supports Gemini, Claude, and GPT models via routing.
-    # Model status (2026 SOTA):
-    #   gemini-3.1-pro-preview: Google's latest multimodal, extreme context window, unbeatable for big data crunching.
-    #   claude-opus-4.6 / claude-sonnet-4.6: Anthropic's flagship models, absolute SOTA in pure mathematical/logical reasoning.
-    #   gpt-5.2: OpenAI's latest general intelligence, SOTA in world knowledge, macro analysis and news.
+    # Model status:
+
     MODEL_ENDPOINT: str = "gemini-3.1-pro-preview"
 
 
@@ -152,13 +150,9 @@ class Settings(BaseSettings):
     MODEL_VLM_TELEGRAM_CHART: str = "gemini-3-flash-preview"
     
     # 3. World Knowledge / Macro Economy
-    # gemini-3-flash-preview: fast, cheap, sufficient for macro text context
-    # (previously gpt-5.2 — removed OpenAI dependency to eliminate unexpected cost)
     MODEL_MACRO: str = "gemini-3-flash-preview"
     
     # 4. Supreme Logical Reasoning / Trade Execution
-    # claude-sonnet-4-6: The actual SOTA as of Feb 2026, featuring hybrid reasoning (extended thinking)
-    # and sweeping coding/math benchmarks (e.g. 70.3% SWE-bench, 96.2% MATH 500).
     MODEL_JUDGE: str = "claude-sonnet-4-6"
     MODEL_SELF_CORRECTION: str = "claude-sonnet-4-6"
     # 5. Telegram 대화형 채팅 — 저비용 Flash (Tool use 지원)
