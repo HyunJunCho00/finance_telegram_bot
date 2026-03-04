@@ -109,6 +109,16 @@ class LocalStateManager:
                 return row['value'].lower() == 'true'
             return False
 
+    def get_system_config(self, key: str, default: str = "") -> str:
+        """Generic getter for the system_config table."""
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT value FROM system_config WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            if row:
+                return row['value']
+            return default
+
     def set_panic_mode(self, enabled: bool):
         """Set or clear the market panic (high-volatility) flag."""
         val = 'true' if enabled else 'false'
