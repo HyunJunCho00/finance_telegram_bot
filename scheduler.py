@@ -233,11 +233,15 @@ def job_1hour_telegram():
     """Fetch and batch Telegram messages into LightRAG every 1 hour."""
     try:
         logger.info("Running 1-hour Telegram batching job")
-        # [V13.2] Redundant — Real-time listener handles this.
-        # Truth Engine: Triangulate corroborated claims via Perplexity (Web)
-        
+        # 1. Fetch raw messages directly via the collector
+        from collectors.telegram_collector import telegram_collector
+        telegram_collector.run(hours=1)
+
+        # 2. Synthesize and ingest to LightRAG
+        from processors.telegram_batcher import telegram_batcher
+        telegram_batcher.process_and_ingest(lookback_hours=1)
+
         # 3. Truth Engine: Triangulate corroborated claims via Perplexity (Web)
-        # Process 10 candidates per hour to manage API costs
         from config.local_state import state_manager
         if state_manager.is_analysis_enabled():
             light_rag.run_triangulation_worker(limit=3)
@@ -324,6 +328,32 @@ def main():
         id='job_5m_ws_health',
         max_instances=1
     )
+
+    # [FIX Cold Start] Run Telegram bot in a daemon thread
+    def _run_telegram_bot():
+        try:
+            from bot.telegram_bot import trading_bot
+            trading_bot.run()  # blocking within this thread
+        except Exception as e:
+            logger.error(f"Telegram bot crashed: {e}")
+            logger.info("Trading system continues WITHOUT Telegram bot commands.")
+
+    bot_thread = threading.Thread(target=_run_telegram_bot, name="telegram-bot", daemon=True)
+    bot_thread.start()
+    logger.info("Telegram bot started in background thread.")
+
+    # [V13.1] Persistent Telegram Listener (Real-Time Alpha Ingestion)
+    def _run_telegram_listener():
+        try:
+            from collectors.telegram_listener import telegram_listener
+            import asyncio
+            asyncio.run(telegram_listener.start())
+        except Exception as e:
+            logger.error(f"Telegram listener crashed: {e}")
+
+    listener_thread = threading.Thread(target=_run_telegram_listener, name="telegram-listener", daemon=True)
+    listener_thread.start()
+    logger.info("Real-time Telegram Listener (Alpha V13.1) started.")
 
     # 1-minute tick: price, funding, microstructure, volatility
     scheduler_config.scheduler.add_job(
@@ -457,34 +487,6 @@ def main():
             logger.info(f"  ✅ {name} collected")
         except Exception as e:
             logger.warning(f"  ⚠️ {name} collection failed (non-fatal): {e}")
-
-    # [FIX Cold Start] Run Telegram bot in a daemon thread — if it crashes,
-    # scheduler keeps running. This prevents a Telegram session error from
-    # killing the entire trading system.
-    def _run_telegram_bot():
-        try:
-            from bot.telegram_bot import trading_bot
-            trading_bot.run()  # blocking within this thread
-        except Exception as e:
-            logger.error(f"Telegram bot crashed: {e}")
-            logger.info("Trading system continues WITHOUT Telegram bot commands.")
-
-    bot_thread = threading.Thread(target=_run_telegram_bot, name="telegram-bot", daemon=True)
-    bot_thread.start()
-    logger.info("Telegram bot started in background thread.")
-
-    # [V13.1] Persistent Telegram Listener (Real-Time Alpha Ingestion)
-    def _run_telegram_listener():
-        try:
-            from collectors.telegram_listener import telegram_listener
-            import asyncio
-            asyncio.run(telegram_listener.start())
-        except Exception as e:
-            logger.error(f"Telegram listener crashed: {e}")
-
-    listener_thread = threading.Thread(target=_run_telegram_listener, name="telegram-listener", daemon=True)
-    listener_thread.start()
-    logger.info("Real-time Telegram Listener (Alpha V13.1) started.")
 
     # Main thread: keep alive + graceful shutdown
     try:

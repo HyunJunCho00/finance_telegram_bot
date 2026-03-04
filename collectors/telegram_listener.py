@@ -253,15 +253,25 @@ class TelegramListener:
                             break
                 
                 if not sender_key:
+                    logger.debug(f"Telegram: Spurious message from non-target: {username or title}")
                     return # Not a target channel
 
                 # 3. Real-time logging (Proof of delivery)
-                logger.info(f"⚡ REAL-TIME: Received message from [{sender_key}]")
+                logger.info(f"⚡ REAL-TIME: Received message from [{sender_key}] (User: {username}, Title: {title})")
                 await self._process_single_message(event.message, sender_key)
             except Exception as e:
                 logger.error(f"Handler error: {e}")
 
         await self.client.start()
+        
+        # [V13.8] Auth validation
+        if not await self.client.is_user_authorized():
+            logger.error("❌ Telegram Client is NOT authorized. Real-time alpha will NOT work.")
+            logger.error("Please run the listener manually once to log in (data/trading_session.session).")
+            # We don't stop the thread, but it won't receive messages.
+        else:
+            logger.info("✅ Telegram Client authorized and connected.")
+
         self._running = True
         logger.info("Unified Telegram Agent (V13.2) started.")
 
@@ -310,18 +320,24 @@ class TelegramListener:
             "source": sender_name, 
             "text": clean_text, 
             "message_id": message.id,
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "timestamp": message.date.isoformat() if hasattr(message, 'date') and message.date else datetime.now(timezone.utc).isoformat()
         }
         
         # 1. Immediate Persistence (V13.8 Refactor)
-        db.upsert_telegram_message({
-            "channel": sender_name, "text": clean_text, "message_id": message.id,
-            "timestamp": msg_payload["timestamp"]
-        })
+        # [FIX] Wrap sync DB call to prevent loop blocking
+        await asyncio.to_thread(
+            db.upsert_telegram_message,
+            {
+                "channel": sender_name, 
+                "text": clean_text, 
+                "message_id": message.id,
+                "timestamp": msg_payload["timestamp"]
+            }
+        )
 
         # 2. IMMEDIATE TRIAGE (Zero-cost Cloudflare)
-        # We triage every single message immediately to maximize 10k/day neurons usage.
-        is_trigger = light_rag.triage_message(clean_text)
+        # [FIX] Wrap sync Triage call (which has web requests) to prevent loop blocking
+        is_trigger = await asyncio.to_thread(light_rag.triage_message, clean_text)
         
         if is_trigger:
             async with self._buffer_lock:
@@ -396,7 +412,13 @@ class TelegramListener:
                 role="rag_extraction", temperature=0.1
             )
             if extraction and len(extraction) > 20:
-                light_rag.ingest_message(text=extraction, channel="REALTIME_LISTENER", timestamp=datetime.now(timezone.utc).isoformat())
+                # [FIX] Wrap sync ingest call to prevent loop blocking
+                await asyncio.to_thread(
+                    light_rag.ingest_message,
+                    text=extraction, 
+                    channel="REALTIME_LISTENER", 
+                    timestamp=datetime.now(timezone.utc).isoformat()
+                )
         except Exception as e:
             logger.error(f"Batch extraction error: {e}")
 

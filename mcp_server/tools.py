@@ -253,7 +253,7 @@ class MCPTools:
                     if timeframe and timeframe.lower() in ('1w', 'w') or mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
 
-                    m_back_timeseries = min(m_back, 1)  # [FIX] Limit to 1 month to prevent OOM in app_bot
+                    m_back_timeseries = m_back  # Full lookback for consolidated process memory efficiency
 
                     # Bridge GCS gap: 45,000 rows covers ~31 days of 1m data
                     db_limit = 45000
@@ -277,7 +277,7 @@ class MCPTools:
                     
                     # ── 2. Funding / OI ──
                     fnd_hist_dfs = []
-                    for m in range(1, min(m_back_timeseries, 1) + 1):  # [FIX OOM] max 1 month LIMIT
+                    for m in range(1, m_back + 1):  # Full lookback (skip current month in archive)
                         month_str = (now_utc - pd.DateOffset(months=m)).strftime("%Y-%m")
                         path = f"funding/{symbol}/{month_str}.parquet"
                         df_part = gcs_parquet_store._download_parquet(path)

@@ -581,7 +581,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
             m_back = settings.history_lookback_months
-            hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=min(m_back, 1))
+            hist_cvd = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
             if not hist_cvd.empty:
                 hist_cvd['timestamp'] = pd.to_datetime(hist_cvd['timestamp'], utc=True, errors='coerce')
             since_cvd = hist_cvd['timestamp'].max() if not hist_cvd.empty else None
@@ -616,7 +616,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
             m_back = settings.history_lookback_months
-            hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=min(m_back, 1))
+            hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
             if not hist_fnd.empty:
                 hist_fnd = hist_fnd.loc[:, ~hist_fnd.columns.duplicated()].reset_index(drop=True)
                 # [FIX CRITICAL] Map historical columns to live schema for chart_generator

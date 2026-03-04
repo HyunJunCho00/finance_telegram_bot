@@ -1834,9 +1834,9 @@ CRITICAL RULES:
         result = self._triage_engine.classify(text)
         is_trigger = result.get("is_trigger", False)
         if is_trigger:
-            logger.info(f"Triage: SIGNAL DETECTED [{result.get('category', 'unknown')}] (conf: {result.get('confidence', 0):.2f})")
+            logger.info(f"Triage: SIGNAL DETECTED [{result.get('category', 'unknown')}] (conf: {result.get('confidence', 0):.2f}) for '{text[:40]}...'")
         else:
-            logger.debug(f"Triage: No signal detected [{result.get('category', 'junk')}]")
+            logger.info(f"Triage: No signal detected [{result.get('category', 'junk')}] for '{text[:40]}...'")
         return is_trigger
 
     def get_stats(self) -> Dict:
