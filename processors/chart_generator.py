@@ -76,9 +76,9 @@ class ChartGenerator:
                 'tail_candles': 1825,   # ~60 months
                 'min_candles': 20,
                 'title_suffix': '1D POSITION',
-                'fib_tf': '1d',
-                'structure_tfs': ['1d'],
-                'swing_tf': '1d',
+                'fib_tf': '1w',          # Macro Fibonacci retracements (Weekly)
+                'structure_tfs': ['1w', '1d'], # View both Weekly & Daily structures
+                'swing_tf': '1d',        # Swing liquidity based on Daily nodes
                 'is_custom': False
             }
         else:  # SWING (default)
@@ -87,9 +87,9 @@ class ChartGenerator:
                 'tail_candles': 2190,   # ~12 months (6 candles/day * 365)
                 'min_candles': 30,
                 'title_suffix': '4H SWING',
-                'fib_tf': '1d',
-                'structure_tfs': ['1d'],
-                'swing_tf': '1d',
+                'fib_tf': '1d',          # Fib based on Daily trend for reliable pullbacks
+                'structure_tfs': ['1d', '4h'], # Daily main boundaries + 4H local channels
+                'swing_tf': '4h',        # Liquidity levels where other swing traders put stops
                 'is_custom': False
             }
 
@@ -746,16 +746,17 @@ class ChartGenerator:
             y_plot = np.clip(y_vals, y_lo - margin, y_hi + margin)
             
             kind = "SUP" if "support" in line_info.get('type', value_key) else "RES"
-            label_text = f"TREND LIQ" # Rebranded as Trendline Liquidity Pools
+            tf = value_key.split('_')[-1].upper() if '_' in value_key else ''
+            label_text = f"{tf} {kind} TREND" # Explicitly tell VLM the Timeframe and Type
             
-            # Draw as dashed lines to indicate liquidity pools rather than solid hard boundaries
-            ax.plot(x_vals, y_plot, color=color, linewidth=1.5,
-                    linestyle='--', alpha=0.6, zorder=10)
+            # Solid line for strong visibility for VLM
+            ax.plot(x_vals, y_plot, color=color, linewidth=2.0,
+                    linestyle='-', alpha=0.8, zorder=10)
             
             ax.text(x_vals[-1] - 1.5, y_vals[-1], f' {label_text}', color=color,
-                    fontsize=7, fontweight='bold', va='bottom', ha='right',
+                    fontsize=8, fontweight='bold', va='bottom', ha='right',
                     bbox=dict(facecolor=text_color if theme == 'light_premium' else '#131722', 
-                              alpha=0.5, edgecolor='none', pad=1))
+                              alpha=0.7, edgecolor='none', pad=1))
                     
         except Exception as e:
             logger.debug(f"Trendline draw error: {e}")
@@ -781,12 +782,13 @@ class ChartGenerator:
             val = fib.get(key)
             if isinstance(val, (int, float)):
                 # Dotted -> Dashed for better VLM visibility
-                ax.axhline(val, color=color, linestyle='--', linewidth=0.8,
-                           alpha=alpha + 0.3, zorder=2)
+                ax.axhline(val, color=color, linestyle='--', linewidth=1.2,
+                           alpha=alpha + 0.5, zorder=2)
                 # Move text slightly left of the edge to ensure it's on-canvas
                 ax.text(n - 0.5, val, f' {label}',
-                        color=color, fontsize=7, va='center', ha='left',
-                        alpha=0.9, fontweight='bold')
+                        color=color, fontsize=8, va='center', ha='left',
+                        alpha=1.0, fontweight='bold',
+                        bbox=dict(facecolor='black', alpha=0.4, edgecolor='none', pad=1))
 
         # Draw anchor markers so VLM can identify exact swing_high / swing_low used for Fib
         # Without these markers, VLM must guess anchors → fibonacci_context.anchor_high/low unreliable
@@ -820,8 +822,9 @@ class ChartGenerator:
                 ax.axhspan(high * 0.997, high * 1.003, color='#C0392B', 
                            alpha=0.08, zorder=1)
                 # Add label
-                ax.text(0, high, " SWING RES", color='#C0392B', 
-                        fontsize=6, fontweight='bold', va='bottom', alpha=0.9)
+                ax.text(2, high, " SWING HIGH LIQ", color='#C0392B', 
+                        fontsize=7, fontweight='bold', va='bottom', alpha=1.0,
+                        bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
 
         for low in swing.get('swing_lows', []):
             if isinstance(low, (int, float)):
@@ -832,8 +835,9 @@ class ChartGenerator:
                 ax.axhspan(low * 0.997, low * 1.003, color='#27AE60', 
                            alpha=0.08, zorder=1)
                 # Add label
-                ax.text(0, low, " SWING SUP", color='#27AE60', 
-                        fontsize=6, fontweight='bold', va='top', alpha=0.9)
+                ax.text(2, low, " SWING LOW LIQ", color='#27AE60', 
+                        fontsize=7, fontweight='bold', va='top', alpha=1.0,
+                        bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
 
     def _draw_liquidation_markers(self, ax, chart_df: pd.DataFrame,
                                    liq_df: pd.DataFrame):
