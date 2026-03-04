@@ -1046,6 +1046,31 @@ def run_cold_start(mode: str = "all", days: int = 210,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cold Start Data Loader")
+    parser.add_argument("--mode", default="all",
+                        choices=["all", "ohlcv", "funding", "telegram", "resample",
+                                 "upbit", "fear_greed", "deribit_dvol", "macro"],
+                        help="What to load (default: all)")
+    _default_days = (datetime.now(timezone.utc) - datetime(2020, 1, 1, tzinfo=timezone.utc)).days
+    parser.add_argument("--days", type=int, default=_default_days,
+                        help=f"Days of history for all loaders (default: since 2020-01-01 = {_default_days} days)")
+    parser.add_argument("--symbol", type=str, default=None,
+                        help="Single symbol e.g. BTCUSDT (default: BTCUSDT + ETHUSDT)")
+    parser.add_argument("--db-days", type=int, default=7,
+                        help="Days to keep in PostgreSQL hot cache (rest → GCS)")
+    parser.add_argument("--ohlcv-days", type=int, default=None,
+                        help="Override --days for OHLCV loader")
+    parser.add_argument("--funding-days", type=int, default=None,
+                        help="Override --days for Funding loader")
+    parser.add_argument("--telegram-days", type=int, default=None,
+                        help="Override --days for Telegram loader")
+    parser.add_argument("--upbit-days", type=int, default=None,
+                        help="Override --days for Upbit loader")
+    parser.add_argument("--fear-greed-days", type=int, default=None,
+                        help="Override --days for Fear & Greed loader")
+    parser.add_argument("--deribit-days", type=int, default=None,
+                        help="Override --days for Deribit DVOL loader")
+    parser.add_argument("--macro-days", type=int, default=None,
+                        help="Override --days for Macro (FRED + yfinance) loader")
     parser.add_argument("--no-resume", action="store_true",
                         help="Skip resume logic and force fetch the full requested range")
 
