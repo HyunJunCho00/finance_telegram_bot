@@ -25,12 +25,14 @@ class MCPTools:
             mode = settings.trading_mode
             
             # Load higher timeframe data from GCS for deeper indicator history
-            df_1d, df_1w = None, None
+            df_4h, df_1d, df_1w = None, None, None
             cvd_df, funding_df, liq_df = None, None, None
 
             if gcs_parquet_store.enabled:
                 try:
-                    m_back = settings.history_lookback_months
+                    m_back = settings.history_lookback_months_for_mode(mode)
+                    if mode == TradingMode.SWING:
+                        df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
                     if mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
@@ -54,7 +56,7 @@ class MCPTools:
                 except Exception as e:
                     logger.warning(f"GCS load for analysis tool skipped: {e}")
 
-            analysis = math_engine.analyze_market(df, mode, df_1d=df_1d, df_1w=df_1w)
+            analysis = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
             compact = math_engine.format_compact(analysis)
             return {
                 "symbol": symbol,
@@ -238,12 +240,14 @@ class MCPTools:
                 return {"error": "No market data available"}
 
             # Load higher timeframe data from GCS for deeper indicator history
-            df_1d, df_1w = None, None
+            df_4h, df_1d, df_1w = None, None, None
             cvd_df, funding_df, liq_df = None, None, None
             
             if gcs_parquet_store.enabled:
                 try:
-                    m_back = settings.history_lookback_months
+                    m_back = settings.history_lookback_months_for_mode(mode)
+                    if mode == TradingMode.SWING:
+                        df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
                     if mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
@@ -253,7 +257,7 @@ class MCPTools:
                     # Bridge GCS gap: 45,000 rows covers ~31 days of 1m data
                     db_limit = 45000
 
-                    # ?? 1. CVD ??
+                    # 1) CVD history merge
                     now_utc = pd.Timestamp.now(tz='UTC')
                     cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back_timeseries)
                     if not cvd_hist.empty:
@@ -270,7 +274,7 @@ class MCPTools:
                     price_timeline = build_price_timeline(df_1m=df, df_1d=df_1d, fallback_price=fallback_px)
                     cvd_df = normalize_cvd_to_usd(merged_cvd, price_timeline, fallback_price=fallback_px)
                     
-                    # ?? 2. Funding / OI ??
+                    # 2) Funding / OI history merge
                     fnd_hist_dfs = []
                     for m in range(1, m_back + 1):  # Full lookback (skip current month in archive)
                         month_str = (now_utc - pd.DateOffset(months=m)).strftime("%Y-%m")
@@ -314,9 +318,10 @@ class MCPTools:
 
             # Get analysis and generate chart
             analysis = math_engine.analyze_market(
-                df, mode, df_1d=df_1d, df_1w=df_1w, timeframe=fixed_timeframe
+                df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w, timeframe=fixed_timeframe
             )
             chart_bytes = chart_generator.generate_chart(df, analysis, symbol, mode, 
+                                                          df_4h=df_4h,
                                                           df_1d=df_1d, df_1w=df_1w,
                                                           cvd_df=cvd_df, 
                                                           funding_df=funding_df,
@@ -339,8 +344,7 @@ class MCPTools:
             return {"error": str(e)}
 
     def get_indicator_summary(self, symbol: str) -> Dict:
-        """?ъ슜??吏덉쓽?? 紐⑤뱺 吏???ы븿 (PSAR, KC, Aroon, HMA ??.
-        遺꾩꽍 ?뚯씠?꾨씪?몄뿉??format_compact() ?붿씠?몃━?ㅽ듃留??꾨떖??"""
+        """Return compact indicator bundle (PSAR, KC, Aroon, HMA, etc.)."""
         try:
             settings = get_settings()
             df = db.get_latest_market_data(symbol, limit=settings.candle_limit)
@@ -348,7 +352,7 @@ class MCPTools:
                 return {"error": "No market data available"}
 
             mode = settings.trading_mode
-            # 紐⑤뱶蹂?二쇱슂 ??꾪봽?덉엫 ?먯떆 吏??諛섑솚 (?붿씠?몃━?ㅽ듃 誘몄쟻??
+            # Primary timeframe aligned with mode policy.
             primary_tf = '4h' if mode.value == 'swing' else '1d'
             tf_df = math_engine.resample_to_timeframe(df, primary_tf)
             indicators = math_engine.calculate_indicators_for_timeframe(tf_df)
@@ -357,7 +361,7 @@ class MCPTools:
                 "symbol": symbol,
                 "timeframe": primary_tf,
                 "mode": mode.value,
-                "indicators": indicators,  # PSAR, KC, Aroon, HMA ?ы븿 ?꾩껜
+                "indicators": indicators,
             }
         except Exception as e:
             logger.error(f"Indicator summary error: {e}")

@@ -55,6 +55,8 @@ class LiquidityAgent:
         cvd_context: str = "",       # OI_DIV + MFI summary (funding_context의 끝부분)
         liquidation_context: str = "",
         mode: str = "SWING",
+        funding_sma: float = None,   # 7-day average funding rate
+        total_oi: float = None       # Total Open Interest
     ) -> dict:
         """Quantitative liquidity signal extraction.
 
@@ -91,7 +93,16 @@ class LiquidityAgent:
             long_usd  = float(m_long.group(1))  if m_long  else 0.0
             short_usd = float(m_short.group(1)) if m_short else 0.0
 
-            if total_usd > self.LIQ_MINOR:
+            if total_oi and total_oi > 0:
+                liq_minor = total_oi * 0.002
+                liq_major = total_oi * 0.005
+                liq_extreme = total_oi * 0.015
+            else:
+                liq_minor = self.LIQ_MINOR
+                liq_major = self.LIQ_MAJOR
+                liq_extreme = self.LIQ_EXTREME
+
+            if total_usd > liq_minor:
                 long_ratio = long_usd / max(total_usd, 1)
                 short_ratio = short_usd / max(total_usd, 1)
 
@@ -125,11 +136,11 @@ class LiquidityAgent:
                 result["liq_dominant_usd"] = round(dominant_usd, 0)
 
                 # Score: log scale capped at 1.0
-                liq_score = min(math.log10(max(1, dominant_usd / self.LIQ_MAJOR + 1)) / 1.0, 0.6)
+                liq_score = min(math.log10(max(1, dominant_usd / liq_major + 1)) / 1.0, 0.6)
 
-                if total_usd >= self.LIQ_EXTREME:
+                if total_usd >= liq_extreme:
                     result["anomaly"] = "liquidation_cascade_extreme"
-                elif total_usd >= self.LIQ_MAJOR:
+                elif total_usd >= liq_major:
                     result["anomaly"] = "liquidation_cascade"
                 else:
                     result["anomaly"] = "liquidation_minor"
@@ -208,13 +219,20 @@ class LiquidityAgent:
             m_fr = re.search(r"funding_rate[\":\s]+([-]?[\d\.eE+-]+)", cvd_context)
             if m_fr:
                 fr = float(m_fr.group(1))
-                if fr > self.FUNDING_CROWDED_LONG:
+                crowded_long = self.FUNDING_CROWDED_LONG
+                crowded_short = self.FUNDING_CROWDED_SHORT
+                
+                if funding_sma is not None:
+                    crowded_long = funding_sma + 0.0002
+                    crowded_short = funding_sma - 0.0002
+
+                if fr > crowded_long:
                     signals.append(
                         f"Funding CROWDED_LONG ({fr*100:.4f}%/8h) → contrarian SHORT signal"
                     )
                     if result["anomaly"] == "none":
                         result["anomaly"] = "funding_extreme_long"
-                elif fr < self.FUNDING_CROWDED_SHORT:
+                elif fr < crowded_short:
                     signals.append(
                         f"Funding CROWDED_SHORT ({fr*100:.4f}%/8h) → contrarian LONG signal"
                     )

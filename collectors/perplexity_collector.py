@@ -4,8 +4,8 @@ Provides the "WHY" behind market moves that pure technical data cannot.
 Uses Perplexity sonar-pro model for deep web search with citations.
 
 Two search modes:
-1. search_market_narrative(symbol): Per-symbol trading context (runs on analysis schedule)
-   - Mode-aware: SWING (1-7 day catalysts) vs POSITION (2-8 week cycle)
+1. search_market_narrative(symbol): Per-symbol daily unified narrative (SWING + POSITION in one response)
+   - Hard cap: one Perplexity API call per symbol per UTC day
    - Injects live market state: Fear&Greed, funding rate, 10Y yield, DXY
 2. search_targeted(entity, entity_type, context): Graph-triggered BTC/ETH-centric search
 
@@ -287,15 +287,79 @@ class PerplexityCollector:
         ]
         return "\n".join(lines)
 
+    def _build_unified_prompt(self, coin_name: str, base: str, state: Dict) -> str:
+        """Single daily prompt that covers both SWING and POSITION horizons."""
+        now_utc = datetime.now(timezone.utc)
+        date_today = now_utc.strftime("%Y-%m-%d")
+        date_8h_ago = (now_utc - timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
+        date_7d_ago = (now_utc - timedelta(days=7)).strftime("%Y-%m-%d")
+        date_30d_ago = (now_utc - timedelta(days=30)).strftime("%Y-%m-%d")
+
+        lines = [
+            f"Today is {date_today} (UTC). Analyze {coin_name} ({base}) with TWO horizons in one report.",
+            "",
+            "Current market indicators:",
+        ]
+        if state.get("current_price"):
+            ret = (
+                f" ({state['return_30d']:+.1f}% 30d)"
+                if state.get("return_30d") is not None
+                else ""
+            )
+            lines.append(f"- {base} price: ${state['current_price']:,.0f}{ret}")
+        if state.get("fear_greed"):
+            lines.append(f"- Fear & Greed: {state['fear_greed']}")
+        if state.get("funding_rate") is not None:
+            lines.append(f"- Funding rate: {state['funding_rate']:+.4f}% per 8h")
+        if state.get("dgs10") is not None:
+            lines.append(f"- US 10Y yield: {state['dgs10']:.2f}%")
+        if state.get("dxy") is not None:
+            lines.append(f"- DXY: {state['dxy']:.1f}")
+        if state.get("ust_spread") is not None:
+            lines.append(f"- 2s10s spread: {state['ust_spread']:+.2f}%")
+        if state.get("nasdaq") is not None:
+            lines.append(f"- Nasdaq: {state['nasdaq']:,.0f}")
+
+        lines += [
+            "",
+            "Search instructions:",
+            f"1) SWING horizon: last 8 hours to next 7 days (window starts {date_8h_ago} UTC).",
+            f"2) POSITION horizon: structural context from {date_30d_ago} to {date_today}.",
+            f"3) Every factor/event must include concrete dates. Ignore events earlier than {date_30d_ago}.",
+            "",
+            "Return strict JSON only with this schema:",
+            "{",
+            f'  "symbol": "{base}",',
+            '  "summary": "2-3 sentence combined summary for traders",',
+            '  "sentiment": "bullish" | "bearish" | "neutral",',
+            '  "reasoning": "single most important combined driver now",',
+            '  "macro_context": "rates/dxy/risk regime impact now",',
+            '  "swing_view": {',
+            '    "summary": "1-2 sentence short-term setup for next 8-24h",',
+            '    "sentiment": "bullish" | "bearish" | "neutral",',
+            '    "bullish_factors": ["YYYY-MM-DD HH:mm: ..."],',
+            '    "bearish_factors": ["YYYY-MM-DD HH:mm: ..."],',
+            '    "upcoming_events": ["YYYY-MM-DD: event in next 7 days"],',
+            '    "key_levels": ["support/resistance with exact prices"]',
+            '  },',
+            '  "position_view": {',
+            '    "summary": "1-2 sentence medium-term thesis for next 2-8 weeks",',
+            '    "sentiment": "bullish" | "bearish" | "neutral",',
+            '    "cycle_position": "early_accumulation | late_accumulation | distribution | capitulation | recovery",',
+            '    "bullish_factors": ["YYYY-MM-DD: ..."],',
+            '    "bearish_factors": ["YYYY-MM-DD: ..."],',
+            '    "institutional_flows": ["ETF/corporate flow facts with dates"],',
+            '    "regime_risks": ["macro/regulatory risk with dates"]',
+            '  }',
+            "}",
+            "",
+            "Source priority: high-authority financial media + official domains, then crypto data providers.",
+            f"Do NOT include: generic statements, unrelated altcoin noise, or events before {date_7d_ago} for swing factors.",
+        ]
+        return "\n".join(lines)
+
     def search_market_narrative(self, symbol: str = "BTC", is_emergency: bool = False) -> Dict:
-        """Mode-aware market narrative search. 
-        
-        Strategy:
-        1. Emergency: Search immediately using cheap model (sonar).
-        2. Scheduled: If < 12h since last search, return cached DB result to save credits.
-           (Agent will combine this with hourly LightRAG context).
-        3. Scheduled (>12h): Fresh search using Pro model (with fallback).
-        """
+        """Daily narrative search (one API call per symbol per UTC day)."""
         if not self.api_key:
             logger.warning("PERPLEXITY_API_KEY not set, skipping narrative search")
             result = self._empty_result(symbol)
@@ -303,41 +367,27 @@ class PerplexityCollector:
             return result
 
         coin_name, base = self._get_coin_name(symbol)
-        mode = settings.trading_mode
-        
-        # Budget Guard: Check last search time for non-emergency
-        if not is_emergency:
-            try:
-                # [FIX CRITICAL-BUDGET] Retrieve last successful narrative from DB
-                last_n = db.get_latest_narrative_data(symbol)
-                if last_n:
-                    last_ts = datetime.fromisoformat(last_n['timestamp'].replace('Z', '+00:00'))
-                    cache_hours = max(4, settings.analysis_interval_hours - 1)
-                    if datetime.now(timezone.utc) - last_ts < timedelta(hours=cache_hours):
-                        logger.info(f"Perplexity [{symbol}]: Within {cache_hours}h window, using cached narrative.")
-                        # Ensure we return a properly formatted dict
-                        cached_result = last_n.get('raw_payload', {})
-                        if not cached_result:
-                            # Fallback if raw_payload is missing
-                            cached_result = self._empty_result(symbol)
-                            cached_result.update(last_n)
-                        return cached_result
-            except Exception as e:
-                logger.warning(f"Narrative cache check failed: {e}")
 
-        # Determine Model
-        # Emergency uses cheap model. Scheduled uses Pro (with _call_api fallback).
+        # Hard daily cache guard: at most one Perplexity API call per symbol per UTC day.
+        try:
+            last_n = db.get_latest_narrative_data(symbol)
+            if last_n:
+                last_ts = datetime.fromisoformat(last_n['timestamp'].replace('Z', '+00:00'))
+                if last_ts.date() == datetime.now(timezone.utc).date():
+                    logger.info(f"Perplexity [{symbol}]: already fetched today (UTC), using cached narrative.")
+                    cached_result = last_n.get('raw_payload', {})
+                    if not cached_result:
+                        cached_result = self._empty_result(symbol)
+                        cached_result.update(last_n)
+                    return cached_result
+        except Exception as e:
+            logger.warning(f"Narrative cache check failed: {e}")
+
+        # Emergency uses cheaper target model; normal run uses narrative model.
         use_model = settings.PERPLEXITY_MODEL_TARGETED if is_emergency else settings.PERPLEXITY_MODEL_NARRATIVE
-        
-        # Inject live market state into prompt
         state = self._gather_market_state(symbol)
-
-        if mode == TradingMode.POSITION:
-            prompt = self._build_position_prompt(coin_name, base, state)
-            logger.info(f"Perplexity [{coin_name}]: POSITION mode search (2-8 week horizon)")
-        else:
-            prompt = self._build_swing_prompt(coin_name, base, state)
-            logger.info(f"Perplexity [{coin_name}]: SWING mode search (1-7 day horizon)")
+        prompt = self._build_unified_prompt(coin_name, base, state)
+        logger.info(f"Perplexity [{coin_name}]: unified SWING+POSITION daily search")
 
         try:
             content, citations = self._call_api(prompt, model=use_model)
@@ -347,7 +397,7 @@ class PerplexityCollector:
             self.persist_narrative(result, symbol)
             logger.info(
                 f"Perplexity narrative [{coin_name}]: "
-                f"sentiment={result.get('sentiment', '?')} mode={mode.value}"
+                f"sentiment={result.get('sentiment', '?')} (unified)"
             )
             return result
 
@@ -684,6 +734,25 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
         macro = narrative.get("macro_context", "")
         if macro:
             lines.append(f"Macro: {macro}")
+
+        swing_view = narrative.get("swing_view", {})
+        if isinstance(swing_view, dict) and swing_view:
+            lines.append(f"[SWING] {swing_view.get('summary', '')}")
+            sw_bull = swing_view.get("bullish_factors", [])
+            if sw_bull:
+                lines.append(f"[SWING Bull] {' | '.join(sw_bull[:2])}")
+            sw_bear = swing_view.get("bearish_factors", [])
+            if sw_bear:
+                lines.append(f"[SWING Bear] {' | '.join(sw_bear[:2])}")
+
+        position_view = narrative.get("position_view", {})
+        if isinstance(position_view, dict) and position_view:
+            cyc = position_view.get("cycle_position", "")
+            pos_summary = position_view.get("summary", "")
+            if cyc:
+                lines.append(f"[POSITION] cycle={cyc} | {pos_summary}")
+            else:
+                lines.append(f"[POSITION] {pos_summary}")
 
         return "\n".join(lines)
 

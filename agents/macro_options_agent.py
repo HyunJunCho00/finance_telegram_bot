@@ -81,6 +81,7 @@ class MacroOptionsAgent:
         deribit_context: str = "",
         macro_context: str = "",
         mode: str = "SWING",
+        dgs10_1w_chg: float = None  # 1-week change in 10Y yield (e.g. +0.4 for 40bps)
     ) -> dict:
         result = {
             "anomaly": "none",
@@ -186,7 +187,18 @@ class MacroOptionsAgent:
 
             macro_signal = "NEUTRAL"
 
-            if dgs10 is not None:
+            # ── Relative Rate of Change (Rate Shock) ──
+            if dgs10_1w_chg is not None:
+                if dgs10_1w_chg > 0.3:
+                    signals.append(f"DGS10 surged {dgs10_1w_chg:+.2f}% (Rate shock—BEARISH macro)")
+                    macro_signal = "BEARISH"
+                    macro_score += 0.30
+                elif dgs10_1w_chg < -0.3:
+                    signals.append(f"DGS10 fell {dgs10_1w_chg:+.2f}% (Yields dropping—BULLISH macro)")
+                    macro_signal = "BULLISH"
+                    macro_score += 0.20
+
+            if dgs10 is not None and macro_signal == "NEUTRAL":
                 if dgs10 > self.DGS10_HEADWIND:
                     signals.append(f"DGS10={dgs10:.2f}% (risk headwind—BEARISH macro)")
                     macro_signal = "BEARISH"

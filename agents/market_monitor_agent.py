@@ -124,8 +124,17 @@ Rules:
             pass
         return indicators
 
+    def _compare(self, a_val, op: str, b_val: float) -> bool:
+        """Deterministic comparison utility."""
+        if op == "<": return a_val < b_val
+        if op == ">": return a_val > b_val
+        if op == "<=": return a_val <= b_val
+        if op == ">=": return a_val >= b_val
+        if op == "==": return a_val == b_val
+        return False
+
     def evaluate(self, symbol: str, mode: str) -> Dict:
-        """Core evaluation: compare live indicators to playbook conditions."""
+        """Core evaluation: compare live indicators to playbook conditions deterministically."""
         playbook = self._load_playbook(symbol, mode)
         if not playbook:
             return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
@@ -143,38 +152,82 @@ Rules:
             pass
 
         live = self._get_live_indicators(symbol)
+        pb_data = playbook.get("playbook", {})
+        
+        # ── Deterministic Evaluation Logic ──
+        matched = []
+        unmatched = []
+        invalidated = False
+        inval_reason = ""
+        
+        # 1. Check Invalidation Conditions
+        inval_conds = pb_data.get("invalidation_conditions", [])
+        for ic in inval_conds:
+            if isinstance(ic, dict):
+                metric = ic.get("metric")
+                op = ic.get("operator")
+                val = ic.get("value")
+                live_val = live.get(metric)
+                if live_val is not None and op and val is not None:
+                    try:
+                        if self._compare(float(live_val), op, float(val)):
+                            invalidated = True
+                            inval_reason = f"{metric} {live_val} {op} {val}"
+                            break
+                    except Exception as e:
+                        logger.debug(f"Invalidation parse error: {e}")
 
-        user_message = f"""SYMBOL: {symbol}  MODE: {mode}
-
-DAILY PLAYBOOK (created: {playbook.get('created_at', 'unknown')}):
-{json.dumps(playbook.get('playbook', {}), indent=2)}
-
-LIVE INDICATORS (UTC: {datetime.now(timezone.utc).isoformat()}):
-{json.dumps(live, indent=2)}
-
-Evaluate now. Output strict JSON only."""
-
-        try:
-            raw = ai_client.generate_response(
-                system_prompt=self.SYSTEM_PROMPT,
-                user_message=user_message,
-                role=self.role,
-                temperature=0.1,
-                max_tokens=600,
-            )
-            start = raw.find("{")
-            end = raw.rfind("}") + 1
-            if start != -1 and end > start:
-                result = json.loads(raw[start:end])
-                result["symbol"] = symbol
-                result["mode"] = mode
-                logger.info(f"Monitor [{symbol}/{mode}]: {result.get('status')} — {result.get('reasoning', '')}")
-                return result
-        except Exception as e:
-            logger.error(f"MarketMonitorAgent.evaluate error: {e}")
-
-        return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                "reasoning": "Monitor evaluation failed."}
+        if invalidated:
+            logger.info(f"Monitor [{symbol}/{mode}]: NO_ACTION — Playbook Invalidated: {inval_reason}")
+            return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
+                    "reasoning": f"Invalidated: {inval_reason}"}
+                    
+        # 2. Check Entry Conditions
+        entry_conds = pb_data.get("entry_conditions", [])
+        if not entry_conds:
+            return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
+                    "reasoning": "No parseable entry conditions defined."}
+                    
+        for ec in entry_conds:
+            if isinstance(ec, dict):
+                metric = ec.get("metric")
+                op = ec.get("operator")
+                val = ec.get("value")
+                live_val = live.get(metric)
+                if live_val is not None and op and val is not None:
+                    try:
+                        if self._compare(float(live_val), op, float(val)):
+                            matched.append(f"{metric} {op} {val} (curr: {live_val})")
+                        else:
+                            unmatched.append(f"{metric} {op} {val} (curr: {live_val})")
+                    except Exception:
+                        unmatched.append(str(ec))
+                else:
+                    unmatched.append(f"Missing live data for metric: {metric}")
+            elif isinstance(ec, str):
+                unmatched.append(f"NLP condition needs manual review: {ec}")
+                
+        # 3. Final Output
+        result_status = "NO_ACTION"
+        if len(matched) > 0 and len(unmatched) == 0:
+            result_status = "TRIGGER"
+        elif len(matched) > 0:
+            result_status = "WATCH"
+            
+        reasoning = "All deterministic conditions met." if result_status == "TRIGGER" else f"Waiting on {len(unmatched)} conditions."
+        
+        result = {
+            "status": result_status,
+            "symbol": symbol,
+            "mode": mode,
+            "matched_conditions": matched,
+            "unmatched_conditions": unmatched,
+            "invalidated": False,
+            "reasoning": reasoning
+        }
+        
+        logger.info(f"Monitor [{symbol}/{mode}]: {result_status} — {reasoning}")
+        return result
 
     def summarize_current_status(self, indicators: dict) -> str:
         """Legacy: generate free-form market status summary (used by job_routine_market_status)."""

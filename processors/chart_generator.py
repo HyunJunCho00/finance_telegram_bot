@@ -18,8 +18,8 @@ What's NOT drawn (sent as text instead):
   - All numeric indicators → text
 
 Two modes:
-  - SWING: 4h candles, last ~10 days
-  - POSITION: 1d candles, last ~90 days
+  - SWING: 4h candles, last ~12 months
+  - POSITION: 1d candles, last ~60 months
 """
 
 import pandas as pd
@@ -54,6 +54,7 @@ class ChartGenerator:
                        liquidation_df: Optional[pd.DataFrame] = None,
                        cvd_df: Optional[pd.DataFrame] = None,
                        funding_df: Optional[pd.DataFrame] = None,
+                       df_4h: Optional[pd.DataFrame] = None,
                        df_1d: Optional[pd.DataFrame] = None,
                        df_1w: Optional[pd.DataFrame] = None) -> Optional[bytes]:
         """Generate structure chart for any mode or specific timeframe."""
@@ -64,28 +65,28 @@ class ChartGenerator:
         
         return self._generate_structure_chart(df, analysis, symbol, config,
                                               liquidation_df, cvd_df, funding_df,
-                                              df_1d=df_1d, df_1w=df_1w, mode=mode)
+                                              df_4h=df_4h, df_1d=df_1d, df_1w=df_1w, mode=mode)
 
     def _get_mode_config(self, mode: TradingMode, timeframe: Optional[str] = None) -> Dict:
         """Per-mode or per-timeframe chart configuration."""
         # 1. Base config determined by Mode (for Overlays / MTFA)
         if mode == TradingMode.POSITION:
             config = {
-                'resample_rule': '1W',
-                'tail_candles': 260,   # ~5 years 
+                'resample_rule': '1D',
+                'tail_candles': 1825,   # ~60 months
                 'min_candles': 20,
-                'title_suffix': '1W POSITION (Macro Cycle)',
-                'fib_tf': '1w',
-                'structure_tfs': ['1w'],
-                'swing_tf': '1w',
+                'title_suffix': '1D POSITION',
+                'fib_tf': '1d',
+                'structure_tfs': ['1d'],
+                'swing_tf': '1d',
                 'is_custom': False
             }
         else:  # SWING (default)
             config = {
-                'resample_rule': '1D',
-                'tail_candles': 365,   # ~12 months
+                'resample_rule': '4h',
+                'tail_candles': 2190,   # ~12 months (6 candles/day * 365)
                 'min_candles': 30,
-                'title_suffix': '1D SWING',
+                'title_suffix': '4H SWING',
                 'fib_tf': '1d',
                 'structure_tfs': ['1d'],
                 'swing_tf': '1d',
@@ -154,6 +155,7 @@ class ChartGenerator:
                                    liquidation_df: Optional[pd.DataFrame] = None,
                                    cvd_df: Optional[pd.DataFrame] = None,
                                    funding_df: Optional[pd.DataFrame] = None,
+                                   df_4h: Optional[pd.DataFrame] = None,
                                    df_1d: Optional[pd.DataFrame] = None,
                                    df_1w: Optional[pd.DataFrame] = None,
                                    mode: TradingMode = TradingMode.SWING) -> Optional[bytes]:
@@ -174,7 +176,13 @@ class ChartGenerator:
             }).dropna()
 
             rule_upper = str(config['resample_rule']).upper()
-            if rule_upper.startswith('1D') and df_1d is not None and not df_1d.empty:
+            if rule_upper.startswith('4H') and df_4h is not None and not df_4h.empty:
+                hist_df = df_4h.copy()
+                hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'], utc=True)
+                hist_df = hist_df.set_index('timestamp')
+                full_resampled = pd.concat([hist_df, full_resampled])
+                full_resampled = full_resampled[~full_resampled.index.duplicated(keep='last')].sort_index()
+            elif rule_upper.startswith('1D') and df_1d is not None and not df_1d.empty:
                 hist_df = df_1d.copy()
                 # Ensure we use the 'timestamp' column for indexing, not the RangeIndex
                 hist_df['timestamp'] = pd.to_datetime(hist_df['timestamp'], utc=True)

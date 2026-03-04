@@ -304,6 +304,12 @@ class Settings(BaseSettings):
             return self.POSITION_HISTORY_MONTHS
         return self.SWING_HISTORY_MONTHS
 
+    def history_lookback_months_for_mode(self, mode: TradingMode) -> int:
+        """Historical lookback window (months) for an explicit mode."""
+        if mode == TradingMode.POSITION:
+            return self.POSITION_HISTORY_MONTHS
+        return self.SWING_HISTORY_MONTHS
+
     @property
     def trading_symbols(self) -> List[str]:
         """['BTCUSDT', 'ETHUSDT', ...] ??canonical format used throughout."""

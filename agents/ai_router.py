@@ -171,7 +171,6 @@ class AIClient:
         if self._openrouter_client is None:
             key = (
                 getattr(settings, "OPENROUTER_API_KEY", "")
-                or getattr(settings, "OPEN_ROUTER_API_KEY", "")
             )
             if key:
                 self._openrouter_client = OpenAI(

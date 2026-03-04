@@ -138,8 +138,9 @@ def node_collect_data(state: AnalysisState) -> dict:
     try:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
-            m_back = settings.history_lookback_months
+            m_back = settings.history_lookback_months_for_mode(mode)
             if mode == TradingMode.SWING:
+                df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
                 df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
             elif mode == TradingMode.POSITION:
                 df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
@@ -568,8 +569,9 @@ def node_generate_chart(state: AnalysisState) -> dict:
     try:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
-            m_back = settings.history_lookback_months
+            m_back = settings.history_lookback_months_for_mode(mode)
             if mode == TradingMode.SWING:
+                df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
                 df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
             elif mode == TradingMode.POSITION:
                 df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
@@ -618,7 +620,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
             # Merge with GCS historical funding for long-term charts
             from processors.gcs_parquet import gcs_parquet_store
             if gcs_parquet_store.enabled:
-                m_back = settings.history_lookback_months
+                m_back = settings.history_lookback_months_for_mode(mode)
                 hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
                 if not hist_fnd.empty:
                     hist_fnd = hist_fnd.loc[:, ~hist_fnd.columns.duplicated()].reset_index(drop=True)
@@ -643,13 +645,15 @@ def node_generate_chart(state: AnalysisState) -> dict:
 
 
     try:
+        fixed_timeframe = "4h" if mode == TradingMode.SWING else "1d"
         chart_bytes = chart_generator.generate_chart(
             df, market_data, symbol,
             mode=mode,
-            timeframe=None,
+            timeframe=fixed_timeframe,
             liquidation_df=liquidation_df,
             cvd_df=cvd_df,
             funding_df=funding_df,
+            df_4h=df_4h,
             df_1d=df_1d,
             df_1w=df_1w
         )
