@@ -1,5 +1,6 @@
 import functools
-from supabase import create_client, Client
+import httpx
+from supabase import create_client, Client, ClientOptions
 from config.settings import settings
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta, timezone
@@ -7,29 +8,62 @@ import pandas as pd
 import asyncio
 from loguru import logger
 
+# ─────────────── HTTP/2 Cloudflare Patch ───────────────
+# httpx HTTP/2 implementation has a known issue with Cloudflare's trailing pseudo-headers
+# resulting in: httpx.LocalProtocolError: Received pseudo-header in trailer
+# We disable HTTP/2 globally for httpx to prevent this when talking to Supabase.
+try:
+    _orig_init = httpx.Client.__init__
+    def _patched_init(self, *args, **kwargs):
+        kwargs["http2"] = False
+        _orig_init(self, *args, **kwargs)
+    httpx.Client.__init__ = _patched_init
+
+    _orig_async_init = httpx.AsyncClient.__init__
+    def _patched_async_init(self, *args, **kwargs):
+        kwargs["http2"] = False
+        _orig_async_init(self, *args, **kwargs)
+    httpx.AsyncClient.__init__ = _patched_async_init
+except Exception:
+    pass
+# ───────────────────────────────────────────────────────
+
 
 class DatabaseClient:
     def __init__(self):
+        options = ClientOptions(postgrest_client_timeout=60)
         self.client: Client = create_client(
             settings.SUPABASE_URL,
-            settings.SUPABASE_KEY
+            settings.SUPABASE_KEY,
+            options=options
         )
 
     def reconnect_on_error(func):
-        """Decorator to handle Supabase disconnections and retry once."""
+        """Decorator to handle Supabase disconnections, Cloudflare 400s, and retry once."""
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
             try:
                 return func(self, *args, **kwargs)
             except Exception as e:
                 err_msg = str(e).lower()
-                # Catch closed connections, SSL/EOF protocol violations, and general connection errors
-                if any(x in err_msg for x in ["disconnected", "closed", "connection", "eof", "protocol"]):
-                    logger.warning(f"Database error ({err_msg}) during {func.__name__}, reconnecting...")
+                err_type = type(e).__name__.lower()
+                
+                # Catch closed connections, SSL/EOF protocol violations, Cloudflare HTTP2 issues, timeouts, and general connection errors
+                transient_keywords = [
+                    "disconnected", "closed", "connection", "eof", "protocol", 
+                    "pseudo-header", "timeout", "61", "104", "refused", "reset",
+                    "cloudflare", "400 bad request", "json could not be generated"
+                ]
+                
+                if any(x in err_msg for x in transient_keywords) or "protocol" in err_type or "connection" in err_type:
+                    logger.warning(f"Database error ({e.__class__.__name__}: {err_msg}) during {func.__name__}, reconnecting...")
                     try:
                         import time
-                        time.sleep(1) # Brief pause for network stabilization
-                        self.client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+                        time.sleep(1.5) # Brief pause for network stabilization
+                        
+                        options = ClientOptions(postgrest_client_timeout=60)
+                        self.client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY, options=options)
+                        
                         return func(self, *args, **kwargs)
                     except Exception as retry_e:
                         logger.error(f"Database reconnection/retry failed: {retry_e}")

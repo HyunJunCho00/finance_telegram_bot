@@ -142,42 +142,34 @@ class AIClient:
         if role == "judge":
             return settings.MODEL_JUDGE, settings.MAX_INPUT_CHARS_JUDGE
         
-        # --- FREE-FIRST ROUTING (2026 Optimization) ---
-        # If Groq is available, use Llama 3.1 70B for almost everything text-only.
-        # It's faster and free (rate-limited).
+        # --- FREE-FIRST ROUTING (2026 Tiered Optimization) ---
         if settings.GROQ_API_KEY:
-            model_map = {
-                "liquidity": "groq/llama-3.3-70b-versatile",
-                "microstructure": "groq/llama-3.3-70b-versatile",
-                "macro": "groq/llama-3.3-70b-versatile",
-                "rag_extraction": "groq/llama-3.3-70b-versatile",
-                "chat": "groq/llama-3.3-70b-versatile"
-            }
-            if role in model_map:
-                return model_map[role], getattr(settings, f"MAX_INPUT_CHARS_{role.upper()}", 15000)
+            if role in ("chat", "routing", "triage"):
+                # A. Initial Triage / Fast Mass Processing
+                return "groq/llama-3.1-8b-instant", getattr(settings, f"MAX_INPUT_CHARS_{role.upper()}", 10000)
+            elif role in ("rag_extraction", "self_correction", "feedback", "post_mortem"):
+                # C. Reasoning / Evidence Verification Loop
+                return "groq/openai/gpt-oss-20b", getattr(settings, f"MAX_INPUT_CHARS_{role.upper()}", 15000)
+            elif role in ("structured_report", "comparison"):
+                # D. Medium Precision & Structuring
+                return "groq/qwen/qwen3-32b", 20000
+            elif role in ("long_synthesis", "weekly_report", "monthly_report"):
+                # E. Ultra-long Synthesis
+                return "groq/moonshotai/kimi-k2-instruct-0905", 100000
+            elif role in ("vlm_telegram_chart", "vlm_geometric", "vlm_analysis", "rag_vision"):
+                # Vision Tasks
+                return "groq/llama-3.2-90b-vision-preview", getattr(settings, f"MAX_INPUT_CHARS_{role.upper()}", 15000)
+            else:
+                # B. Main Standard Analysis (liquidity, microstructure, macro, general)
+                return "groq/llama-3.3-70b-versatile", getattr(settings, f"MAX_INPUT_CHARS_{role.upper()}", 15000)
 
-        # Fallback to Workers AI (Daily Neuron cap) if Groq fails or is absent
+        # Fallback to Workers AI if Groq fails or is absent conceptually (handled in wrapper)
         self._cf_generator._init()
         if self._cf_generator._enabled:
-             # Workers AI is slightly slower than Groq/Gemini but "Totally Free" neurons
-             if role in ("liquidity", "microstructure", "macro"):
+             if role in ("liquidity", "microstructure", "macro", "chat", "routing", "rag_extraction"):
                  return "cf/llama-3.1-70b", getattr(settings, f"MAX_INPUT_CHARS_{role.upper()}", 15000)
 
-        # --- Multimodal / High-Logic Fallbacks (Paid/Capped) ---
-        if role == "liquidity":
-            return settings.MODEL_LIQUIDITY, settings.MAX_INPUT_CHARS_LIQUIDITY
-        if role == "microstructure":
-            return settings.MODEL_MICROSTRUCTURE, settings.MAX_INPUT_CHARS_MICROSTRUCTURE
-        if role == "macro":
-            return settings.MODEL_MACRO, settings.MAX_INPUT_CHARS_MACRO
-        if role in ("self_correction", "feedback", "post_mortem"):
-            return settings.MODEL_SELF_CORRECTION, settings.MAX_INPUT_CHARS_SELF_CORRECTION
-        if role in ("rag", "rag_extraction"):
-            return settings.MODEL_RAG_EXTRACTION, settings.MAX_INPUT_CHARS_RAG_EXTRACTION
-        if role == "vlm_geometric":
-            return settings.MODEL_VLM_GEOMETRIC, settings.MAX_INPUT_CHARS_MACRO
-        if role == "vlm_telegram_chart":
-            return settings.MODEL_VLM_TELEGRAM_CHART, settings.MAX_INPUT_CHARS_VLM_TELEGRAM_CHART
+        # Fail gracefully mechanism. If all else fails and it's not judge, don't use premium resources silently.
         return self.default_model_id, settings.MAX_INPUT_CHARS_LIQUIDITY
 
     def _trim_input(self, text: str, max_chars: int) -> str:
@@ -379,10 +371,14 @@ class AIClient:
         chart_image_b64: Optional[str] = None,
         client_override: Optional[OpenAI] = None,
     ) -> str:
+        is_groq = (client_override is not None and getattr(self, "_groq_client", None) == client_override) or "groq" in str(client_override)
         try:
             client = client_override or self.openai_client
             # [FIX SILENT-2] Guard: if no API key, fall back immediately
             if client is None:
+                if is_groq:
+                    logger.warning(f"Groq API unavailable for {model_id}, failing gracefully")
+                    return ""
                 logger.warning(f"AI Provider unavailable for {model_id}, falling back to Gemini")
                 return self._generate_gemini(
                     model_id=self.default_model_id,
@@ -417,16 +413,37 @@ class AIClient:
                 "messages": messages,
             }
             if not model_id.startswith("o"):
+                # "o1-" or "o3-" models don't support temperature/max_tokens normally, 
+                # but Groq o-series proxies (like gpt-oss-20b) might technically accept it depending on the proxy. 
+                # Safest is to try and pass it for Groq since it acts like standard inference.
                 kwargs["temperature"] = temperature
                 kwargs["max_tokens"] = max_tokens
-            kwargs["timeout"] = 45.0
+            # Ensure timeout isn't outrageously long for quick fallback
+            kwargs["timeout"] = 25.0 if is_groq else 45.0
 
             response = client.chat.completions.create(**kwargs)
 
             return response.choices[0].message.content or ""
 
         except Exception as e:
-            logger.error(f"OpenAI API error ({model_id}): {e}")
+            logger.error(f"OpenAI/Groq API error ({model_id}): {e}")
+            if is_groq:
+                # Fallback to Cloudflare for text, else fail gracefully to prevent premium token usage.
+                if chart_image_b64:
+                    logger.warning("Groq Vision failed (rate limit or down). Failing gracefully to avoid premium tokens.")
+                    return ""
+                
+                logger.warning("Falling back to Cloudflare Workers AI due to Groq error...")
+                cf_result = self._cf_generator.generate(
+                    system_prompt=system_prompt,
+                    user_message=user_message,
+                    max_tokens=max_tokens
+                )
+                if cf_result:
+                    return cf_result
+                logger.warning("Cloudflare also failed. Failing gracefully to avoid premium tokens.")
+                return ""
+
             logger.warning("Falling back to Gemini default model...")
             return self._generate_gemini(
                 model_id=self.default_model_id,

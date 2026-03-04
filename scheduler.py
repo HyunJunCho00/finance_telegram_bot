@@ -8,6 +8,7 @@ from collectors.microstructure_collector import microstructure_collector
 from collectors.macro_collector import macro_collector
 from collectors.deribit_collector import deribit_collector
 from collectors.fear_greed_collector import fear_greed_collector
+from collectors.crypto_news_collector import collector as news_collector
 from executors.orchestrator import orchestrator
 from evaluators.feedback_generator import feedback_generator
 from processors.light_rag import light_rag
@@ -245,6 +246,14 @@ def job_1hour_telegram():
     except Exception as e:
         logger.error(f"1-hour Telegram job error: {e}")
 
+def job_1hour_crypto_news():
+    """Fetch Free Crypto News API and ingest to LightRAG every 1 hour."""
+    try:
+        logger.info("Running 1-hour Crypto News API fetch job")
+        news_collector.fetch_and_ingest()
+    except Exception as e:
+        logger.error(f"1-hour Crypto News API job error: {e}")
+
 
 def job_daily_cleanup():
     """Cleanup old data + archive to GCS Parquet."""
@@ -382,6 +391,15 @@ def main():
         'interval',
         hours=1,
         id='job_1hour_telegram',
+        max_instances=1
+    )
+
+    # 1-Hour Crypto News API Fetch & Ingestion
+    scheduler.add_job(
+        job_1hour_crypto_news,
+        'interval',
+        hours=1,
+        id='job_1hour_crypto_news',
         max_instances=1
     )
 
