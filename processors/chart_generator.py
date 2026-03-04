@@ -212,18 +212,21 @@ class ChartGenerator:
                 # Resample CVD to match OHLCV rule, but use min_count=1 to keep structural NaNs
                 cvd_resampled = cvd.resample(config['resample_rule']).sum(min_count=1)
                 # Calculate Cumulative Delta for visual trend
-                buy_vol = cvd_resampled['whale_buy_vol'] if 'whale_buy_vol' in cvd_resampled else pd.Series(0, index=cvd_resampled.index)
-                sell_vol = cvd_resampled['whale_sell_vol'] if 'whale_sell_vol' in cvd_resampled else pd.Series(0, index=cvd_resampled.index)
-                
-                cvd_resampled['cvd_acc'] = (buy_vol - sell_vol).cumsum()
-                # Calculate individual bar delta
-                cvd_resampled['delta'] = buy_vol - sell_vol
+                if 'whale_buy_vol' in cvd_resampled and 'whale_sell_vol' in cvd_resampled:
+                    buy_vol = cvd_resampled['whale_buy_vol']
+                    sell_vol = cvd_resampled['whale_sell_vol']
+                    cvd_resampled['delta'] = buy_vol - sell_vol
+                    cvd_resampled['cvd_acc'] = cvd_resampled['delta'].cumsum()
+                else:
+                    cvd_resampled['delta'] = pd.Series(np.nan, index=cvd_resampled.index)
+                    cvd_resampled['cvd_acc'] = pd.Series(np.nan, index=cvd_resampled.index)
                 
                 # Align with chart_df index
                 cvd_aligned = cvd_resampled.reindex(chart_df.index)
                 
-                # Forward and backfill to prevent empty visual gaps for historical dates not in DB
-                cvd_acc_plot = cvd_aligned['cvd_acc'].bfill().ffill()
+                # Forward fill to prevent empty visual gaps for historical dates not in DB
+                # We remove bfill() to prevent artificial flat lines when data doesn't exist yet
+                cvd_acc_plot = cvd_aligned['cvd_acc'].ffill()
                 # Individual delta bars can be 0 when missing
                 cvd_delta_plot = cvd_aligned['delta'].fillna(0)
                 
@@ -263,7 +266,7 @@ class ChartGenerator:
                     
                     # OI Panel — only if column exists
                     if has_oi:
-                        fnd_oi_plot = fnd_aligned['open_interest'].bfill().ffill()
+                        fnd_oi_plot = fnd_aligned['open_interest'].ffill()
                         apds.append(mpf.make_addplot(fnd_oi_plot, panel=3,
                                                    color='#2980B9', width=1.2,
                                                    ylabel='OI', secondary_y=False))

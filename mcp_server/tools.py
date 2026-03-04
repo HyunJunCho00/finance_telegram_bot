@@ -29,7 +29,14 @@ class MCPTools:
 
             if gcs_parquet_store.enabled:
                 try:
-                    m_back = 18 if mode == TradingMode.SWING else 24
+                    # Calculate m_back based on TradingMode requirements
+                    # SWING: 12 months, POSITION: since 2021-01-01
+                    import datetime
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    if mode == TradingMode.POSITION:
+                        m_back = (now_utc.year - 2021) * 12 + now_utc.month
+                    else:
+                        m_back = 12
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
                     if mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)
@@ -227,18 +234,12 @@ class MCPTools:
             mode = settings.trading_mode
             limit = settings.candle_limit
             
-            if timeframe:
-                tf = timeframe.lower().strip()
-                if tf in ('1d', 'd', 'p', 'position', 'w', '1w'):
-                    mode = TradingMode.POSITION
-                    # [V14.4] 1D/1W charts need at least 30 days of cold DB data to bridge GCS gap
-                    limit = 45000 
-                elif tf in ('4h', 'h', 's', 'swing', '1h'):
-                    mode = TradingMode.SWING
-                    # [V14.4] 4h charts need ~7 days of data
-                    limit = 10000 
-                else:
-                    limit = 1000  # Default low-res/fast
+            # Data Volume is determined entirely by the global `mode` parameter.
+            # Display TF (timeframe) only controls resampling and visual structure, not the mode.
+            if mode == TradingMode.POSITION:
+                limit = 45000  # Bridge GCS gap for macro analysis
+            else:
+                limit = 10000  # Default ~7-10 days for swing
 
             df = db.get_latest_market_data(symbol, limit=limit)
             if df.empty:
@@ -251,7 +252,14 @@ class MCPTools:
             if gcs_parquet_store.enabled:
                 try:
                     # For custom timeframe charts, we should still provide enough context if it's a high TF
-                    m_back = 18 if mode == TradingMode.SWING else 24
+                    # Calculate m_back based on TradingMode requirements
+                    # SWING: 12 months, POSITION: since 2021-01-01
+                    import datetime
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    if mode == TradingMode.POSITION:
+                        m_back = (now_utc.year - 2021) * 12 + now_utc.month
+                    else:
+                        m_back = 12
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
                     if timeframe and timeframe.lower() in ('1w', 'w') or mode == TradingMode.POSITION:
                         df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=120)

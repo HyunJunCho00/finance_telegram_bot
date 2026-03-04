@@ -60,3 +60,5 @@ setup_telegram_session.py
 .coverage
 htmlcov/
 tmp*
+todays_session.md
+
