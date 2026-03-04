@@ -103,7 +103,9 @@ class ChartGenerator:
             # Dynamic tail calculation based on TF to show enough history
             tail = 200
             if tf in ('1m', '5m', '15m', '30m'): tail = 150 # Intraday needs more zoom
-            elif tf in ('1d', '1w'): tail = 200      # Macro needs context
+            elif tf in ('1h', '2h', '4h', '6h', '8h', '12h'): tail = 200
+            elif tf in ('1d', '3d'): tail = 365      # Swing needs 12 months context
+            elif tf in ('1w', '1M'): tail = 260      # Macro needs 5 years context
             config['tail_candles'] = tail
             
             # For VLM display, label the title correctly
@@ -218,8 +220,13 @@ class ChartGenerator:
                 if 'whale_buy_vol' in cvd_resampled and 'whale_sell_vol' in cvd_resampled:
                     buy_vol = cvd_resampled['whale_buy_vol']
                     sell_vol = cvd_resampled['whale_sell_vol']
-                    cvd_resampled['delta'] = buy_vol - sell_vol
-                    cvd_resampled['cvd_acc'] = cvd_resampled['delta'].cumsum()
+                    
+                    mask_empty = (buy_vol == 0) & (sell_vol == 0)
+                    delta = buy_vol - sell_vol
+                    delta.loc[mask_empty] = np.nan
+                    
+                    cvd_resampled['delta'] = delta
+                    cvd_resampled['cvd_acc'] = delta.cumsum().ffill()
                 else:
                     cvd_resampled['delta'] = pd.Series(np.nan, index=cvd_resampled.index)
                     cvd_resampled['cvd_acc'] = pd.Series(np.nan, index=cvd_resampled.index)
@@ -227,10 +234,7 @@ class ChartGenerator:
                 # Align with chart_df index
                 cvd_aligned = cvd_resampled.reindex(chart_df.index)
                 
-                # Forward fill to prevent empty visual gaps for historical dates not in DB
-                # We remove bfill() to prevent artificial flat lines when data doesn't exist yet
-                cvd_acc_plot = cvd_aligned['cvd_acc'].ffill()
-                # Individual delta bars can be 0 when missing
+                cvd_acc_plot = cvd_aligned['cvd_acc']
                 cvd_delta_plot = cvd_aligned['delta'].fillna(0)
                 
                 # Panel 2: (Price 0, Vol 1, CVD Panel 2)
