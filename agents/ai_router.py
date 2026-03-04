@@ -157,8 +157,8 @@ class AIClient:
                 # E. Ultra-long Synthesis
                 return "groq/moonshotai/kimi-k2-instruct-0905", 100000
             elif role in ("vlm_telegram_chart", "vlm_geometric", "vlm_analysis", "rag_vision"):
-                # Vision Tasks
-                return "groq/llama-3.2-90b-vision-preview", getattr(settings, f"MAX_INPUT_CHARS_{role.upper()}", 15000)
+                # Vision Tasks — llama-3.2-90b-vision-preview decommissioned 2025-04-14
+                return "groq/meta-llama/llama-4-scout-17b-16e-instruct", getattr(settings, f"MAX_INPUT_CHARS_{role.upper()}", 15000)
             else:
                 # B. Main Standard Analysis (liquidity, microstructure, macro, general)
                 return "groq/llama-3.3-70b-versatile", getattr(settings, f"MAX_INPUT_CHARS_{role.upper()}", 15000)

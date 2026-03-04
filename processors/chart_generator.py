@@ -415,7 +415,7 @@ class ChartGenerator:
                 self._draw_liquidation_markers(price_ax, chart_df, liquidation_df)
 
             # ── Overlay 9: Fair Value Gaps (FVG) ──
-            self._draw_fair_value_gaps(price_ax, chart_df, mode)
+            self._draw_fair_value_gaps(price_ax, chart_df, trading_mode)
 
             # ── [NEW] Overlay 10: Macro Order Blocks (OB) ──
             # count=4 → returns up to 8 candidates (obs[:count*2])
