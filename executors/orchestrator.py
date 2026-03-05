@@ -1149,6 +1149,11 @@ def node_generate_playbook(state) -> dict:
             "invalidation_conditions": invalid if isinstance(invalid, list) else [],
         }
 
+    def _has_meaningful_conditions(playbook: dict) -> bool:
+        """Require at least one entry condition to avoid persisting empty/invalid playbooks."""
+        entry = playbook.get("entry_conditions", []) if isinstance(playbook, dict) else []
+        return isinstance(entry, list) and len(entry) > 0
+
     now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
     records = []
 
@@ -1159,10 +1164,17 @@ def node_generate_playbook(state) -> dict:
             if isinstance(raw_plan, dict):
                 if "monitoring_playbook" in raw_plan and isinstance(raw_plan["monitoring_playbook"], dict):
                     raw_plan = raw_plan["monitoring_playbook"]
+                normalized = _normalize_playbook(raw_plan)
+                if not _has_meaningful_conditions(normalized):
+                    logger.warning(
+                        f"node_generate_playbook: skip empty playbook for {symbol}/{lane_mode} "
+                        "(entry_conditions is empty)"
+                    )
+                    continue
                 records.append({
                     "symbol": symbol,
                     "mode": lane_mode,
-                    "playbook": _normalize_playbook(raw_plan),
+                    "playbook": normalized,
                     "created_at": now_iso,
                     "ttl_hours": 24,
                     "source_decision": str(final_decision.get("decision", "HOLD")),
@@ -1174,14 +1186,25 @@ def node_generate_playbook(state) -> dict:
         if not isinstance(fallback, dict) or not fallback:
             logger.warning(f"node_generate_playbook: no dual plan or monitoring_playbook for {symbol}; skip save")
             return {}
+        normalized = _normalize_playbook(fallback)
+        if not _has_meaningful_conditions(normalized):
+            logger.warning(
+                f"node_generate_playbook: skip empty fallback playbook for {symbol}/{mode_hint} "
+                "(entry_conditions is empty)"
+            )
+            return {}
         records.append({
             "symbol": symbol,
             "mode": mode_hint if mode_hint in ("swing", "position") else "position",
-            "playbook": _normalize_playbook(fallback),
+            "playbook": normalized,
             "created_at": now_iso,
             "ttl_hours": 24,
             "source_decision": str(final_decision.get("decision", "HOLD")),
         })
+
+    if not records:
+        logger.warning(f"node_generate_playbook: no valid playbook records to save for {symbol}")
+        return {}
 
     for rec in records:
         try:
