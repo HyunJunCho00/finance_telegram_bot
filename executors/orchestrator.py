@@ -1477,6 +1477,24 @@ class Orchestrator:
         DAILY_MAX_ENTRIES = 2
         _entry_count_key = f"_monitor_entries_{date.today().isoformat()}"
 
+        def _lane_line(label: str, res: dict) -> str:
+            status = res.get("status", "NO_ACTION")
+            reasoning = res.get("reasoning", "No details")
+            matched = res.get("matched_conditions", []) or []
+            unmatched = res.get("unmatched_conditions", []) or []
+            invalidated = bool(res.get("invalidated", False))
+            inval_reason = res.get("invalidation_reason", "")
+            parts = [
+                f"- {label}: <b>{status}</b>",
+                f"match {len(matched)}/{len(matched) + len(unmatched)}",
+                reasoning,
+            ]
+            if invalidated and inval_reason:
+                parts.append(f"invalidated={inval_reason}")
+            if unmatched:
+                parts.append(f"next={str(unmatched[0])[:90]}")
+            return " | ".join(parts)
+
         for symbol in self.symbols:
             lane_results = {}
             analysis_enabled = state_manager.is_analysis_enabled()
@@ -1486,18 +1504,47 @@ class Orchestrator:
                     result = market_monitor_agent.evaluate(symbol, mode.value)
                     status = result.get("status", "NO_ACTION")
                     lane_results[mode.value.upper()] = result
-                    logger.info(f"[Monitor] {symbol}/{mode.value}: {status}")
+                    logger.info(
+                        f"[Monitor] {symbol}/{mode.value}: {status} | "
+                        f"matched={len(result.get('matched_conditions', []) or [])} "
+                        f"unmatched={len(result.get('unmatched_conditions', []) or [])} "
+                        f"invalidated={result.get('invalidated', False)} "
+                        f"reason={result.get('reasoning', '')}"
+                    )
 
-                    if status == "TRIGGER" and not result.get("invalidated", False):
-                        # Count guard
-                        entries_today = int(state_manager.get_system_config(_entry_count_key + symbol, "0"))
-                        if entries_today >= DAILY_MAX_ENTRIES:
-                            logger.warning(f"[Monitor] {symbol} daily entry cap ({DAILY_MAX_ENTRIES}) reached, skipping.")
-                            continue
+                    if status in ["TRIGGER", "SOFT_TRIGGER"] and not result.get("invalidated", False):
+                        # [FEATURE-1] Save debug log anyway for history
+                        try:
+                            log_entry = {
+                                "symbol": symbol,
+                                "mode": mode.value,
+                                "status": status,
+                                "matched_conditions": result.get("matched_conditions", []),
+                                "unmatched_conditions": result.get("unmatched_conditions", []),
+                                "live_indicators": result.get("live_indicators", {}),
+                                "playbook_id": result.get("playbook_id"),
+                                "reasoning": result.get("reasoning", "")
+                            }
+                            db.client.table("monitor_logs").insert(log_entry).execute()
+                            logger.info(f"[Monitor] Log saved to DB for {symbol}/{mode.value}")
+                        except Exception as e:
+                            logger.warning(f"Failed to save monitor log: {e}")
 
-                        logger.info(f"[Monitor] TRIGGER! Running analysis for {symbol}/{mode.value}")
-                        self.run_analysis_with_mode(symbol, mode, is_emergency=False, execute_trades=True)
-                        state_manager.set_system_config(_entry_count_key + symbol, str(entries_today + 1))
+                        # Trigger actual analysis only for strict TRIGGER
+                        if status == "TRIGGER":
+                            # Count guard
+                            entries_today = int(state_manager.get_system_config(_entry_count_key + symbol, "0"))
+                            if entries_today >= DAILY_MAX_ENTRIES:
+                                logger.warning(f"[Monitor] {symbol} daily entry cap ({DAILY_MAX_ENTRIES}) reached, skipping.")
+                                continue
+
+                            logger.info(f"[Monitor] TRIGGER! Running analysis for {symbol}/{mode.value}")
+                            self.run_analysis_with_mode(symbol, mode, is_emergency=False, execute_trades=True)
+                            state_manager.set_system_config(_entry_count_key + symbol, str(entries_today + 1))
+                        else:
+                            # SOFT_TRIGGER: Just notify via Telegram (handled below in the loop)
+                            logger.info(f"[Monitor] SOFT_TRIGGER detected for {symbol}/{mode.value}. Notifying user.")
+
 
                 except Exception as e:
                     logger.error(f"Monitor error {symbol}/{mode.value}: {e}")
@@ -1513,8 +1560,8 @@ class Orchestrator:
                         f"<b>Hourly Monitor</b>\n"
                         f"<code>{symbol}</code>\n"
                         f"AI Analysis: {'ON' if analysis_enabled else 'OFF'}\n"
-                        f"- SWING: <b>{swing_status}</b> | {swing_res.get('reasoning', 'No details')}\n"
-                        f"- POSITION: <b>{pos_status}</b> | {pos_res.get('reasoning', 'No details')}"
+                        f"{_lane_line('SWING', swing_res)}\n"
+                        f"{_lane_line('POSITION', pos_res)}"
                     )
                     asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, msg))
                     
@@ -1522,14 +1569,13 @@ class Orchestrator:
                         from mcp_server.tools import mcp_tools
                         import base64
                         for lane, status in [("swing", swing_status), ("position", pos_status)]:
-                            if status in ["WATCH", "TRIGGER"]:
+                            if status in ["WATCH", "TRIGGER", "SOFT_TRIGGER"]:
                                 chart_res = mcp_tools.get_chart_image(symbol, lane=lane)
                                 if "chart_base64" in chart_res:
                                     chart_bytes = base64.b64decode(chart_res["chart_base64"])
                                     asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption=f"📊 {symbol} {lane.upper()} Chart - {status}"))
                     except Exception as e:
                         logger.warning(f"Failed to send hourly monitor chart for {symbol}: {e}")
-                        asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"⚠️ {symbol} 차트 전송 실패: {e}"))
             except Exception as e:
                 logger.warning(f"Failed to send consolidated monitor message for {symbol}: {e}")
 

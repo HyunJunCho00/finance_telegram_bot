@@ -210,13 +210,26 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 unmatched.append(f"NLP condition needs manual review: {ec}")
                 
         # 3. Final Output
+        # [FEATURE-2] Soft-Trigger Logic: If matching > threshold, elevate status
+        total_entry_count = len(entry_conds)
+        match_count = len(matched)
+        match_ratio = match_count / total_entry_count if total_entry_count > 0 else 0
+        
+        THRESHOLD = settings.MONITOR_SOFT_TRIGGER_THRESHOLD
+        
         result_status = "NO_ACTION"
-        if len(matched) > 0 and len(unmatched) == 0:
+        if match_count > 0 and len(unmatched) == 0:
             result_status = "TRIGGER"
-        elif len(matched) > 0:
+        elif match_ratio >= THRESHOLD:
+            result_status = "SOFT_TRIGGER"
+        elif match_count > 0:
             result_status = "WATCH"
             
-        reasoning = "모든 결정론적 조건이 충족되었습니다." if result_status == "TRIGGER" else f"{len(unmatched)}개 조건 대기 중."
+        reasoning = (
+            "모든 결정론적 조건이 충족되었습니다." if result_status == "TRIGGER"
+            else f"{match_count}/{total_entry_count} 조건 만족 (Soft-Trigger)." if result_status == "SOFT_TRIGGER"
+            else f"{len(unmatched)}개 조건 대기 중."
+        )
         
         result = {
             "status": result_status,
@@ -225,10 +238,14 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             "matched_conditions": matched,
             "unmatched_conditions": unmatched,
             "invalidated": False,
-            "reasoning": reasoning
+            "reasoning": reasoning,
+            # [FEATURE-1] Extra context for DB debug logging
+            "live_indicators": live,
+            "playbook_id": playbook.get("id"),
+            "match_ratio": round(match_ratio, 2)
         }
         
-        logger.info(f"Monitor [{symbol}/{mode}]: {result_status} — {reasoning}")
+        logger.info(f"Monitor [{symbol}/{mode}]: {result_status} ({match_count}/{total_entry_count}) — {reasoning}")
         return result
 
     def summarize_current_status(self, indicators: dict) -> str:
@@ -237,7 +254,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             "You are a Market Status Monitor. Provide a concise, data-driven summary "
             "of current market indicators for a professional trader. "
             "Focus on Funding Rates, OI Divergence, MFI proxy, and breaking news. "
-            "Format in clean HTML tags (<b>, <i>, <code>) with bullet points and emojis. Do NOT use Markdown asterisks (**). Under 150 words. "
+            "Format in clean HTML tags (<b>, <i>, <code>) with bullet points and emojis. Do NOT use Markdown asterisks (**). Do NOT use <ul>, <ol>, or <li> tags. Use plain bullet characters like '-'. Under 150 words. "
             "출력은 반드시 한국어로 작성하세요."
         )
         user_message = (

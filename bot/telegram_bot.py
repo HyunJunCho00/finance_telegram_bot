@@ -12,6 +12,7 @@ Commands:
 /help     - List all commands
 """
 from typing import List, Optional, Dict
+import re
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from config.settings import settings, TradingMode
@@ -193,13 +194,28 @@ class TradingBot:
         """Send a message via the bot API (stateless)."""
         from telegram import Bot
         bot = Bot(token=self.bot_token)
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode='HTML')
+        safe_text = self._sanitize_html_for_telegram(text)
+        await bot.send_message(chat_id=chat_id, text=safe_text, parse_mode='HTML')
 
     async def send_photo(self, chat_id: str, photo_bytes: bytes, caption: str = ""):
         """Send a photo via the bot API (stateless)."""
         from telegram import Bot
         bot = Bot(token=self.bot_token)
-        await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=caption, parse_mode='HTML')
+        safe_caption = self._sanitize_html_for_telegram(caption)
+        await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=safe_caption, parse_mode='HTML')
+
+    @staticmethod
+    def _sanitize_html_for_telegram(text: str) -> str:
+        """Normalize common unsupported HTML list tags into plain bullets."""
+        if not text:
+            return text
+
+        sanitized = text
+        sanitized = re.sub(r"</?ul[^>]*>", "", sanitized, flags=re.IGNORECASE)
+        sanitized = re.sub(r"<li[^>]*>\s*", "\n- ", sanitized, flags=re.IGNORECASE)
+        sanitized = re.sub(r"</li>", "", sanitized, flags=re.IGNORECASE)
+        sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
+        return sanitized.strip()
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(

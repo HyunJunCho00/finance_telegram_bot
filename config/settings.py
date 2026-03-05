@@ -160,6 +160,7 @@ class Settings(BaseSettings):
 
     # 7. monitor_hourly OpenRouter (free)
     MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
+    MONITOR_SOFT_TRIGGER_THRESHOLD: float = 0.7
 
     # 8. cloudflare_triage / cloudflare_rerank (CF infra)
     MODEL_CF_TRIAGE: str = "@cf/meta/llama-3-8b-instruct-awq"
@@ -217,6 +218,9 @@ class Settings(BaseSettings):
     # POSITION: every 24 hours (once daily at 09:00 KST)
     SWING_INTERVAL_HOURS: int = 8
     POSITION_INTERVAL_HOURS: int = 24
+    # Legacy mode-aware analysis scheduler (job_analysis). Default OFF because
+    # daily_precision + hourly_monitor are the primary orchestration path.
+    ENABLE_LEGACY_ANALYSIS_JOB: bool = False
 
     # ===== Historical Window per Mode (for chart/context loading from GCS) =====
     # SWING: 12 months

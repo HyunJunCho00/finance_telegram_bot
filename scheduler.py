@@ -182,16 +182,22 @@ def job_routine_market_status():
             
         indicators["TELEGRAM_INTEL"] = telegram_intel
 
-        summary = market_monitor_agent.summarize_current_status(indicators)
-        logger.success(f"Market Summary Generated:\n{summary}")
-
-        # Optionally send to Telegram
+        # [FEATURE-3] Split reports for better readability
         from bot.telegram_bot import trading_bot
         if trading_bot:
             import asyncio
             
-            # Send text-only summary (no chart attachments).
-            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"📢 <b>정기 시장 업데이트</b>\n\n{summary}"))
+            # Message 1: News Briefing (only if news exists)
+            if telegram_intel and "주요 뉴스 없음" not in telegram_intel:
+                news_header = "<b>📰 최근 1시간 뉴스 브리핑 (Synthesized)</b>"
+                asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"{news_header}\n\n{telegram_intel}"))
+            
+            # Message 2: Market Status Summary (Indicators)
+            market_header = "<b>📊 주요 시장 지표 업데이트</b>"
+            summary = market_monitor_agent.summarize_current_status(indicators)
+            logger.success(f"Market Summary Generated:\n{summary}")
+            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"{market_header}\n\n{summary}"))
+
 
     except Exception as e:
         logger.error(f"Routine market status job error: {e}")
@@ -456,13 +462,18 @@ def main():
         max_instances=1,
     )
 
-    # Legacy mode-aware analysis (kept for emergency/manual trigger via bot)
-    scheduler_config.scheduler.add_job(
-        job_analysis,
-        scheduler_config._build_analysis_trigger(mode),
-        id='job_analysis',
-        max_instances=1,
-    )
+    # Legacy mode-aware analysis (optional). Primary path is:
+    # daily_precision (1/day) + hourly_monitor (1h) + routine_market_status (1h).
+    if settings.ENABLE_LEGACY_ANALYSIS_JOB:
+        scheduler_config.scheduler.add_job(
+            job_analysis,
+            scheduler_config._build_analysis_trigger(mode),
+            id='job_analysis',
+            max_instances=1,
+        )
+        logger.info("Legacy job_analysis is ENABLED (interval-based mode trigger).")
+    else:
+        logger.info("Legacy job_analysis is DISABLED (using precision+monitor cadence).")
 
     # Routine Market Status (Free-First) ??kept for passive hourly Telegram update
     scheduler_config.scheduler.add_job(
@@ -500,6 +511,10 @@ def main():
 
     scheduler_config.scheduler.start()
     logger.info("Scheduler started.")
+    logger.info(
+        "Cadence(UTC): daily_precision=00:00 | telegram_batch=hh:05 | crypto_news=hh:10 | "
+        "hourly_monitor=hh:15 | market_status=hh:20 | hourly_eval=hh:45"
+    )
 
     # [FIX Cold Start] Run initial data collection immediately so first analysis has data
     logger.info("Running initial data collection (cold start bootstrap)...")
