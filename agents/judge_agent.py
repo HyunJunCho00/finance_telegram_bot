@@ -29,6 +29,13 @@ YOUR JOB: Make a FINAL trading decision.
 CRITICAL V9 RULE: You MUST perform Falsifiability Analysis BEFORE your final decision. Identify the strongest evidence AGAINST your primary bias.
 If the Meta-Agent indicates a high-risk regime, you MUST demand higher confidence levels for any entry.
 
+CRITICAL V10 RULE - PLAYBOOK GENERATION: 
+Regardless of your decision (even if HOLD), you MUST generate a `monitoring_playbook` that the Hourly Monitor can use. 
+- If your decision is LONG/SHORT, the `entry_conditions` should be the specific triggers that define your confirmed entry. 
+- If your decision is HOLD, the `entry_conditions` should be the "What needs to happen for me to enter?" scenario.
+- Use metrics: `price`, `funding_rate`, `oi_chg_pct`, `price_chg_pct_1h`, `volatility`.
+- Ensure operators are one of: `>`, `<`, `>=`, `<=`, `==`.
+
 {mode_specific_rules}
 
 Output your decision as JSON:
@@ -53,7 +60,27 @@ Output your decision as JSON:
   "expected_profit_pct": float,
   "expected_loss_pct": float,
   "ev_rationale": "Clear math-based explanation of the Expected Value calculation.",
-  "key_factors": ["short bullet 1", "short bullet 2", ...]
+  "key_factors": ["short bullet 1", "short bullet 2", ...],
+  "monitoring_playbook": {{
+    "entry_conditions": [
+        {{"metric": "price", "operator": ">", "value": 50000}},
+        {{"metric": "funding_rate", "operator": "<", "value": 0.01}},
+        {{"metric": "oi_chg_pct", "operator": ">", "value": 1.5}}
+    ],
+    "invalidation_conditions": [
+        {{"metric": "price", "operator": "<", "value": 48000}}
+    ]
+  }},
+  "daily_dual_plan": {{
+    "swing_plan": {{
+      "entry_conditions": [{{"metric": "price", "operator": ">", "value": 50000}}],
+      "invalidation_conditions": [{{"metric": "price", "operator": "<", "value": 48000}}]
+    }},
+    "position_plan": {{
+      "entry_conditions": [{{"metric": "price", "operator": ">", "value": 50000}}],
+      "invalidation_conditions": [{{"metric": "price", "operator": "<", "value": 47000}}]
+    }}
+  }}
 }}
 
 CRITICAL: All reasoning, final_logic, counter_scenario, and key_factors MUST be written in Korean. 
@@ -251,17 +278,46 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
                     depth -= 1
                     if depth == 0:
                         json_str = response[start_idx:i + 1]
-                        return json.loads(json_str)
+                        return self._normalize_decision(json.loads(json_str))
 
             # Fallback: simple rfind (original behavior)
             end_idx = response.rfind('}') + 1
             if end_idx > start_idx:
-                return json.loads(response[start_idx:end_idx])
+                return self._normalize_decision(json.loads(response[start_idx:end_idx]))
 
             return self._default_decision()
         except Exception as e:
             logger.error(f"Decision parsing error: {e}")
             return self._default_decision()
+
+    def _normalize_playbook(self, playbook: Optional[Dict]) -> Dict:
+        if not isinstance(playbook, dict):
+            playbook = {}
+        entry = playbook.get("entry_conditions", [])
+        invalidation = playbook.get("invalidation_conditions", [])
+        return {
+            "entry_conditions": entry if isinstance(entry, list) else [],
+            "invalidation_conditions": invalidation if isinstance(invalidation, list) else [],
+        }
+
+    def _normalize_decision(self, decision: Dict) -> Dict:
+        if not isinstance(decision, dict):
+            return self._default_decision()
+
+        monitoring = self._normalize_playbook(decision.get("monitoring_playbook"))
+        dual = decision.get("daily_dual_plan", {})
+        if not isinstance(dual, dict):
+            dual = {}
+
+        swing_plan = self._normalize_playbook(dual.get("swing_plan", monitoring))
+        position_plan = self._normalize_playbook(dual.get("position_plan", monitoring))
+
+        decision["monitoring_playbook"] = monitoring
+        decision["daily_dual_plan"] = {
+            "swing_plan": swing_plan,
+            "position_plan": position_plan,
+        }
+        return decision
 
     def _default_decision(self) -> Dict:
         return {
@@ -285,7 +341,21 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
             "expected_profit_pct": 0.0,
             "expected_loss_pct": 0.0,
             "ev_rationale": "System failure fallback.",
-            "key_factors": []
+            "key_factors": [],
+            "monitoring_playbook": {
+                "entry_conditions": [],
+                "invalidation_conditions": []
+            },
+            "daily_dual_plan": {
+                "swing_plan": {
+                    "entry_conditions": [],
+                    "invalidation_conditions": []
+                },
+                "position_plan": {
+                    "entry_conditions": [],
+                    "invalidation_conditions": []
+                }
+            }
         }
 
 

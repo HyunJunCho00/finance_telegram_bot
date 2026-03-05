@@ -111,6 +111,7 @@ class AnalysisState(TypedDict):
     market_regime: str
     regime_context: dict
     final_decision: Dict
+    daily_dual_plan: dict
     report: Optional[Dict]
 
     # Error tracking
@@ -725,7 +726,12 @@ def node_judge_agent(state: AnalysisState) -> dict:
         decision["reasoning"]["final_logic"] = f"[SCALING] Allocation constrained by {risk_budget}% Risk Budget. EV is {ev:.2f}. " + decision["reasoning"].get("final_logic", "")
 
     # For compatibility with legacy metrics/logging, set conviction to win_probability_pct
-    return {"final_decision": decision, "conviction_score": win_prob * 100}
+    dual_plan = decision.get("daily_dual_plan", {}) if isinstance(decision, dict) else {}
+    return {
+        "final_decision": decision,
+        "daily_dual_plan": dual_plan if isinstance(dual_plan, dict) else {},
+        "conviction_score": win_prob * 100
+    }
 
 def node_risk_manager(state: AnalysisState) -> dict:
     """Run Risk Manager (CRO). VETO power over Judge's draft."""
@@ -1121,74 +1127,71 @@ def _build_full_context(state: AnalysisState) -> str:
 # ✨ Daily Playbook Generation ✨
 
 def node_generate_playbook(state) -> dict:
-    """Generate and persist Daily Playbook (entry/exit/invalidation/risk conditions).
-    Called once per day per symbol/mode. Result stored in DB for Hourly Monitor.
-    """
-    from agents.ai_router import ai_client
-    import json as _json
+    """Persist Daily Playbook(s) from Judge output without extra LLM calls."""
     import datetime as _dt
 
     symbol = state["symbol"]
-    mode = state["mode"]
-    compact = state.get("market_data_compact", "")
-    funding_ctx = state.get("funding_context", "")
-    rag_ctx = state.get("rag_context", "")
-    regime = state.get("market_regime", "RANGE_BOUND")
+    mode_hint = str(state.get("mode", "position")).lower()
     final_decision = state.get("final_decision", {})
+    dual_plan = state.get("daily_dual_plan", {})
+    if not isinstance(dual_plan, dict):
+        dual_plan = final_decision.get("daily_dual_plan", {}) if isinstance(final_decision, dict) else {}
+    if not isinstance(dual_plan, dict):
+        dual_plan = {}
 
-    PLAYBOOK_SYSTEM = """You are a senior quant strategist creating a 24-hour trading playbook.
-Output strict JSON only:
-{
-  "bias": "LONG|SHORT|NEUTRAL",
-  "entry_conditions": ["specific measurable condition 1", ...],
-  "exit_conditions": ["TP/SL condition 1", ...],
-  "invalidation_conditions": ["condition that cancels the trade idea", ...],
-  "risk_limits": {"max_allocation_pct": 15, "max_leverage": 2, "max_hold_hours": 48},
-  "key_levels": {"95000": "resistance", "90000": "support"},
-  "summary": "one-line playbook summary"
-}"""
+    def _normalize_playbook(playbook: dict) -> dict:
+        if not isinstance(playbook, dict):
+            playbook = {}
+        entry = playbook.get("entry_conditions", [])
+        invalid = playbook.get("invalidation_conditions", [])
+        return {
+            "entry_conditions": entry if isinstance(entry, list) else [],
+            "invalidation_conditions": invalid if isinstance(invalid, list) else [],
+        }
 
-    user_msg = (
-        f"MODE: {str(mode).upper()}  SYMBOL: {symbol}  REGIME: {regime}\n\n"
-        f"MARKET SNAPSHOT:\n{str(compact)[:3000]}\n\n"
-        f"FUNDING/OI CONTEXT:\n{str(funding_ctx)[:1000]}\n\n"
-        f"RAG CONTEXT:\n{str(rag_ctx)[:1000]}\n\n"
-        f"JUDGE DECISION: {str(final_decision.get('decision','HOLD'))}\n"
-        f"Create the Daily Playbook for the next 24 hours. Output strict JSON only."
-    )
+    now_iso = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    records = []
 
-    try:
-        raw = ai_client.generate_response(
-            system_prompt=PLAYBOOK_SYSTEM,
-            user_message=user_msg,
-            role="judge",
-            temperature=0.2,
-            max_tokens=1000,
-        )
-        start, end = raw.find("{"), raw.rfind("}") + 1
-        playbook = {}
-        if start != -1 and end > start:
-            playbook = _json.loads(raw[start:end])
-
-        record = {
+    swing_plan = dual_plan.get("swing_plan")
+    position_plan = dual_plan.get("position_plan")
+    if isinstance(swing_plan, dict) or isinstance(position_plan, dict):
+        for lane_mode, raw_plan in [("swing", swing_plan), ("position", position_plan)]:
+            if isinstance(raw_plan, dict):
+                if "monitoring_playbook" in raw_plan and isinstance(raw_plan["monitoring_playbook"], dict):
+                    raw_plan = raw_plan["monitoring_playbook"]
+                records.append({
+                    "symbol": symbol,
+                    "mode": lane_mode,
+                    "playbook": _normalize_playbook(raw_plan),
+                    "created_at": now_iso,
+                    "ttl_hours": 24,
+                    "source_decision": str(final_decision.get("decision", "HOLD")),
+                })
+    else:
+        fallback = final_decision.get("monitoring_playbook", {}) if isinstance(final_decision, dict) else {}
+        if isinstance(fallback, dict) and "monitoring_playbook" in fallback and isinstance(fallback["monitoring_playbook"], dict):
+            fallback = fallback["monitoring_playbook"]
+        if not isinstance(fallback, dict) or not fallback:
+            logger.warning(f"node_generate_playbook: no dual plan or monitoring_playbook for {symbol}; skip save")
+            return {}
+        records.append({
             "symbol": symbol,
-            "mode": str(mode),
-            "playbook": playbook,
-            "created_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+            "mode": mode_hint if mode_hint in ("swing", "position") else "position",
+            "playbook": _normalize_playbook(fallback),
+            "created_at": now_iso,
             "ttl_hours": 24,
             "source_decision": str(final_decision.get("decision", "HOLD")),
-        }
+        })
+
+    for rec in records:
         try:
             db.client.table("daily_playbooks").upsert(
-                record, on_conflict="symbol,mode"
+                rec, on_conflict="symbol,mode"
             ).execute()
-            logger.info(f"Daily Playbook saved: {symbol}/{mode} bias={playbook.get('bias','?')}")
+            logger.info(f"Daily Playbook saved: {rec['symbol']}/{rec['mode']}")
         except Exception as db_err:
-            logger.warning(f"Playbook DB upsert failed (non-fatal): {db_err}")
-        return {}
-    except Exception as e:
-        logger.error(f"node_generate_playbook error: {e}")
-        return {}
+            logger.warning(f"Playbook DB upsert failed ({rec['symbol']}/{rec['mode']}): {db_err}")
+    return {}
 
 def build_analysis_graph():
     """Build the multi-agent analysis graph with parallel execution."""
@@ -1325,6 +1328,7 @@ class Orchestrator:
             "chart_image_b64": None,
             "chart_bytes": None,
             "final_decision": {},
+            "daily_dual_plan": {},
             "report": None,
             "errors": [],
         }
@@ -1422,15 +1426,13 @@ class Orchestrator:
 
 
     def run_daily_playbook(self) -> None:
-        """00:00 UTC serial: BTC POSITION → ETH POSITION → BTC SWING → ETH SWING.
-        Each analysis runs full pipeline (including execution) and also refreshes playbook.
+        """00:00 UTC serial: one high-quality run per symbol, dual-lane playbook save.
+        BTC POSITION -> ETH POSITION. Each run should include daily_dual_plan from Judge.
         """
         import time as _time
         schedule = [
             ("BTCUSDT", TradingMode.POSITION),
             ("ETHUSDT", TradingMode.POSITION),
-            ("BTCUSDT", TradingMode.SWING),
-            ("ETHUSDT", TradingMode.SWING),
         ]
         logger.info("=== Daily Precision Run (00:00 UTC) ===")
         for i, (symbol, mode) in enumerate(schedule):
@@ -1453,11 +1455,8 @@ class Orchestrator:
                 node_generate_playbook({
                     "symbol": symbol,
                     "mode": mode.value,
-                    "market_data_compact": _market_data_cache.get(symbol, {}).get("compact", ""),
-                    "funding_context": "",
-                    "rag_context": "",
-                    "market_regime": "RANGE_BOUND",
                     "final_decision": state if isinstance(state, dict) else {},
+                    "daily_dual_plan": (state.get("daily_dual_plan", {}) if isinstance(state, dict) else {}),
                 })
                 logger.info(f"[Daily] {symbol} {mode.value.upper()} done.")
             except Exception as e:

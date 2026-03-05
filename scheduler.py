@@ -273,13 +273,8 @@ def job_daily_cleanup():
 
 
 def job_daily_precision():
-    """00:00 UTC serial: BTC POSITION ??ETH POSITION ??BTC SWING ??ETH SWING.
-    Runs full analysis and refreshes Daily Playbooks.
-    Schedule:
-      00:00 BTC POSITION
-      00:03 ETH POSITION
-      00:06 BTC SWING
-      00:09 ETH SWING
+    """00:00 UTC serial: BTC POSITION -> ETH POSITION.
+    Runs high-quality analysis once per symbol and persists dual-lane playbooks.
     """
     try:
         from config.local_state import state_manager

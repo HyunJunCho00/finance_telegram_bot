@@ -322,10 +322,10 @@ Now analyze the provided chart:"""
                 caption=caption_snippet,
             )
 
-            from agents.claude_client import claude_client
-            # Run blocking VLM call in thread pool to avoid blocking Telethon event loop
+            from agents.ai_router import ai_client
+            # [BILLING-GUARD] Use ai_client (mapped to free Gemini/Flash) instead of direct Claude
             result = await asyncio.to_thread(
-                claude_client.generate_response,
+                ai_client.generate_response,
                 system_prompt=self._VLM_SYSTEM_PROMPT,
                 user_message=user_message,
                 max_tokens=120,

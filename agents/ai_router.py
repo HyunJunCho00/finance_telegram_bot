@@ -1,41 +1,24 @@
-"""Hybrid AI client with multi-LLM routing — 2026 role policy table.
-
-Role → API → Model (single source of truth):
-  judge            → Gemini AI Studio Project A → gemini-3.1-pro-preview
-  vlm_geometric    → Gemini AI Studio Project B → gemini-3.1-pro-preview
-  vlm_telegram_chart → Gemini AI Studio Project B → gemini-3.1-pro-preview
-  meta_regime      → Cerebras              → gpt-oss-120b
-  risk_eval        → Cerebras              → gpt-oss-120b
-  risk_eval_fallback → Groq               → openai/gpt-oss-20b
-  rag_extraction   → Groq                 → openai/gpt-oss-20b
-  news_summarize   → Groq                 → openai/gpt-oss-20b
-  monitor_hourly   → Cerebras              → gpt-oss-120b
-  cloudflare_triage → Cloudflare Workers AI → @cf/meta/llama-3-8b-instruct-awq
-  cloudflare_rerank → Cloudflare Workers AI → @cf/baai/bge-reranker-base
-  claude_standby   → Anthropic            → claude-sonnet-4-6  (manual only)
-  liquidity / microstructure / macro / chat → Gemini Flash → gemini-3-flash-preview
-"""
+"""Hybrid AI router with backend-aware fallback and circuit breaking."""
 
 import base64
 import mimetypes
+import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
 from google import genai
 from google.genai import types
-from anthropic import Anthropic
-from openai import OpenAI
 from loguru import logger
+from openai import OpenAI
 
-import threading
 from config.settings import settings
 
 
 class CloudflareGenerator:
-    """Cloudflare Workers AI — cloudflare_triage and cloudflare_rerank roles."""
+    """Cloudflare Workers AI helper for triage/rerank style requests."""
 
     def __init__(self, model: Optional[str] = None):
-        self._model = model  # e.g. "@cf/meta/llama-3-8b-instruct-awq"
+        self._model = model
         self._account_id = ""
         self._api_key = ""
         self._enabled = False
@@ -58,15 +41,19 @@ class CloudflareGenerator:
         )
 
     def generate(
-        self, system_prompt: str, user_message: str, max_tokens: int = 1000,
-        model: Optional[str] = None
+        self,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int = 1000,
+        model: Optional[str] = None,
     ) -> Optional[str]:
         self._init()
         if not self._enabled:
             return None
+
         import requests
-        _model = model or self._model or settings.MODEL_CF_TRIAGE
-        url = self._url(_model)
+
+        model_id = model or self._model or settings.MODEL_CF_TRIAGE
         payload = {
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -74,27 +61,27 @@ class CloudflareGenerator:
             ],
             "max_tokens": max_tokens,
         }
+
         try:
             if self._session is None:
                 self._session = requests.Session()
-                self._session.headers.update({"Authorization": f"Bearer {self._api_key}"})
-            resp = self._session.post(url, json=payload, timeout=10.0)
+                self._session.headers.update(
+                    {"Authorization": f"Bearer {self._api_key}"}
+                )
+            resp = self._session.post(self._url(model_id), json=payload, timeout=10.0)
             resp.raise_for_status()
             return resp.json().get("result", {}).get("response", "")
         except Exception as e:
-            logger.warning(f"CloudflareGenerator failed ({_model}): {e}")
+            logger.warning(f"CloudflareGenerator failed ({model_id}): {e}")
             return None
 
 
 class AIClient:
     def __init__(self):
-        # ── Gemini (dual-project) ─────────────────────────────────────────────
-        legacy_default_key = getattr(settings, "GEMINI_API_KEY", "")
-        judge_key = getattr(settings, "GEMINI_API_KEY_JUDGE", "") or legacy_default_key
-        vlm_key = getattr(settings, "GEMINI_API_KEY_VLM", "") or legacy_default_key
-        # Final safety net for gemini_default path:
-        # VLM key -> Judge key -> legacy default key -> Vertex AI auth.
-        default_key = vlm_key or judge_key or legacy_default_key
+        judge_key = getattr(settings, "GEMINI_API_KEY_JUDGE", "")
+        vlm_key = getattr(settings, "GEMINI_API_KEY_VLM", "")
+        default_key = judge_key or vlm_key
+        can_use_vertex = bool(getattr(settings, "PROJECT_ID", ""))
 
         def _make_gemini(key: str):
             if key:
@@ -102,177 +89,128 @@ class AIClient:
             return genai.Client(
                 vertexai=True,
                 project=settings.PROJECT_ID,
-                location=settings.VERTEX_REGION_GEMINI or "global",
+                location=getattr(settings, "VERTEX_REGION_GEMINI", "") or settings.vertex_region or "global",
             )
 
-        self._gemini_default = _make_gemini(default_key)
-        self._gemini_judge = _make_gemini(judge_key)
-        self._gemini_vlm = _make_gemini(vlm_key)
-        logger.info("Gemini clients initialized (default / judge / vlm)")
+        self._gemini_default = (
+            _make_gemini(default_key) if (default_key or can_use_vertex) else None
+        )
+        self._gemini_judge = (
+            _make_gemini(judge_key) if (judge_key or can_use_vertex) else self._gemini_default
+        )
+        self._gemini_vlm = (
+            _make_gemini(vlm_key) if (vlm_key or can_use_vertex) else self._gemini_default
+        )
 
-        # ── Anthropic (claude_standby — reserved) ────────────────────────────
+        if self._gemini_default:
+            backend = "AI Studio key" if default_key else "Vertex AI"
+            logger.info(f"Gemini clients initialized (default / judge / vlm) via {backend}")
+        else:
+            logger.warning("Gemini disabled: no API key and no PROJECT_ID for Vertex AI")
+
         self._claude_client = None
-
-        # ── Cerebras (meta_regime + risk_eval) ───────────────────────────────
-        self._cerebras_client = None  # lazy init
-
-        # ── Groq (rag_extraction / news_summarize / risk_eval_fallback) ──────
+        self._cerebras_client = None
         self._groq_client = None
-
-        # ── OpenRouter (monitor_hourly — free tier) ───────────────────────────
         self._openrouter_client = None
-
-        # ── Cloudflare Workers AI ─────────────────────────────────────────────
         self._cf_generator = CloudflareGenerator()
 
-        # backward-compat
-        self.default_model_id = "gemini-3-flash-preview"  # chat/fallback only
+        self.default_model_id = "gemini-3-flash-preview"
         self.premium_model_id = settings.MODEL_JUDGE
 
-        # ── Rate Limiting & Concurrency Control (V14.3) ──────────────────────
         self._global_api_lock = threading.Lock()
         self._last_call_timestamp = 0.0
-        self._MIN_GAP = 0.5  # 500ms floor between ANY two AI calls
+        self._MIN_GAP = 0.5
 
-        # ── Groq Performance-Ordered Relay Pools (V14.7 - Mar 2026) ──────────
-        # High-Priority: Only reasoning-capable large models (Reasoning HQ)
         self._GROQ_REASONING_POOL = [
             "openai/gpt-oss-120b",
             "llama-3.3-70b-versatile",
             "meta-llama/llama-4-maverick-17b-128e-instruct",
-            "qwen/qwen3-32b"
+            "qwen/qwen3-32b",
         ]
-        
-        # General: All available models, including high-throughput / unlimited
         self._GROQ_GENERAL_POOL = [
             "meta-llama/llama-4-maverick-17b-128e-instruct",
             "qwen/qwen3-32b",
             "meta-llama/llama-4-scout-17b-16e-instruct",
             "openai/gpt-oss-20b",
             "groq/compound",
-            "llama-3.1-8b-instant"
+            "llama-3.1-8b-instant",
         ]
 
-        # ── Circuit Breaker State (V14.8) ────────────────────────────────────
-        self._circuit_breakers = {} # model_id -> expiry_timestamp
+        self._circuit_breakers = {}
 
-
-    # ── Lazy clients ──────────────────────────────────────────────────────────
     @property
     def claude_client(self):
-        if self._claude_client is None:
-            if settings.ANTHROPIC_API_KEY:
-                self._claude_client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-            else:
-                logger.warning("ANTHROPIC_API_KEY not set — claude_standby unavailable")
-                return None
-        return self._claude_client
+        return None
 
     @property
     def cerebras_client(self):
-        """Cerebras via OpenAI-compatible endpoint."""
         if self._cerebras_client is None:
             key = getattr(settings, "CEREBRAS_API_KEY", "")
-            if key:
-                self._cerebras_client = OpenAI(
-                    base_url="https://api.cerebras.ai/v1",
-                    api_key=key,
-                )
-            else:
+            if not key:
                 logger.warning("CEREBRAS_API_KEY not set")
                 return None
+            self._cerebras_client = OpenAI(
+                base_url="https://api.cerebras.ai/v1",
+                api_key=key,
+            )
         return self._cerebras_client
 
     @property
     def groq_client(self):
-        if self._groq_client is None:
-            if settings.GROQ_API_KEY:
-                self._groq_client = OpenAI(
-                    base_url="https://api.groq.com/openai/v1",
-                    api_key=settings.GROQ_API_KEY,
-                )
-            else:
-                return None
+        if self._groq_client is None and settings.GROQ_API_KEY:
+            self._groq_client = OpenAI(
+                base_url="https://api.groq.com/openai/v1",
+                api_key=settings.GROQ_API_KEY,
+            )
         return self._groq_client
 
     @property
     def openrouter_client(self):
         if self._openrouter_client is None:
-            key = (
-                getattr(settings, "OPENROUTER_API_KEY", "")
-            )
-            if key:
-                self._openrouter_client = OpenAI(
-                    base_url="https://openrouter.ai/api/v1",
-                    api_key=key,
-                )
-            else:
-                logger.warning("OPENROUTER_API_KEY not set — monitor_hourly will fall back")
+            key = getattr(settings, "OPENROUTER_API_KEY", "")
+            if not key:
+                logger.warning("OPENROUTER_API_KEY not set; openrouter route disabled")
                 return None
+            self._openrouter_client = OpenAI(
+                base_url="https://openrouter.ai/api/v1",
+                api_key=key,
+            )
         return self._openrouter_client
 
-    def _openai_client(self):
-        if settings.OPENAI_API_KEY:
-            return OpenAI(api_key=settings.OPENAI_API_KEY)
-        return None
-
-    # ── Circuit Breaker Helpers ──────────────────────────────────────────────
     def _is_model_available(self, model_id: str) -> bool:
-        """Check if a model is currently blocked by circuit breaker."""
         expiry = self._circuit_breakers.get(model_id, 0)
-        if time.time() > expiry:
-            return True
-        return False
+        return time.time() > expiry
 
     def _mark_model_exhausted(self, model_id: str, duration: int = 3600):
-        """Block a model for a specific duration (default 1 hour)."""
         logger.warning(f"CIRCUIT BREAKER: Blocking [{model_id}] for {duration}s due to Rate Limit")
         self._circuit_breakers[model_id] = time.time() + duration
 
-    # ── Role → (gemini_client, model_id, input_cap) ──────────────────────────
     def _get_route(self, role: str) -> Tuple[str, str, int]:
-        """Returns (backend_tag, model_id, input_cap_chars).
-
-        backend_tag: "gemini_default" | "gemini_judge" | "gemini_vlm" |
-                     "cerebras" | "groq" | "openrouter" | "claude" | "cf"
-        """
         role = (role or "general").lower()
-
-        ROLE_MAP = {
-            # judge / vlm
-            "judge":              ("gemini_judge",   settings.MODEL_JUDGE,              settings.MAX_INPUT_CHARS_JUDGE),
-            "self_correction":    ("gemini_judge",   settings.MODEL_SELF_CORRECTION,    settings.MAX_INPUT_CHARS_SELF_CORRECTION),
-            "vlm_geometric":      ("gemini_vlm",     settings.MODEL_VLM_GEOMETRIC,      getattr(settings, "MAX_INPUT_CHARS_VLM_GEOMETRIC", 15000)),
-            "vlm_analysis":       ("gemini_vlm",     settings.MODEL_VLM_GEOMETRIC,      15000),
-            "vlm_telegram_chart": ("gemini_vlm",     settings.MODEL_VLM_TELEGRAM_CHART, settings.MAX_INPUT_CHARS_VLM_TELEGRAM_CHART),
-            "rag_vision":         ("gemini_vlm",     settings.MODEL_VLM_GEOMETRIC,      15000),
-            # meta_regime / risk_eval → Cerebras
-            "meta_regime":        ("cerebras",       settings.MODEL_META_REGIME,        15000),
-            "macro":              ("cerebras",       settings.MODEL_META_REGIME,        settings.MAX_INPUT_CHARS_MACRO),
-            "risk_eval":          ("cerebras",       settings.MODEL_RISK_EVAL,          10000),
-            "risk_eval_fallback": ("groq",           settings.MODEL_RISK_EVAL_FALLBACK, 10000),
-            # Groq roles
-            "rag_extraction":     ("groq",           settings.MODEL_RAG_EXTRACTION,     settings.MAX_INPUT_CHARS_RAG_EXTRACTION),
-            "news_summarize":     ("groq",           settings.MODEL_NEWS_SUMMARIZE,     10000),
-            "post_mortem":        ("groq",           settings.MODEL_RAG_EXTRACTION,     15000),
-            "feedback":           ("groq",           settings.MODEL_RAG_EXTRACTION,     15000),
-            # OpenRouter — monitor_hourly
-            "monitor_hourly":     ("cerebras",       settings.MODEL_MONITOR_HOURLY,     8000),
-            # Cloudflare
-            "cloudflare_triage":  ("cf",             settings.MODEL_CF_TRIAGE,          5000),
-            "cloudflare_rerank":  ("cf",             settings.MODEL_CF_RERANK,          5000),
-            "triage":             ("cf",             settings.MODEL_CF_TRIAGE,          5000),
-            # claude_standby — manual only
-            "claude_standby":     ("claude",         settings.MODEL_CLAUDE_STANDBY,     20000),
-            # Chat / UI only — NOT used in analysis pipeline
-            "chat":               ("gemini_default", settings.MODEL_CHAT,               10000),
-            # Chat / UI fallback (not used in analysis pipeline)
+        role_map = {
+            "judge": ("gemini_judge", settings.MODEL_JUDGE, settings.MAX_INPUT_CHARS_JUDGE),
+            "self_correction": ("gemini_judge", settings.MODEL_SELF_CORRECTION, settings.MAX_INPUT_CHARS_SELF_CORRECTION),
+            "vlm_geometric": ("gemini_vlm", settings.MODEL_VLM_GEOMETRIC, getattr(settings, "MAX_INPUT_CHARS_VLM_GEOMETRIC", 15000)),
+            "vlm_analysis": ("gemini_vlm", settings.MODEL_VLM_GEOMETRIC, 15000),
+            "vlm_telegram_chart": ("gemini_vlm", settings.MODEL_VLM_TELEGRAM_CHART, settings.MAX_INPUT_CHARS_VLM_TELEGRAM_CHART),
+            "rag_vision": ("gemini_vlm", settings.MODEL_VLM_GEOMETRIC, 15000),
+            "meta_regime": ("cerebras", settings.MODEL_META_REGIME, 15000),
+            "macro": ("cerebras", settings.MODEL_META_REGIME, settings.MAX_INPUT_CHARS_MACRO),
+            "risk_eval": ("cerebras", settings.MODEL_RISK_EVAL, 10000),
+            "risk_eval_fallback": ("groq", settings.MODEL_RISK_EVAL_FALLBACK, 10000),
+            "rag_extraction": ("groq", settings.MODEL_RAG_EXTRACTION, settings.MAX_INPUT_CHARS_RAG_EXTRACTION),
+            "news_summarize": ("groq", settings.MODEL_NEWS_SUMMARIZE, 10000),
+            "post_mortem": ("groq", settings.MODEL_RAG_EXTRACTION, 15000),
+            "feedback": ("groq", settings.MODEL_RAG_EXTRACTION, 15000),
+            "monitor_hourly": ("cerebras", settings.MODEL_MONITOR_HOURLY, 8000),
+            "cloudflare_triage": ("cf", settings.MODEL_CF_TRIAGE, 5000),
+            "cloudflare_rerank": ("cf", settings.MODEL_CF_RERANK, 5000),
+            "triage": ("cf", settings.MODEL_CF_TRIAGE, 5000),
+            "claude_standby": ("gemini_judge", settings.MODEL_JUDGE, 20000),
+            "chat": ("gemini_default", settings.MODEL_CHAT, 10000),
         }
-
-        if role in ROLE_MAP:
-            return ROLE_MAP[role]
-
-        # Fallback: Groq general if available, else Gemini default
+        if role in role_map:
+            return role_map[role]
         if self.groq_client:
             return ("groq", "llama-3.3-70b-versatile", 15000)
         return ("gemini_default", self.default_model_id, 15000)
@@ -280,9 +218,18 @@ class AIClient:
     def _trim_input(self, text: str, max_chars: int) -> str:
         if not text or len(text) <= max_chars:
             return text or ""
-        return text[:max_chars] + f"\n\n[TRUNCATED {len(text)-max_chars} chars]"
+        return text[:max_chars] + f"\n\n[TRUNCATED {len(text) - max_chars} chars]"
 
-    # ── Public interface ──────────────────────────────────────────────────────
+    def _is_critical_role(self, role: str) -> bool:
+        return role in ["judge", "risk_eval", "meta_regime", "self_correction"]
+
+    def _select_gemini_client(self, backend: str):
+        if backend == "gemini_judge":
+            return self._gemini_judge
+        if backend == "gemini_vlm":
+            return self._gemini_vlm
+        return self._gemini_default
+
     def generate_response(
         self,
         system_prompt: str,
@@ -293,105 +240,296 @@ class AIClient:
         use_premium: bool = False,
         role: str = "general",
     ) -> str:
-        # ── Global Concurrency & Rate Limit Guard ────────────────────────────
         with self._global_api_lock:
-            # Enforce minimum gap between calls
             now = time.time()
             elapsed = now - self._last_call_timestamp
             if elapsed < self._MIN_GAP:
-                wait_time = self._MIN_GAP - elapsed
-                time.sleep(wait_time)
-            
-            # Execute the routed call
+                time.sleep(self._MIN_GAP - elapsed)
+
             result = self._execute_routed_call(
-                system_prompt, user_message, max_tokens, temperature, 
-                chart_image_b64, use_premium, role
+                system_prompt=system_prompt,
+                user_message=user_message,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                chart_image_b64=chart_image_b64,
+                use_premium=use_premium,
+                role=role,
             )
-            
-            # Update timestamp AFTER call completes for a clean post-processing gap
             self._last_call_timestamp = time.time()
             return result
 
     def _execute_routed_call(
-        self, system_prompt: str, user_message: str, max_tokens: int,
-        temperature: float, chart_image_b64: Optional[str],
-        use_premium: bool, role: str
+        self,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int,
+        temperature: float,
+        chart_image_b64: Optional[str],
+        use_premium: bool,
+        role: str,
     ) -> str:
         backend, model_id, cap = self._get_route(role)
         msg = self._trim_input(user_message, cap)
 
-
-        if backend == "gemini_judge":
-            return self._generate_gemini(self._gemini_judge, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64)
-        if backend == "gemini_vlm":
-            return self._generate_gemini(self._gemini_vlm, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64)
-        if backend == "gemini_default":
-            return self._generate_gemini(self._gemini_default, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64)
+        if backend.startswith("gemini"):
+            return self._handle_gemini_backend(
+                backend, model_id, role, system_prompt, msg, max_tokens, temperature, chart_image_b64
+            )
         if backend == "cerebras":
-            result = self._generate_openai_compat(self.cerebras_client, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64, timeout=30.0, name="Cerebras")
-            if result:
-                return result
-            # fallback → Groq risk_eval_fallback
-            logger.warning(f"Cerebras failed for {model_id}, falling back to Groq")
-            return self._generate_openai_compat(self.groq_client, settings.MODEL_RISK_EVAL_FALLBACK, system_prompt, msg, max_tokens, temperature, None, timeout=25.0, name="Groq(fallback)")
+            return self._handle_cerebras_backend(
+                model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64
+            )
         if backend == "groq":
-            # 1. Try original model first if not blocked
-            if self._is_model_available(model_id):
-                result = self._generate_openai_compat(self.groq_client, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64, timeout=25.0, name="Groq")
-                if result: return result
-            else:
-                logger.debug(f"Circuit Breaker: Skipping primary [{model_id}]")
-
-            # 2. Smart Internal Relay based on role priority
-            is_critical = role in ["judge", "risk_eval", "meta_regime", "self_correction"]
-            relay_pool = self._GROQ_REASONING_POOL if is_critical else self._GROQ_GENERAL_POOL
-            
-            logger.warning(f"Groq primary ({model_id}) unavailable or hit limit for role [{role}]. Searching relay pool...")
-            
-            for alt_model in relay_pool:
-                if alt_model == model_id: continue # Already tried
-                if not self._is_model_available(alt_model):
-                    logger.debug(f"Circuit Breaker: Skipping relay candidate [{alt_model}]")
-                    continue
-                
-                logger.info(f"Groq Relay ({role}): Trying [{alt_model}]...")
-                result = self._generate_openai_compat(self.groq_client, alt_model, system_prompt, msg, max_tokens, temperature, chart_image_b64, timeout=20.0, name=f"Groq-Relay({alt_model})")
-                if result:
-                    logger.success(f"Groq Relay SUCCEEDED for [{role}] with [{alt_model}]")
-                    return result
-            
-            # 3. High-Priority Final Fallback
-            if is_critical:
-                logger.warning(f"All Groq models exhausted for critical role [{role}]. Trying Gemini fallback...")
-                return self._generate_gemini(self._gemini_judge, settings.MODEL_JUDGE, system_prompt, msg, max_tokens, temperature, chart_image_b64)
-
-            # 4. Routine Final Fallback
-            logger.warning(f"All Groq relay models failed for [{role}], falling back to basic providers")
-            return self._cf_generator.generate(system_prompt, msg, max_tokens) or \
-                   self._generate_gemini(self._gemini_default, self.default_model_id, system_prompt, msg, max_tokens, temperature, None)
-
-
+            return self._handle_groq_backend(
+                model_id, role, system_prompt, msg, max_tokens, temperature, chart_image_b64
+            )
         if backend == "openrouter":
-            result = self._generate_openai_compat(self.openrouter_client, model_id, system_prompt, msg, max_tokens, temperature, None, timeout=30.0, name="OpenRouter")
+            return self._handle_openrouter_backend(
+                model_id, system_prompt, msg, max_tokens, temperature
+            )
+        if backend == "cf":
+            return self._cf_generator.generate(system_prompt, msg, max_tokens, model=model_id) or self._generate_gemini(
+                self._gemini_default,
+                self.default_model_id,
+                system_prompt,
+                msg,
+                max_tokens,
+                temperature,
+                None,
+            )
+        if backend == "claude":
+            logger.error("Claude backend blocked. Falling back to Gemini judge.")
+            return self._generate_gemini(
+                self._gemini_judge,
+                settings.MODEL_JUDGE,
+                system_prompt,
+                msg,
+                max_tokens,
+                temperature,
+                chart_image_b64,
+            )
+
+        return self._generate_gemini(
+            self._gemini_default,
+            self.default_model_id,
+            system_prompt,
+            msg,
+            max_tokens,
+            temperature,
+            chart_image_b64,
+        )
+
+    def _handle_gemini_backend(
+        self,
+        backend: str,
+        model_id: str,
+        role: str,
+        system_prompt: str,
+        msg: str,
+        max_tokens: int,
+        temperature: float,
+        chart_image_b64: Optional[str],
+    ) -> str:
+        client_obj = self._select_gemini_client(backend)
+        if client_obj and self._is_model_available(model_id):
+            result = self._generate_gemini(
+                client_obj, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64
+            )
             if result:
                 return result
-            logger.warning("OpenRouter failed, falling back to Groq")
-            return self._generate_openai_compat(self.groq_client, "llama-3.3-70b-versatile", system_prompt, msg, max_tokens, temperature, None, timeout=25.0, name="Groq") or ""
-        if backend == "cf":
-            return self._cf_generator.generate(system_prompt, msg, max_tokens, model=model_id) or \
-                   self._generate_gemini(self._gemini_default, self.default_model_id, system_prompt, msg, max_tokens, temperature, None)
-        if backend == "claude":
-            return self._generate_claude(model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64)
 
-        # Final fallback
-        return self._generate_gemini(self._gemini_default, self.default_model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64)
+        logger.warning(f"Gemini {model_id} exhausted or failed for role {role}. Triggering relay...")
+        if self._is_critical_role(role) and self.cerebras_client:
+            return self._generate_openai_compat(
+                self.cerebras_client,
+                settings.MODEL_META_REGIME,
+                system_prompt,
+                msg,
+                max_tokens,
+                temperature,
+                None,
+                name="Cerebras(Relay)",
+            ) or self._generate_openai_compat(
+                self.groq_client,
+                "llama-3.3-70b-versatile",
+                system_prompt,
+                msg,
+                max_tokens,
+                temperature,
+                None,
+                name="Groq(Relay)",
+            )
 
-    # ── Backend implementations ───────────────────────────────────────────────
-    def _generate_gemini(self, client, model_id: str, system_prompt: str, user_message: str,
-                         max_tokens: int, temperature: float,
-                         chart_image_b64: Optional[str] = None) -> str:
+        return self._generate_openai_compat(
+            self.groq_client,
+            "llama-3.1-8b-instant",
+            system_prompt,
+            msg,
+            max_tokens,
+            temperature,
+            None,
+            name="Groq(Relay)",
+        )
+
+    def _handle_cerebras_backend(
+        self,
+        model_id: str,
+        system_prompt: str,
+        msg: str,
+        max_tokens: int,
+        temperature: float,
+        chart_image_b64: Optional[str],
+    ) -> str:
+        result = self._generate_openai_compat(
+            self.cerebras_client,
+            model_id,
+            system_prompt,
+            msg,
+            max_tokens,
+            temperature,
+            chart_image_b64,
+            timeout=30.0,
+            name="Cerebras",
+        )
+        if result:
+            return result
+        logger.warning(f"Cerebras failed for {model_id}, falling back to Groq")
+        return self._generate_openai_compat(
+            self.groq_client,
+            settings.MODEL_RISK_EVAL_FALLBACK,
+            system_prompt,
+            msg,
+            max_tokens,
+            temperature,
+            None,
+            timeout=25.0,
+            name="Groq(fallback)",
+        )
+
+    def _handle_groq_backend(
+        self,
+        model_id: str,
+        role: str,
+        system_prompt: str,
+        msg: str,
+        max_tokens: int,
+        temperature: float,
+        chart_image_b64: Optional[str],
+    ) -> str:
+        if self._is_model_available(model_id):
+            result = self._generate_openai_compat(
+                self.groq_client,
+                model_id,
+                system_prompt,
+                msg,
+                max_tokens,
+                temperature,
+                chart_image_b64,
+                timeout=25.0,
+                name="Groq",
+            )
+            if result:
+                return result
+        else:
+            logger.debug(f"Circuit Breaker: Skipping primary [{model_id}]")
+
+        is_critical = self._is_critical_role(role)
+        relay_pool = self._GROQ_REASONING_POOL if is_critical else self._GROQ_GENERAL_POOL
+        logger.warning(f"Groq primary ({model_id}) unavailable or hit limit for role [{role}]. Searching relay pool...")
+
+        for alt_model in relay_pool:
+            if alt_model == model_id:
+                continue
+            if not self._is_model_available(alt_model):
+                logger.debug(f"Circuit Breaker: Skipping relay candidate [{alt_model}]")
+                continue
+
+            logger.info(f"Groq Relay ({role}): Trying [{alt_model}]...")
+            result = self._generate_openai_compat(
+                self.groq_client,
+                alt_model,
+                system_prompt,
+                msg,
+                max_tokens,
+                temperature,
+                chart_image_b64,
+                timeout=20.0,
+                name=f"Groq-Relay({alt_model})",
+            )
+            if result:
+                logger.success(f"Groq Relay SUCCEEDED for [{role}] with [{alt_model}]")
+                return result
+
+        if is_critical:
+            logger.warning(f"All Groq models exhausted for critical role [{role}]. Trying Gemini fallback...")
+            return self._generate_gemini(
+                self._gemini_judge,
+                settings.MODEL_JUDGE,
+                system_prompt,
+                msg,
+                max_tokens,
+                temperature,
+                chart_image_b64,
+            )
+
+        logger.warning(f"All Groq relay models failed for [{role}], falling back to basic providers")
+        return self._cf_generator.generate(system_prompt, msg, max_tokens) or self._generate_gemini(
+            self._gemini_default,
+            self.default_model_id,
+            system_prompt,
+            msg,
+            max_tokens,
+            temperature,
+            None,
+        )
+
+    def _handle_openrouter_backend(
+        self,
+        model_id: str,
+        system_prompt: str,
+        msg: str,
+        max_tokens: int,
+        temperature: float,
+    ) -> str:
+        result = self._generate_openai_compat(
+            self.openrouter_client,
+            model_id,
+            system_prompt,
+            msg,
+            max_tokens,
+            temperature,
+            None,
+            timeout=30.0,
+            name="OpenRouter",
+        )
+        if result:
+            return result
+        logger.warning("OpenRouter failed, falling back to Groq")
+        return self._generate_openai_compat(
+            self.groq_client,
+            "llama-3.3-70b-versatile",
+            system_prompt,
+            msg,
+            max_tokens,
+            temperature,
+            None,
+            timeout=25.0,
+            name="Groq",
+        ) or ""
+
+    def _generate_gemini(
+        self,
+        client,
+        model_id: str,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int,
+        temperature: float,
+        chart_image_b64: Optional[str] = None,
+    ) -> str:
         max_retries = 3
         base_delay = 5.0
+
         for attempt in range(max_retries):
             try:
                 parts = []
@@ -406,91 +544,102 @@ class AIClient:
                     "max_output_tokens": max_tokens,
                     "temperature": temperature,
                 }
-                if "gemini-3" in model_id.lower():
-                    thinking_level = "HIGH" if "pro" in model_id.lower() else "LOW"
-                    config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_level=thinking_level)
+                # Support thinking_config for gemini-3 and gemini-2.5 series
+                lowercased_id = model_id.lower()
+                if "gemini-3" in lowercased_id or "gemini-2.5" in lowercased_id:
+                    thinking_level = "HIGH" if "pro" in lowercased_id else "LOW"
+                    config_kwargs["thinking_config"] = types.ThinkingConfig(
+                        thinking_level=thinking_level
+                    )
 
-                config = types.GenerateContentConfig(**config_kwargs)
                 response = client.models.generate_content(
                     model=model_id,
                     contents=[types.Content(role="user", parts=parts)],
-                    config=config,
+                    config=types.GenerateContentConfig(**config_kwargs),
                 )
                 return response.text or ""
             except Exception as e:
-                err = str(e).lower()
-                if ("429" in err or "resource" in err or "503" in err or "exhausted" in err) and attempt < max_retries - 1:
-                    sleep_t = base_delay * (2 ** attempt)
-                    logger.warning(f"Gemini rate limit ({model_id}), retry in {sleep_t}s")
-                    time.sleep(sleep_t)
-                    continue
+                err_str = str(e).lower()
+                if "429" in err_str or "resource" in err_str or "503" in err_str or "exhausted" in err_str:
+                    self._mark_model_exhausted(model_id, 3600)
+                    if attempt < max_retries - 1:
+                        sleep_t = base_delay * (2 ** attempt)
+                        logger.warning(f"Gemini rate limit ({model_id}), retry in {sleep_t}s")
+                        time.sleep(sleep_t)
+                        continue
                 logger.error(f"Gemini error ({model_id}): {e}")
                 return ""
         return ""
 
     def _generate_openai_compat(
-        self, client, model_id: str, system_prompt: str, user_message: str,
-        max_tokens: int, temperature: float, chart_image_b64: Optional[str],
-        timeout: float = 30.0, name: str = "OpenAI-compat"
+        self,
+        client,
+        model_id: str,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int,
+        temperature: float,
+        chart_image_b64: Optional[str],
+        timeout: float = 30.0,
+        name: str = "OpenAI-compat",
     ) -> str:
         if client is None:
             return ""
+
         try:
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
+
             user_content = []
             if chart_image_b64:
                 mime = mimetypes.guess_type("chart.png")[0] or "image/png"
-                user_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{mime};base64,{chart_image_b64}"}
-                })
+                user_content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime};base64,{chart_image_b64}"},
+                    }
+                )
             user_content.append({"type": "text", "text": user_message})
             messages.append({"role": "user", "content": user_content})
 
-            kwargs = {
-                "model": model_id,
-                "messages": messages,
-                "temperature": temperature,
-                "max_tokens": max_tokens,
-                "timeout": timeout,
-            }
-            resp = client.chat.completions.create(**kwargs)
+            resp = client.chat.completions.create(
+                model=model_id,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
             return resp.choices[0].message.content or ""
         except Exception as e:
             err_str = str(e).lower()
             if "429" in err_str or "rate_limit" in err_str or "quota" in err_str:
-                # 429 usually means TPD (Tokens Per Day) or RPM.
-                # Use 1 hour block for safer recovery.
                 self._mark_model_exhausted(model_id, 3600)
             logger.error(f"{name} error ({model_id}): {e}")
             return ""
 
-    def _generate_claude(self, model_id: str, system_prompt: str, user_message: str,
-                         max_tokens: int, temperature: float,
-                         chart_image_b64: Optional[str] = None) -> str:
-        try:
-            if self.claude_client is None:
-                logger.warning(f"Claude unavailable ({model_id}), falling back to Gemini")
-                return self._generate_gemini(self._gemini_judge, self.premium_model_id, system_prompt, user_message, max_tokens, temperature, chart_image_b64)
-            content = []
-            if chart_image_b64:
-                content.append({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": chart_image_b64}})
-            content.append({"type": "text", "text": user_message})
-            response = self.claude_client.messages.create(
-                model=model_id, max_tokens=max_tokens, temperature=temperature,
-                system=system_prompt, messages=[{"role": "user", "content": content}], timeout=45.0,
-            )
-            return response.content[0].text
-        except Exception as e:
-            logger.error(f"Claude error ({model_id}): {e}")
-            return self._generate_gemini(self._gemini_judge, self.premium_model_id, system_prompt, user_message, max_tokens, temperature, chart_image_b64)
+    def _generate_claude(
+        self,
+        model_id: str,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int,
+        temperature: float,
+        chart_image_b64: Optional[str] = None,
+    ) -> str:
+        logger.error(f"_generate_claude({model_id}) called but Anthropic is disabled. Using Gemini fallback.")
+        return self._generate_gemini(
+            self._gemini_judge,
+            self.premium_model_id,
+            system_prompt,
+            user_message,
+            max_tokens,
+            temperature,
+            chart_image_b64,
+        )
 
-    # ── Legacy compat ─────────────────────────────────────────────────────────
     def _get_role_model_and_cap(self, role: str, use_premium: bool) -> Tuple[str, int]:
-        """Backward-compat shim used by older agents."""
-        backend, model_id, cap = self._get_route(role)
+        _, model_id, cap = self._get_route(role)
         return model_id, cap
 
     def generate_with_context(
@@ -502,11 +651,17 @@ class AIClient:
         use_premium: bool = False,
         role: str = "general",
     ) -> str:
-        flat_text = "\n".join([f"{m.get('role','user')}: {m.get('content','')}" for m in conversation_history])
-        return self.generate_response(system_prompt=system_prompt, user_message=flat_text,
-                                      max_tokens=max_tokens, temperature=temperature,
-                                      use_premium=use_premium, role=role)
+        flat_text = "\n".join(
+            [f"{m.get('role', 'user')}: {m.get('content', '')}" for m in conversation_history]
+        )
+        return self.generate_response(
+            system_prompt=system_prompt,
+            user_message=flat_text,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            use_premium=use_premium,
+            role=role,
+        )
 
 
-# Global singleton
 ai_client = AIClient()
