@@ -127,22 +127,6 @@ def job_daily_fear_greed():
         logger.error(f"Fear & Greed collection job error: {e}")
 
 
-def job_analysis():
-    """Mode-aware analysis job. Interval depends on TRADING_MODE."""
-    try:
-        mode = settings.trading_mode
-        logger.info(f"Running analysis job (mode={mode.value}, "
-                     f"interval={settings.analysis_interval_hours}h)")
-        from config.local_state import state_manager
-        if not state_manager.is_analysis_enabled():
-            logger.info("Analysis job skipped (disabled by user)")
-            return
-            
-        macro_collector.run()
-        orchestrator.run_scheduled_analysis()
-    except Exception as e:
-        logger.error(f"Analysis job error: {e}")
-
 def job_routine_market_status():
     """V13.3: Routine Market Status check (Free-First) with Multi-Coin & Telegram Intel."""
     try:
@@ -304,10 +288,9 @@ def job_hourly_monitor():
 
 def main():
     mode = settings.trading_mode
-    interval = settings.analysis_interval_hours
 
     logger.info(f"Starting Trading System (mode={mode.value})")
-    logger.info(f"  Analysis interval: {interval}h")
+    logger.info("  Primary analysis cadence (UTC): daily_precision=00:00 | hourly_monitor=hh:15 | market_status=hh:20")
     logger.info(f"  Timeframes: {settings.analysis_timeframes}")
     logger.info(f"  Chart timeframe: {settings.chart_timeframe}")
     logger.info(f"  Candle limit: {settings.candle_limit}")
@@ -456,19 +439,6 @@ def main():
         id='job_hourly_monitor',
         max_instances=1,
     )
-
-    # Legacy mode-aware analysis (optional). Primary path is:
-    # daily_precision (1/day) + hourly_monitor (1h) + routine_market_status (1h).
-    if settings.ENABLE_LEGACY_ANALYSIS_JOB:
-        scheduler_config.scheduler.add_job(
-            job_analysis,
-            scheduler_config._build_analysis_trigger(mode),
-            id='job_analysis',
-            max_instances=1,
-        )
-        logger.info("Legacy job_analysis is ENABLED (interval-based mode trigger).")
-    else:
-        logger.info("Legacy job_analysis is DISABLED (using precision+monitor cadence).")
 
     # Routine Market Status (Free-First) ??kept for passive hourly Telegram update
     scheduler_config.scheduler.add_job(

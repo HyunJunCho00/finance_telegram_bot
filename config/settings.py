@@ -215,15 +215,6 @@ class Settings(BaseSettings):
     SWING_CANDLE_LIMIT: int = 10000 
     POSITION_CANDLE_LIMIT: int = 60000
 
-    # ===== Analysis Intervals per Mode =====
-    # SWING: every 8 hours
-    # POSITION: every 24 hours (once daily at 09:00 KST)
-    SWING_INTERVAL_HOURS: int = 8
-    POSITION_INTERVAL_HOURS: int = 24
-    # Legacy mode-aware analysis scheduler (job_analysis). Default OFF because
-    # daily_precision + hourly_monitor are the primary orchestration path.
-    ENABLE_LEGACY_ANALYSIS_JOB: bool = False
-
     # ===== Historical Window per Mode (for chart/context loading from GCS) =====
     # SWING: 12 months
     # POSITION: 60 months (5 years)
@@ -273,13 +264,6 @@ class Settings(BaseSettings):
         if mode == TradingMode.POSITION:
             return self.POSITION_CANDLE_LIMIT
         return self.SWING_CANDLE_LIMIT
-
-    @property
-    def analysis_interval_hours(self) -> int:
-        mode = self.trading_mode
-        if mode == TradingMode.POSITION:
-            return self.POSITION_INTERVAL_HOURS
-        return self.SWING_INTERVAL_HOURS
 
     @property
     def should_use_chart(self) -> bool:

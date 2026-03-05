@@ -106,9 +106,10 @@ def get_trading_mode() -> dict:
         "swing": {"venue": "binance_futures", "direction": "long_short"},
         "position": {"venue": "binance_spot_upbit", "direction": "long_only"},
         "chart_enabled": settings.should_use_chart,
-        "analysis_interval_hours": {
-            "swing": settings.SWING_INTERVAL_HOURS,
-            "position": settings.POSITION_INTERVAL_HOURS,
+        "primary_scheduler_utc": {
+            "job_daily_precision": "00:00",
+            "job_hourly_monitor": "hh:15",
+            "job_routine_market_status": "hh:20",
         },
     }
 

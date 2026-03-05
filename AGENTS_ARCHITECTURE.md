@@ -610,8 +610,8 @@
 ├────────────────────────────┼────────────────────────────┼─────────────────────┤
 │  job_daily_fear_greed      │  daily 00:15 UTC           │  Fear&Greed 지수    │
 ├────────────────────────────┼────────────────────────────┼─────────────────────┤
-│  job_analysis              │  SWING: 0/8/16 UTC         │  전체 멀티에이전트  │
-│                            │  POSITION: daily 00:00 UTC │  분석 파이프라인    │
+│  job_daily_precision       │  daily 00:00 UTC           │  POSITION 플레이북  │
+│  job_hourly_monitor        │  every hour :15            │  SWING/POS 모니터링 │
 ├────────────────────────────┼────────────────────────────┼─────────────────────┤
 │  job_routine_market_status │  every 1 hour              │  Free-First 시장   │
 │                            │                            │  요약 (텔레그램)    │
