@@ -140,7 +140,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         playbook = self._load_playbook(symbol, mode)
         if not playbook:
             return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                    "reasoning": "No active playbook found."}
+                    "reasoning": "활성화된 플레이북이 없습니다."}
 
         # TTL check
         try:
@@ -149,7 +149,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             created_at = dateutil.parser.parse(playbook.get("created_at", ""))
             if datetime.now(timezone.utc) - created_at > timedelta(hours=24):
                 return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                        "reasoning": "Playbook TTL expired (>24h)."}
+                        "reasoning": "플레이북 유효기간(>24h)이 만료되었습니다."}
         except Exception:
             pass
 
@@ -182,13 +182,13 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         if invalidated:
             logger.info(f"Monitor [{symbol}/{mode}]: NO_ACTION — Playbook Invalidated: {inval_reason}")
             return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                    "reasoning": f"Invalidated: {inval_reason}"}
+                    "reasoning": f"무효화됨: {inval_reason}"}
                     
         # 2. Check Entry Conditions
         entry_conds = pb_data.get("entry_conditions", [])
         if not entry_conds:
             return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                    "reasoning": "No parseable entry conditions defined."}
+                    "reasoning": "분석 가능한 진입 조건이 정의되지 않았습니다."}
                     
         for ec in entry_conds:
             if isinstance(ec, dict):
@@ -216,7 +216,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         elif len(matched) > 0:
             result_status = "WATCH"
             
-        reasoning = "All deterministic conditions met." if result_status == "TRIGGER" else f"Waiting on {len(unmatched)} conditions."
+        reasoning = "모든 결정론적 조건이 충족되었습니다." if result_status == "TRIGGER" else f"{len(unmatched)}개 조건 대기 중."
         
         result = {
             "status": result_status,
@@ -237,15 +237,16 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             "You are a Market Status Monitor. Provide a concise, data-driven summary "
             "of current market indicators for a professional trader. "
             "Focus on Funding Rates, OI Divergence, MFI proxy, and breaking news. "
-            "Format in clean Markdown with bullet points and emojis. Under 150 words."
+            "Format in clean HTML tags (<b>, <i>, <code>) with bullet points and emojis. Do NOT use Markdown asterisks (**). Under 150 words. "
+            "출력은 반드시 한국어로 작성하세요."
         )
         user_message = (
             f"Current Market Indicators (UTC: {datetime.now().isoformat()}):\n"
             f"{json.dumps(indicators, indent=2)}\n\n"
             "Please provide:\n"
-            "1. 🛡️ Quick Market Sentiment (Bullish/Bearish/Neutral)\n"
-            "2. 🪙 Notable Token Anomalies (Prices, Funding, OI Divergence, MFI)\n"
-            "3. 📰 Breaking News & Narrative (From Telegram Intel)\n"
+            "1. 🛡️ 빠른 시장 심리 (강세/약세/중립)\n"
+            "2. 🪙 주요 토큰 특이사항 (가격, 펀딩, OI 발산, MFI)\n"
+            "3. 📰 주요 뉴스 및 내러티브 (텔레그램 인텔 기반)\n"
         )
         try:
             return ai_client.generate_response(
@@ -257,7 +258,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             )
         except Exception as e:
             logger.error(f"MarketMonitorAgent.summarize error: {e}")
-            return "Failed to generate market summary."
+            return "시장 요약을 생성하지 못했습니다."
 
 
 market_monitor_agent = MarketMonitorAgent()

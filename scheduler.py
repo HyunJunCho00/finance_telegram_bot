@@ -171,7 +171,7 @@ def job_routine_market_status():
             indicators[symbol]["volatility"] = volatility_monitor.calculate_price_change(symbol)
                 
         # Telegram Intel (Last 1 hour)
-        telegram_intel = "No recent significant news."
+        telegram_intel = "최근 1시간 내 주요 뉴스 없음"
         try:
             from mcp_server.tools import mcp_tools
             news_res = mcp_tools.get_telegram_summary(hours=1)
@@ -191,7 +191,7 @@ def job_routine_market_status():
             import asyncio
             
             # Send text-only summary (no chart attachments).
-            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"📢 *Routine Market Update*\n\n{summary}"))
+            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"📢 <b>정기 시장 업데이트</b>\n\n{summary}"))
 
     except Exception as e:
         logger.error(f"Routine market status job error: {e}")

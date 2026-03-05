@@ -1510,13 +1510,26 @@ class Orchestrator:
                     swing_status = swing_res.get("status", "NO_ACTION")
                     pos_status = pos_res.get("status", "NO_ACTION")
                     msg = (
-                        f"*Hourly Monitor*\n"
-                        f"`{symbol}`\n"
+                        f"<b>Hourly Monitor</b>\n"
+                        f"<code>{symbol}</code>\n"
                         f"AI Analysis: {'ON' if analysis_enabled else 'OFF'}\n"
-                        f"- SWING: *{swing_status}* | {swing_res.get('reasoning', 'No details')}\n"
-                        f"- POSITION: *{pos_status}* | {pos_res.get('reasoning', 'No details')}"
+                        f"- SWING: <b>{swing_status}</b> | {swing_res.get('reasoning', 'No details')}\n"
+                        f"- POSITION: <b>{pos_status}</b> | {pos_res.get('reasoning', 'No details')}"
                     )
                     asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, msg))
+                    
+                    try:
+                        from mcp_server.tools import mcp_tools
+                        import base64
+                        for lane, status in [("swing", swing_status), ("position", pos_status)]:
+                            if status in ["WATCH", "TRIGGER"]:
+                                chart_res = mcp_tools.get_chart_image(symbol, lane=lane)
+                                if "chart_base64" in chart_res:
+                                    chart_bytes = base64.b64decode(chart_res["chart_base64"])
+                                    asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption=f"📊 {symbol} {lane.upper()} Chart - {status}"))
+                    except Exception as e:
+                        logger.warning(f"Failed to send hourly monitor chart for {symbol}: {e}")
+                        asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"⚠️ {symbol} 차트 전송 실패: {e}"))
             except Exception as e:
                 logger.warning(f"Failed to send consolidated monitor message for {symbol}: {e}")
 
