@@ -17,25 +17,6 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from config.settings import settings, TradingMode
 from config.database import db
 from loguru import logger
-"""Telegram Bot interactive command handler.
-
-Commands:
-/start     - Welcome message & status overview
-/status    - Current position and latest decision
-/analyze   - Run immediate analysis (BTC or ETH)
-/mode      - Show fixed dual-mode policy
-/report    - Resend latest analysis report
-/chart     - Generate premium technical chart
-/report_on - Resume automated AI analysis
-/report_off - Pause automated AI analysis (Save cost)
-/help     - List all commands
-"""
-from typing import List, Optional, Dict
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from config.settings import settings, TradingMode
-from config.database import db
-from loguru import logger
 import json
 from io import BytesIO
 import base64
@@ -242,6 +223,51 @@ class TradingBot:
             "/status - Real-time positions & PnL\n"
             "/analyze [BTC|ETH] - Trigger instant AI analysis\n"
             "/chart [BTC|ETH] [swing|position] - Generate premium HD chart\n"
+            "/report - Resend latest analysis report\n"
+            "/mode - Show fixed dual-mode policy (change disabled)\n"
+            "/report_off - PAUSE AI automation (Save cost)\n"
+            "/report_on  - RESUME AI automation\n"
+            "/help - Show this message\n\n"
+            "💡 <i>Tip: You can also talk to me in natural language!</i>",
+            parse_mode='HTML'
+        )
+
+    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            is_paper = settings.PAPER_TRADING_MODE
+
+            lines = [
+                f"📊 <b>Trading Status</b>",
+                f"Mode: <code>DUAL (SWING + POSITION)</code>",
+                f"Type: <code>{'PAPER' if is_paper else 'LIVE'}</code>",
+                ""
+            ]
+
+            # 1. Active Mock Positions (If applicable)
+            if is_paper:
+                from executors.paper_exchange import paper_engine
+                from executors.trade_executor import trade_executor
+                positions = paper_engine.get_open_positions()
+                
+                binance_unrealized = 0.0
+                binance_margin = 0.0
+                upbit_unrealized = 0.0
+                upbit_margin = 0.0
+
+                lines.append("💼 <b>Active Positions</b>")
+                if not positions:
+                    lines.append("<i>- No open positions</i>")
+                else:
+                    for pos in positions:
+                        symbol = pos['symbol']
+                        side = pos['side']
+                        entry = pos['entry_price']
+                        size = pos['size']
+                        leverage = pos['leverage']
+                        exchange = pos['exchange']
+
+                        # Get current price for PnL
+                        current_price = trade_executor._get_reference_price(symbol)
                         pnl = 0.0
                         if current_price > 0:
                             pnl = (current_price - entry) * size if side == "LONG" else (entry - current_price) * size

@@ -29,9 +29,9 @@ class Settings(BaseSettings):
     )
 
     PROJECT_ID: str = ""
-    REGION: str = "asia-northeast3"          # VM ?명봽??由ъ쟾 (?쒖슱)
-    VERTEX_REGION: str = "global"            # 紐⑤뜽 ?몄텧 由ъ쟾 (Gemini + Claude)
-    VERTEX_REGION_GEMINI: str = "global"     # Gemini ?꾩슜 (?섏쐞?명솚)
+    REGION: str = "asia-northeast3"          # VM 인프라 리전 (서울)
+    VERTEX_REGION: str = "global"            # 모델 호출 리전 (Gemini + Claude)
+    VERTEX_REGION_GEMINI: str = "global"     # Gemini 전용 (하위호환)
 
     SUPABASE_URL: str = ""
     SUPABASE_KEY: str = ""
@@ -125,7 +125,7 @@ class Settings(BaseSettings):
     # Hardcoded by User Request for Retail Scale limits
     BINANCE_PAPER_BALANCE_USD: float = 2000.0
     UPBIT_PAPER_BALANCE_KRW: float = 2000000.0
-    UPBIT_PAPER_BALANCE_USD: float = 1500.0   # ??2,000,000 KRW; paper engine? USD ?⑥쐞濡??듭씪
+    UPBIT_PAPER_BALANCE_USD: float = 1500.0   # 약 2,000,000 KRW; paper engine은 USD 단위로 통합
     MAX_LEVERAGE: int = 3
     
     COINBASE_API_KEY: str = ""
@@ -134,38 +134,38 @@ class Settings(BaseSettings):
     VOLATILITY_THRESHOLD: float = 3.0
     ANALYSIS_INTERVAL_HOURS: int = 4
 
-    # ===== AI Models (role ??API ??model single policy table) =====
+    # ===== AI Models (role API model single policy table) =====
     MODEL_ENDPOINT: str = "gemini-3.1-pro-preview"
 
-    # 1. judge ??Google AI Studio Project A
+    # 1. judge Google AI Studio Project A
     MODEL_JUDGE: str = "gemini-3.1-pro-preview"
     MODEL_SELF_CORRECTION: str = "gemini-3.1-pro-preview"
 
-    # 2. vlm_geometric / vlm_telegram_chart ??Google AI Studio Project B
+    # 2. vlm_geometric / vlm_telegram_chart Google AI Studio Project B
     MODEL_VLM_GEOMETRIC: str = "gemini-3.1-pro-preview"
     MODEL_VLM_TELEGRAM_CHART: str = "gemini-3.1-pro-preview"
 
-    # 3. meta_regime ??Cerebras
+    # 3. meta_regime Cerebras
     MODEL_META_REGIME: str = "gpt-oss-120b"
 
-    # 4. risk_eval ??Cerebras
+    # 4. risk_eval Cerebras
     MODEL_RISK_EVAL: str = "gpt-oss-120b"
 
-    # 5. risk_eval_fallback ??Groq
+    # 5. risk_eval_fallback Groq
     MODEL_RISK_EVAL_FALLBACK: str = "openai/gpt-oss-20b"
 
-    # 6. news_summarize / rag_extraction ??Groq
+    # 6. news_summarize / rag_extraction Groq
     MODEL_RAG_EXTRACTION: str = "openai/gpt-oss-20b"
     MODEL_NEWS_SUMMARIZE: str = "openai/gpt-oss-20b"
 
-    # 7. monitor_hourly ??OpenRouter (free)
+    # 7. monitor_hourly OpenRouter (free)
     MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
 
     # 8. cloudflare_triage / cloudflare_rerank (CF infra)
     MODEL_CF_TRIAGE: str = "@cf/meta/llama-3-8b-instruct-awq"
     MODEL_CF_RERANK: str = "@cf/baai/bge-reranker-base"
 
-    # 9. claude_standby ??Anthropic (reserved, not in default routing)
+    # 9. claude_standby Anthropic (reserved, not in default routing)
     MODEL_CLAUDE_STANDBY: str = "claude-sonnet-4-6"
 
     # 10. High-freq flash agents (liquidity, microstructure, macro, chat)
@@ -205,8 +205,8 @@ class Settings(BaseSettings):
     CHART_SHOW_CVD_OVERLAY: bool = False
 
     # ===== Candle Limits per Mode (1m candles needed from DB) =====
-    # SWING: 14400 (10 days) ??for 1h/4h + needs 1d from GCS
-    # POSITION: 10080 (7 days) ??for 4h + needs 1d/1w from GCS
+    # SWING: 14400 (10 days) for 1h/4h + needs 1d from GCS
+    # POSITION: 10080 (7 days) for 4h + needs 1d/1w from GCS
     # SWING: 10000 (approx 1 year of 1h)
     # POSITION: 60000 (approx 6-7 years of 1h)
     SWING_CANDLE_LIMIT: int = 10000 
@@ -225,13 +225,13 @@ class Settings(BaseSettings):
     POSITION_HISTORY_MONTHS: int = 60
 
     # ===== Data Retention (days) =====
-    # PostgreSQL(Supabase): ?쒓퀎???곗씠?곕쭔 蹂댁〈 (30??
-    # Neo4j/Milvus: ?댁뒪/洹몃옒???곗씠???곴뎄 蹂댁〈 (cleanup ?놁쓬)
+    # PostgreSQL(Supabase): 통계용 데이터만 보존 (30일)
+    # Neo4j/Milvus: 지식/그래프 데이터 영구 보존 (cleanup 없음)
     RETENTION_MARKET_DATA_DAYS: int = 30
-    RETENTION_TELEGRAM_DAYS: int = 90  # ?먮낯 ?띿뒪??(Neo4j/Milvus?먮룄 ??λ맖)
-    RETENTION_REPORTS_DAYS: int = 365  # AI 由ы룷???곴뎄??媛源앷쾶
+    RETENTION_TELEGRAM_DAYS: int = 90  # 원본 텍스트 (Neo4j/Milvus에도 저장됨)
+    RETENTION_REPORTS_DAYS: int = 365  # AI 리포트 (영구히 가깝게)
     RETENTION_CVD_DAYS: int = 30
-    RETENTION_GRAPH_DAYS: int = 0  # 0 = ?곴뎄 蹂댁〈 (Neo4j Aura free: 200K nodes)
+    RETENTION_GRAPH_DAYS: int = 0  # 0 = 영구 보존 (Neo4j Aura free: 200K nodes)
     
     # ===== Source Credibility =====
     TRUSTED_NEWS_DOMAINS: List[str] = [
@@ -312,22 +312,22 @@ class Settings(BaseSettings):
 
     @property
     def trading_symbols(self) -> List[str]:
-        """['BTCUSDT', 'ETHUSDT', ...] ??canonical format used throughout."""
+        """['BTCUSDT', 'ETHUSDT', ...] canonical format used throughout."""
         return [s.strip().upper() for s in self.TRADING_SYMBOLS.split(',') if s.strip()]
 
     @property
     def trading_symbols_slash(self) -> List[str]:
-        """['BTC/USDT', 'ETH/USDT', ...] ??ccxt / Binance API format."""
+        """['BTC/USDT', 'ETH/USDT', ...] ccxt / Binance API format."""
         return [f"{s[:-4]}/USDT" for s in self.trading_symbols if s.endswith('USDT')]
 
     @property
     def trading_symbols_base(self) -> List[str]:
-        """['BTC', 'ETH', ...] ??base currency only."""
+        """['BTC', 'ETH', ...] base currency only."""
         return [s[:-4] for s in self.trading_symbols if s.endswith('USDT')]
 
     @property
     def trading_symbols_krw(self) -> List[str]:
-        """['BTC/KRW', 'ETH/KRW', ...] ??Upbit format."""
+        """['BTC/KRW', 'ETH/KRW', ...] Upbit format."""
         return [f"{s[:-4]}/KRW" for s in self.trading_symbols if s.endswith('USDT')]
 
     @property
@@ -404,9 +404,9 @@ class SecretManager:
 
 
 def get_settings() -> Settings:
-    # [FIX] ?ъ떆????trading_mode 蹂듭썝:
-    # TRADING_MODE ?섍꼍蹂?섍? ?명똿 ???먯쓣 ?뚮쭔 SQLite?먯꽌 ?쎌뼱? 二쇱엯.
-    # (cmd_mode ?먯꽌 os.environ + DB ?묒そ???숈떆 ??????ъ떆????DB ??env 蹂듭썝)
+    # [FIX] 일시적 trading_mode 복원:
+    # TRADING_MODE 환경변수가 세팅 되지 않았을 때만 SQLite에서 읽어와 주입.
+    # (cmd_mode 에서 os.environ + DB 양쪽을 동시에 업데이트 하므로 일시적인 DB vs env 복원)
     if not os.environ.get("TRADING_MODE"):
         try:
             import sqlite3 as _sqlite3
@@ -420,7 +420,7 @@ def get_settings() -> Settings:
             if _row:
                 os.environ["TRADING_MODE"] = _row[0]
         except Exception:
-            pass  # DB ?녾굅???ㅽ뙣 ??.env 湲곕낯媛??ъ슜
+            pass  # DB 없거나 실패 시 .env 기본값 사용
 
     if os.getenv("USE_SECRET_MANAGER", "false").lower() == "true":
         project_id = os.getenv("PROJECT_ID", "")
