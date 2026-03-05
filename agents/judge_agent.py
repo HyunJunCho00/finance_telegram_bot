@@ -56,6 +56,9 @@ Output your decision as JSON:
   "key_factors": ["short bullet 1", "short bullet 2", ...]
 }}
 
+CRITICAL: All reasoning, final_logic, counter_scenario, and key_factors MUST be written in Korean. 
+The decision, hold_duration estimate, and JSON keys remain in English.
+
 You have FULL AUTONOMY. If the market is unclear, HOLD is always valid.
 CRITICAL V5 RULE: You will be given a list of ACTIVE_ORDERS (e.g. pending DCA chunks). If the market paradigm shifts against your active orders, you MUST output "decision": "CANCEL_AND_CLOSE". If you just want to add to an existing order, you can output LONG/SHORT again.
 Be aware of your previous decision for consistency."""

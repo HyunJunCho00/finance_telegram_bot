@@ -161,6 +161,24 @@ class LocalStateManager:
                 return row['value']
             return default
 
+    def set_system_config(self, key: str, value: str):
+        """Generic setter for the system_config table."""
+        with self._lock:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+                (str(key), str(value)),
+            )
+            self.conn.commit()
+
+    def get_config(self, key: str, default: str = "") -> str:
+        """Backward-compatible alias used by legacy callers."""
+        return self.get_system_config(key, default)
+
+    def set_config(self, key: str, value: str):
+        """Backward-compatible alias used by legacy callers."""
+        self.set_system_config(key, value)
+
     def set_panic_mode(self, enabled: bool):
         """Set or clear the market panic (high-volatility) flag."""
         val = 'true' if enabled else 'false'

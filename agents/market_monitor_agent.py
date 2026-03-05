@@ -48,6 +48,8 @@ Rules:
 - WATCH if >= 1 entry condition matched but not all.
 - NO_ACTION if 0 conditions matched or if the playbook is invalidated.
 - If playbook TTL is expired (>24h old), always output NO_ACTION.
+
+CRITICAL: The "reasoning" field MUST be written in Korean.
 """
 
     def __init__(self):

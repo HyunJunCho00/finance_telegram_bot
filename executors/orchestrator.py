@@ -919,11 +919,206 @@ def _build_full_context(state: AnalysisState) -> str:
     ]
     return "\n\n".join(p for p in parts if p)
 
+    # For compatibility with legacy metrics/logging, set conviction to win_probability_pct
+    return {"final_decision": decision, "conviction_score": win_prob * 100}
+
+def node_risk_manager(state: AnalysisState) -> dict:
+    """Run Risk Manager (CRO). VETO power over Judge's draft."""
+    draft = state.get("final_decision", {})
+    
+    # Needs macro and funding context for risk overlays
+    funding = state.get("funding_context", "")
+    deribit = state.get("deribit_context", "")
+    
+    final_decision = risk_manager_agent.evaluate_trade(
+        draft,
+        funding,
+        deribit,
+        mode=TradingMode(state.get("mode", "swing"))
+    )
+    return {"final_decision": final_decision}
+
+def node_portfolio_leverage_guard(state: AnalysisState) -> dict:
+    """Mathematically enforce 2.0x total account leverage limit."""
+    decision = state.get("final_decision", {})
+    if decision.get("decision") not in ["LONG", "SHORT"]:
+        return {}
+
+    try:
+        from executors.paper_exchange import paper_engine
+        
+        # 1. Fetch total equity and exposure (Paper mode for now as per strategy)
+        target_exchange = decision.get("target_exchange", "BINANCE").lower()
+        if target_exchange == "split":
+            wallet_balance = (
+                paper_engine.get_wallet_balance("binance_spot")
+                + paper_engine.get_wallet_balance("upbit")
+            )
+        else:
+            wallet_balance = paper_engine.get_wallet_balance(target_exchange)
+        
+        # In a real setup, we'd query API for open positions. 
+        # For our specific retail guard, we calculate if THIS trade + current positions exceeds 2.0x.
+        # [MOCK FOR MVP] Assume 2.0x Hard Cap
+        MAX_LEVERAGE_CAP = 2.0
+        
+        # Calculate proposed trade notional
+        allocation_pct = decision.get("allocation_pct", 0)
+        leverage = decision.get("leverage", 1)
+        proposed_notional = wallet_balance * (allocation_pct / 100.0) * leverage
+        
+        # Check current total exposure (Simulated calculation)
+        # In production: exposure = sum(abs(pos.notional) for pos in all_positions)
+        current_exposure = 0.0 # Placeholder: build extraction logic if needed
+        
+        total_projected_exposure = current_exposure + proposed_notional
+        total_leverage = total_projected_exposure / wallet_balance if wallet_balance > 0 else 0
+        
+        if total_leverage > MAX_LEVERAGE_CAP:
+            # Scale down
+            reduction_factor = MAX_LEVERAGE_CAP / total_leverage
+            new_allocation = allocation_pct * reduction_factor
+            
+            logger.warning(f"[LEVERAGE GUARD] Projected leverage {total_leverage:.2f}x exceeds {MAX_LEVERAGE_CAP}x cap. Scaling allocation from {allocation_pct}% to {new_allocation:.2f}%")
+            
+            decision["allocation_pct"] = new_allocation
+            decision["reasoning"]["final_logic"] = f"[LEVERAGE GUARD] Scaled down from {allocation_pct}% due to 2.0x account leverage cap. " + decision["reasoning"].get("final_logic", "")
+            
+        return {"final_decision": decision}
+        
+    except Exception as e:
+        logger.error(f"Leverage Guard error: {e}")
+        return {}
+
+def node_execute_trade(state: AnalysisState) -> dict:
+    """Execute the final approved trade autonomously (Live or Paper)."""
+    decision = state.get("final_decision", {})
+    symbol = state["symbol"]
+    mode = TradingMode(state["mode"]).value.upper()
+
+    # Optional guard: skip execution when explicitly disabled by caller.
+    if not state.get("execute_trades", True):
+        decision["execution_receipt"] = {
+            "status": "SKIPPED",
+            "reason": "execute_trades=False",
+        }
+        return {"final_decision": decision}
+    
+    # Bridge to execution
+    # This will simulate DCA or single entries based on the mode and CRO sizing
+    execution_result = trade_executor.execute_from_decision(decision, mode, symbol)
+    
+    # Attach execution receipt back to the decision for reporting
+    decision["execution_receipt"] = execution_result
+    return {"final_decision": decision}
+
+def node_generate_report(state: AnalysisState) -> dict:
+    """Generate and send report to Telegram."""
+    from executors.metrics_logger import metrics_logger
+    symbol = state["symbol"]
+    mode = TradingMode(state["mode"])
+
+    candle_limit = settings.candle_limit
+    # [FIX CRASH-2] Use cached DataFrame from node_collect_data
+    df = _df_cache.get(symbol)
+    if df is None:
+        df = db.get_latest_market_data(symbol, limit=candle_limit)  # fallback
+    # [FIX RESOURCE-1] Use cached market_data
+    market_data = _market_data_cache.get(symbol)
+    if market_data is None:
+        market_data = math_engine.analyze_market(df, mode) if not df.empty else {}
+
+    # [FIX] Reuse raw_funding from node_funding_context (no duplicate Supabase query)
+    raw_funding = state.get("raw_funding", {})
+    if not raw_funding:
+        try:
+            response = db.client.table("funding_data")\
+                .select("*").eq("symbol", symbol)\
+                .order("timestamp", desc=True).limit(1).execute()
+            raw_funding = response.data[0] if response.data else {}
+        except Exception:
+            raw_funding = {}
+
+    bb_str = json.dumps(state.get("blackboard", {}), indent=2)
+    report = report_generator.generate_report(
+        symbol=symbol,
+        market_data=market_data,
+        bull_opinion=f"Blackboard:\n{bb_str}",
+        bear_opinion=f"Anomalies Detected: {state.get('anomalies', [])}",
+        risk_assessment="",
+        final_decision=state.get("final_decision", {}),
+        funding_data=raw_funding,
+        mode=mode,
+    )
+    
+    # [FIX CRITICAL-1] Pass actual last close price (was 0.0 ??all episodic memory inverted)
+    # [FIX MEDIUM-19]  Include blackboard so post-mortem LLM has decision context
+    last_close = 0.0
+    if not df.empty:
+        last_close = float(df.iloc[-1]['close'])
+    write_post_mortem({
+        "symbol": symbol,
+        "final_decision": state.get("final_decision", {}),
+        "blackboard": state.get("blackboard", {}),
+        "bear_opinion": f"Anomalies: {state.get('anomalies', [])}"
+    }, current_price=last_close)
+
+    if report:
+        chart_bytes = state.get("chart_bytes")
+        if chart_bytes:
+            logger.info(f"Passing {len(chart_bytes)} bytes of chart data to notify.")
+        else:
+            logger.warning("No chart data found in state at generate_report node.")
+        report_generator.notify(report, chart_bytes=chart_bytes, mode=mode)
+        
+        # Log prediction for academic/quantitative evaluation
+        metrics_logger.log_prediction(
+            symbol=symbol,
+            mode=mode.value,
+            final_decision=state.get("final_decision", {}),
+            blackboard=state.get("blackboard", {}),
+            anomalies=state.get("anomalies", [])
+        )
+
+    decision = state.get("final_decision", {}).get("decision", "N/A")
+    logger.info(f"Analysis completed for {symbol}: {decision} ({mode.value})")
+    return {"report": report}
+
+
+def node_data_synthesis(state: AnalysisState) -> dict:
+    """Run Data-Synthesis pipeline to extract high-quality training examples."""
+    report = state.get("report")
+    if report:
+        # Inject additional context for synthesis
+        report["market_regime"] = state.get("market_regime", "UNKNOWN")
+        report["blackboard"] = state.get("blackboard", {})
+        report["mode"] = state.get("mode", "SWING")
+        synthesize_training_data(report)
+    return {}
+
+
+# ???? Helper ????
+
+def _build_full_context(state: AnalysisState) -> str:
+    """Build full context string for agents."""
+    parts = [
+        state.get("narrative_text", ""),
+        state.get("liquidation_context", ""),  # cvd_context removed (OI_DIV in funding_context)
+        state.get("microstructure_context", ""),
+        state.get("macro_context", ""),
+        state.get("deribit_context", ""),      # DVOL / PCR / IV term / 25d skew
+        state.get("fear_greed_context", ""),   # F&G daily sentiment
+        state.get("rag_context", ""),
+        f"Telegram News:\n{state.get('telegram_news', '')}",
+        state.get("feedback_text", ""),
+    ]
+    return "\n\n".join(p for p in parts if p)
+
 # ???? Build the LangGraph StateGraph ????
 
 
 
-# ?? Daily Playbook Generation ????????????????????????????????????????????????
+# ✨ Daily Playbook Generation ✨
 
 def node_generate_playbook(state) -> dict:
     """Generate and persist Daily Playbook (entry/exit/invalidation/risk conditions).
@@ -1149,7 +1344,7 @@ class Orchestrator:
             "is_emergency": is_emergency, "execute_trades": execute_trades, "errors": [],
         }
 
-        # Run each node sequentially ??mirrors the LangGraph DAG order.
+        # Run each node sequentially — mirrors the LangGraph DAG order.
         # node_context_gathering consolidates: perplexity, RAG ingest, funding, CVD,
         # liquidation, RAG query, telegram news, self-correction, microstructure,
         # macro, deribit, and fear&greed context in a single function.
@@ -1189,13 +1384,13 @@ class Orchestrator:
             logger.error(f"Judge error: {e}")
             state["final_decision"] = {"decision": "HOLD", "reasoning": str(e), "confidence": 0}
 
-        # [FIX CRASH-1] Risk Manager (CRO) ??was completely missing from sequential fallback
+        # [FIX CRASH-1] Risk Manager (CRO) — was completely missing from sequential fallback
         try:
             state.update(node_risk_manager(state))
         except Exception as e:
             logger.error(f"Risk Manager error (sequential): {e}")
 
-        # [FIX CRASH-1] Trade Execution ??was missing, so Judge decisions were never executed
+        # [FIX CRASH-1] Trade Execution — was missing, so Judge decisions were never executed
         try:
             state.update(node_execute_trade(state))
         except Exception as e:
@@ -1227,7 +1422,7 @@ class Orchestrator:
 
 
     def run_daily_playbook(self) -> None:
-        """00:00 UTC serial: BTC POSITION ??ETH POSITION ??BTC SWING ??ETH SWING.
+        """00:00 UTC serial: BTC POSITION → ETH POSITION → BTC SWING → ETH SWING.
         Each analysis runs full pipeline (including execution) and also refreshes playbook.
         """
         import time as _time
@@ -1270,50 +1465,60 @@ class Orchestrator:
 
     def run_hourly_monitor(self) -> None:
         """Hourly: evaluate each symbol/mode against its Daily Playbook.
-        If TRIGGER ??run analysis and allow order execution.
+        If TRIGGER — run analysis and allow order execution.
         Daily entry count capped at DAILY_MAX_ENTRIES per symbol.
         """
         from agents.market_monitor_agent import market_monitor_agent
         from datetime import date
+        from config.local_state import state_manager
+        from bot.telegram_bot import trading_bot
+        import asyncio
 
         DAILY_MAX_ENTRIES = 2
         _entry_count_key = f"_monitor_entries_{date.today().isoformat()}"
 
         for symbol in self.symbols:
+            lane_results = {}
+            analysis_enabled = state_manager.is_analysis_enabled()
+
             for mode in [TradingMode.SWING, TradingMode.POSITION]:
                 try:
                     result = market_monitor_agent.evaluate(symbol, mode.value)
                     status = result.get("status", "NO_ACTION")
+                    lane_results[mode.value.upper()] = result
                     logger.info(f"[Monitor] {symbol}/{mode.value}: {status}")
 
                     if status == "TRIGGER" and not result.get("invalidated", False):
                         # Count guard
-                        from config.local_state import state_manager
-                        entries_today = int(state_manager.get_config(_entry_count_key + symbol, "0"))
+                        entries_today = int(state_manager.get_system_config(_entry_count_key + symbol, "0"))
                         if entries_today >= DAILY_MAX_ENTRIES:
                             logger.warning(f"[Monitor] {symbol} daily entry cap ({DAILY_MAX_ENTRIES}) reached, skipping.")
                             continue
 
                         logger.info(f"[Monitor] TRIGGER! Running analysis for {symbol}/{mode.value}")
                         self.run_analysis_with_mode(symbol, mode, is_emergency=False, execute_trades=True)
-                        state_manager.set_config(_entry_count_key + symbol, str(entries_today + 1))
-
-                    # Send monitor result to Telegram
-                    if status in ("TRIGGER", "WATCH"):
-                        try:
-                            from bot.telegram_bot import trading_bot
-                            import asyncio, json as _json
-                            msg = (
-                                f"?뱻 *Hourly Monitor*\n"
-                                f"`{symbol}` ({mode.value.upper()}) ??*{status}*\n"
-                                f"{result.get('reasoning', '')}"
-                            )
-                            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, msg))
-                        except Exception:
-                            pass
+                        state_manager.set_system_config(_entry_count_key + symbol, str(entries_today + 1))
 
                 except Exception as e:
                     logger.error(f"Monitor error {symbol}/{mode.value}: {e}")
+
+            # Send one consolidated dual-lane monitor message per symbol.
+            try:
+                if trading_bot:
+                    swing_res = lane_results.get("SWING", {})
+                    pos_res = lane_results.get("POSITION", {})
+                    swing_status = swing_res.get("status", "NO_ACTION")
+                    pos_status = pos_res.get("status", "NO_ACTION")
+                    msg = (
+                        f"*Hourly Monitor*\n"
+                        f"`{symbol}`\n"
+                        f"AI Analysis: {'ON' if analysis_enabled else 'OFF'}\n"
+                        f"- SWING: *{swing_status}* | {swing_res.get('reasoning', 'No details')}\n"
+                        f"- POSITION: *{pos_status}* | {pos_res.get('reasoning', 'No details')}"
+                    )
+                    asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, msg))
+            except Exception as e:
+                logger.warning(f"Failed to send consolidated monitor message for {symbol}: {e}")
 
 
 orchestrator = Orchestrator()

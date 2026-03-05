@@ -17,17 +17,44 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from config.settings import settings, TradingMode
 from config.database import db
 from loguru import logger
+"""Telegram Bot interactive command handler.
+
+Commands:
+/start     - Welcome message & status overview
+/status    - Current position and latest decision
+/analyze   - Run immediate analysis (BTC or ETH)
+/mode      - Show fixed dual-mode policy
+/report    - Resend latest analysis report
+/chart     - Generate premium technical chart
+/report_on - Resume automated AI analysis
+/report_off - Pause automated AI analysis (Save cost)
+/help     - List all commands
+"""
+from typing import List, Optional, Dict
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+from config.settings import settings, TradingMode
+from config.database import db
+from loguru import logger
 import json
 from io import BytesIO
 import base64
 
 # --- 자연어 채팅 핸들러용 상수 ---
 
-_CHAT_SYSTEM = """당신은 독립형 트레이딩봇의 AI 어시스턴트입니다.
+_CHAT_SYSTEM = """당신은 독립형 트레이딩봇의 AI 어시스턴트입니다. 
 사용자의 자연어 질문에 답하기 위해 적절한 툴을 선택해 데이터를 조회하고, 결과를 한국어로 간결하게 해석해서 답변하세요.
-- BTC/비트코인 언급 시 BTCUSDT, ETH/이더리움 언급 시 ETHUSDT
-- 숫자는 읽기 쉽게 적절히 반올림
-- 질문에 필요한 툴만 사용하고 과도한 호출은 피할 것"""
+
+현 시스템 전략 안내:
+1. SWING 레인: 바이낸스 선물 헤지 모드 (Long/Short 양방향), 4시간봉 기반 추세 추종.
+2. POSITION 레인: 바이낸스 현물 및 업비트 적립식 (Long Only), 일봉/주봉 기반 거시 사이클 투자.
+두 레인을 동시에 활용해 하락장 리스크는 헤징하고 상승장 수익은 극대화하는 Dual-Lane 전략을 사용 중입니다.
+
+지침:
+- BTC/비트코인 언급 시 BTCUSDT, ETH/이더리움 언급 시 ETHUSDT 조회
+- 숫자는 읽기 쉽게 적절히 반올림 (예: $98,432.12 -> $98,432)
+- 질문에 필요한 툴만 사용하고 과도한 호출은 피할 것
+- 모든 답변과 분석은 반드시 **한국어**로 작성할 것"""
 
 _CHAT_TOOLS = [
     {
@@ -215,52 +242,6 @@ class TradingBot:
             "/status - Real-time positions & PnL\n"
             "/analyze [BTC|ETH] - Trigger instant AI analysis\n"
             "/chart [BTC|ETH] [swing|position] - Generate premium HD chart\n"
-            "/report - Resend latest analysis report\n"
-            "/mode - Show fixed dual-mode policy (change disabled)\n"
-            "/report_off - PAUSE AI automation (Save cost)\n"
-            "/report_on  - RESUME AI automation\n"
-            "/help - Show this message\n\n"
-            "💡 <i>Tip: You can also talk to me in natural language!</i>",
-            parse_mode='HTML'
-        )
-
-    async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        try:
-            is_paper = settings.PAPER_TRADING_MODE
-
-            lines = [
-                f"📊 <b>Trading Status</b>",
-                f"Mode: <code>DUAL (SWING + POSITION)</code>",
-                f"Type: <code>{'PAPER' if is_paper else 'LIVE'}</code>",
-                ""
-            ]
-
-            # 1. Active Mock Positions (If applicable)
-            if is_paper:
-                from executors.paper_exchange import paper_engine
-                from executors.trade_executor import trade_executor
-                positions = paper_engine.get_open_positions()
-                
-                # [BUG-FIX] 거래소별 마진/PnL 분리 추적 (이전: 모두 합산해 Binance Equity에 표시)
-                binance_unrealized = 0.0
-                binance_margin = 0.0
-                upbit_unrealized = 0.0
-                upbit_margin = 0.0
-
-                lines.append("💼 <b>Active Positions</b>")
-                if not positions:
-                    lines.append("<i>- No open positions</i>")
-                else:
-                    for pos in positions:
-                        symbol = pos['symbol']
-                        side = pos['side']
-                        entry = pos['entry_price']
-                        size = pos['size']
-                        leverage = pos['leverage']
-                        exchange = pos['exchange']
-
-                        # Get current price for PnL
-                        current_price = trade_executor._get_reference_price(symbol)
                         pnl = 0.0
                         if current_price > 0:
                             pnl = (current_price - entry) * size if side == "LONG" else (entry - current_price) * size

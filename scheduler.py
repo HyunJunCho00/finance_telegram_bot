@@ -189,25 +189,9 @@ def job_routine_market_status():
         from bot.telegram_bot import trading_bot
         if trading_bot:
             import asyncio
-            import base64
-            from mcp_server.tools import mcp_tools
             
-            # 1. Send Text Summary
-            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"?뱤 *Routine Market Update*\n\n{summary}"))
-            
-            # 2. Send fixed SWING lane charts for all symbols
-            for symbol in settings.trading_symbols:
-                try:
-                    chart_res = mcp_tools.get_chart_image(symbol, lane="swing")
-                    if "chart_base64" in chart_res:
-                        photo_bytes = base64.b64decode(chart_res["chart_base64"])
-                        asyncio.run(trading_bot.send_photo(
-                            settings.TELEGRAM_CHAT_ID, 
-                            photo_bytes, 
-                            caption=f"?뱢 <b>{symbol} SWING Trend</b>"
-                        ))
-                except Exception as chart_err:
-                    logger.warning(f"Failed to send routine chart for {symbol}: {chart_err}")
+            # Send text-only summary (no chart attachments).
+            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"📢 *Routine Market Update*\n\n{summary}"))
 
     except Exception as e:
         logger.error(f"Routine market status job error: {e}")
