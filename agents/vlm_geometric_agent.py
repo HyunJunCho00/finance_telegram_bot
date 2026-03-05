@@ -5,8 +5,8 @@ from loguru import logger
 
 class VLMGeometricAgent:
     """Visual chart specialist. Sole agent that reads the chart image.
-    Judge receives only this agent's structured text output — no raw chart.
-    Model: gemini-3.1-pro-preview (via role='vlm_geometric')."""
+    Judge receives only this agent's structured text output — no raw chart
+    """
 
     SYSTEM_PROMPT = """You are a master technical analyst and liquidity sniper with perfect spatial reasoning.
 You are the ONLY agent that sees the chart. Your structured output is what the Judge uses for all visual context.

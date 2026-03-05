@@ -8,7 +8,7 @@ import json
 
 
 class JudgeAgent:
-    """The final decision maker. Uses the best available model (Sonnet 4.6).
+    """The final decision maker. Uses the best available model
     ONLY agent that receives chart image (SWING mode, cost optimization).
     AI decides everything - we just deliver data."""
 

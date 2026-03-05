@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
     VOYAGE_API_KEY: str = ""
-    GEMINI_API_KEY: str = ""          # default key (flash agents)
+    GEMINI_API_KEY: str = ""          # default Gemini key
     GEMINI_API_KEY_JUDGE: str = ""    # Project A ??Judge (gemini-3.1-pro-preview)
     GEMINI_API_KEY_VLM: str = ""      # Project B ??VLM Geometric (gemini-3.1-pro-preview)
     GROQ_API_KEY: str = ""
@@ -169,14 +169,9 @@ class Settings(BaseSettings):
     # 9. claude_standby Anthropic (reserved, not in default routing)
     MODEL_CLAUDE_STANDBY: str = "claude-sonnet-4-6"
 
-    # 10. High-freq flash agents (liquidity, microstructure, macro, chat)
-    MODEL_LIQUIDITY: str = "gemini-3-flash-preview"
-    MODEL_MICROSTRUCTURE: str = "gemini-3-flash-preview"
-    MODEL_MACRO: str = "gemini-3-flash-preview"
+    # 10. Chat model
     MODEL_CHAT: str = "gemini-3-flash-preview"
     # Soft input caps (character-based) to improve token efficiency
-    MAX_INPUT_CHARS_LIQUIDITY: int = 15000
-    MAX_INPUT_CHARS_MICROSTRUCTURE: int = 15000
     MAX_INPUT_CHARS_MACRO: int = 15000
     MAX_INPUT_CHARS_JUDGE: int = 25000
     MAX_INPUT_CHARS_SELF_CORRECTION: int = 10000
