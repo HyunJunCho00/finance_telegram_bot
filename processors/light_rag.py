@@ -1307,29 +1307,50 @@ CRITICAL RULES:
         # Even on paid tiers, a small 0.5s floor prevents burst errors.
         current_time = time.time()
         elapsed = current_time - LightRAGEngine._last_embed_time
-        if elapsed < 1.0: # Minimum gap for safety
-            time.sleep(1.0 - elapsed)
+        if elapsed < 0.5: # Small safety gap
+            time.sleep(0.5 - elapsed)
         
-        max_retries = 3
-        base_delay = 5.0 # Higher initial delay for rate limit errors
-        
-        for attempt in range(max_retries):
-            try:
-                # Update last call time BEFORE calling to reserve slot
-                LightRAGEngine._last_embed_time = time.time()
-                result = self.embed_client.embed([text[:4000]], model="voyage-finance-2")
-                if result.embeddings and len(result.embeddings) > 0:
-                    return np.array(result.embeddings[0], dtype=np.float32)
-            except Exception as e:
-                err_str = str(e).lower()
-                if "429" in err_str or "rate" in err_str or "limit" in err_str:
-                    if attempt < max_retries - 1:
-                        sleep_time = base_delay * (2 ** attempt)
-                        logger.warning(f"Embedding rate limit (429), retrying in {sleep_time}s...")
-                        time.sleep(sleep_time)
-                        continue
-                logger.warning(f"Embedding error: {e}")
-                return None
+        # --- Attempt 1: Cloudflare Workers AI (Primary - 1024 Dims) ---
+        try:
+            import requests
+            cf_url = f"https://api.cloudflare.com/client/v4/accounts/{settings.CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/baai/bge-m3"
+            headers = {"Authorization": f"Bearer {settings.CLOUDFLARE_AI_API_KEY}"}
+            payload = {"text": [text[:4000]]}
+            
+            LightRAGEngine._last_embed_time = time.time()
+            resp = requests.post(cf_url, headers=headers, json=payload, timeout=8.0)
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                # Correct path for bge-m3 result
+                embeddings = data.get("result", {}).get("data", [])
+                if embeddings and len(embeddings) > 0:
+                    return np.array(embeddings[0], dtype=np.float32)
+            else:
+                logger.warning(f"Cloudflare Embedding failed (HTTP {resp.status_code}). Trying Gemini Relay...")
+        except Exception as e:
+            logger.warning(f"Cloudflare Embedding error: {e}. Trying Gemini Relay...")
+
+        # --- Attempt 2: Gemini Embedding (Relay - 768 -> 1024 Dims) ---
+        try:
+            from agents.ai_router import ai_client
+            gemini = ai_client._gemini_default
+            # Use latest gemini-embedding-001 for 2026-03 standard
+            res = gemini.models.embed_content(
+                model="gemini-embedding-001",
+                contents=[text[:4000]],
+                config=types.EmbedContentConfig(output_dimensionality=768)
+            )
+            if res.embeddings and len(res.embeddings) > 0:
+                gemini_vec = np.array(res.embeddings[0].values, dtype=np.float32)
+                # Pad to 1024 to match Milvus collection settings
+                padded_vec = np.zeros(1024, dtype=np.float32)
+                padded_vec[:len(gemini_vec)] = gemini_vec
+                logger.info(f"Gemini Embedding Relay SUCCEEDED (padded to 1024)")
+                return padded_vec
+        except Exception as ge:
+            logger.error(f"Critical: All embedding providers failed. Gemini error: {ge}")
+            return None
         return None
 
     def _repair_json(self, text: str) -> str:

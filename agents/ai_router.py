@@ -153,6 +153,9 @@ class AIClient:
             "llama-3.1-8b-instant"
         ]
 
+        # ── Circuit Breaker State (V14.8) ────────────────────────────────────
+        self._circuit_breakers = {} # model_id -> expiry_timestamp
+
 
     # ── Lazy clients ──────────────────────────────────────────────────────────
     @property
@@ -212,6 +215,19 @@ class AIClient:
         if settings.OPENAI_API_KEY:
             return OpenAI(api_key=settings.OPENAI_API_KEY)
         return None
+
+    # ── Circuit Breaker Helpers ──────────────────────────────────────────────
+    def _is_model_available(self, model_id: str) -> bool:
+        """Check if a model is currently blocked by circuit breaker."""
+        expiry = self._circuit_breakers.get(model_id, 0)
+        if time.time() > expiry:
+            return True
+        return False
+
+    def _mark_model_exhausted(self, model_id: str, duration: int = 3600):
+        """Block a model for a specific duration (default 1 hour)."""
+        logger.warning(f"CIRCUIT BREAKER: Blocking [{model_id}] for {duration}s due to Rate Limit")
+        self._circuit_breakers[model_id] = time.time() + duration
 
     # ── Role → (gemini_client, model_id, input_cap) ──────────────────────────
     def _get_route(self, role: str) -> Tuple[str, str, int]:
@@ -319,27 +335,34 @@ class AIClient:
             logger.warning(f"Cerebras failed for {model_id}, falling back to Groq")
             return self._generate_openai_compat(self.groq_client, settings.MODEL_RISK_EVAL_FALLBACK, system_prompt, msg, max_tokens, temperature, None, timeout=25.0, name="Groq(fallback)")
         if backend == "groq":
-            # 1. Try original model first (from settings.py)
-            result = self._generate_openai_compat(self.groq_client, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64, timeout=25.0, name="Groq")
-            if result: return result
+            # 1. Try original model first if not blocked
+            if self._is_model_available(model_id):
+                result = self._generate_openai_compat(self.groq_client, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64, timeout=25.0, name="Groq")
+                if result: return result
+            else:
+                logger.debug(f"Circuit Breaker: Skipping primary [{model_id}]")
 
             # 2. Smart Internal Relay based on role priority
             is_critical = role in ["judge", "risk_eval", "meta_regime", "self_correction"]
             relay_pool = self._GROQ_REASONING_POOL if is_critical else self._GROQ_GENERAL_POOL
             
-            logger.warning(f"Groq primary ({model_id}) hit limit for role [{role}]. Starting {'CRITICAL' if is_critical else 'GENERAL'} relay...")
+            logger.warning(f"Groq primary ({model_id}) unavailable or hit limit for role [{role}]. Searching relay pool...")
             
             for alt_model in relay_pool:
-                if alt_model == model_id: continue # Skip if already tried
+                if alt_model == model_id: continue # Already tried
+                if not self._is_model_available(alt_model):
+                    logger.debug(f"Circuit Breaker: Skipping relay candidate [{alt_model}]")
+                    continue
+                
                 logger.info(f"Groq Relay ({role}): Trying [{alt_model}]...")
                 result = self._generate_openai_compat(self.groq_client, alt_model, system_prompt, msg, max_tokens, temperature, chart_image_b64, timeout=20.0, name=f"Groq-Relay({alt_model})")
                 if result:
                     logger.success(f"Groq Relay SUCCEEDED for [{role}] with [{alt_model}]")
                     return result
             
-            # 3. High-Priority Final Fallback: If it's critical, try Gemini Pro Premium one last time
+            # 3. High-Priority Final Fallback
             if is_critical:
-                logger.warning(f"All Groq Reasoning models failed for critical role [{role}]. Trying Gemini Pro 3.1 fallback...")
+                logger.warning(f"All Groq models exhausted for critical role [{role}]. Trying Gemini fallback...")
                 return self._generate_gemini(self._gemini_judge, settings.MODEL_JUDGE, system_prompt, msg, max_tokens, temperature, chart_image_b64)
 
             # 4. Routine Final Fallback
@@ -436,6 +459,11 @@ class AIClient:
             resp = client.chat.completions.create(**kwargs)
             return resp.choices[0].message.content or ""
         except Exception as e:
+            err_str = str(e).lower()
+            if "429" in err_str or "rate_limit" in err_str or "quota" in err_str:
+                # 429 usually means TPD (Tokens Per Day) or RPM.
+                # Use 1 hour block for safer recovery.
+                self._mark_model_exhausted(model_id, 3600)
             logger.error(f"{name} error ({model_id}): {e}")
             return ""
 
