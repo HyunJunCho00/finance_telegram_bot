@@ -143,7 +143,7 @@ class Settings(BaseSettings):
 
     # 2. vlm_geometric / vlm_telegram_chart Google AI Studio Project B
     MODEL_VLM_GEOMETRIC: str = "gemini-3.1-pro-preview"
-    MODEL_VLM_TELEGRAM_CHART: str = "gemini-3.1-pro-preview"
+    MODEL_VLM_TELEGRAM_CHART: str = "gemini-3-flash-preview"
 
     # 3. meta_regime Cerebras
     MODEL_META_REGIME: str = "gpt-oss-120b"
