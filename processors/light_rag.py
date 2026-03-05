@@ -1420,14 +1420,64 @@ CRITICAL RULES:
             end = text_clean.rfind('}') + 1
             if start >= 0 and end > start:
                 raw_json = text_clean[start:end]
+
+                def _normalize_extraction_payload(obj: Dict) -> Dict:
+                    if not isinstance(obj, dict):
+                        return {"entities": [], "relationships": []}
+                    entities = obj.get("entities", [])
+                    relationships = obj.get("relationships", [])
+                    return {
+                        "entities": entities if isinstance(entities, list) else [],
+                        "relationships": relationships if isinstance(relationships, list) else [],
+                    }
+
+                def _salvage_entities_only(s: str) -> Dict:
+                    # Minimal salvage path: if only entities array is present/malformed, keep entities and default relationships.
+                    key = '"entities"'
+                    key_idx = s.find(key)
+                    if key_idx == -1:
+                        return {"entities": [], "relationships": []}
+                    arr_start = s.find('[', key_idx)
+                    if arr_start == -1:
+                        return {"entities": [], "relationships": []}
+                    depth = 0
+                    arr_end = -1
+                    for i in range(arr_start, len(s)):
+                        ch = s[i]
+                        if ch == '[':
+                            depth += 1
+                        elif ch == ']':
+                            depth -= 1
+                            if depth == 0:
+                                arr_end = i
+                                break
+                    if arr_end == -1:
+                        return {"entities": [], "relationships": []}
+                    arr_raw = s[arr_start:arr_end + 1]
+                    try:
+                        entities = json.loads(arr_raw)
+                        return {
+                            "entities": entities if isinstance(entities, list) else [],
+                            "relationships": [],
+                        }
+                    except Exception:
+                        return {"entities": [], "relationships": []}
+
                 try:
-                    return json.loads(raw_json)
+                    return _normalize_extraction_payload(json.loads(raw_json))
                 except json.JSONDecodeError:
                     # Attempt repair
                     repaired = self._repair_json(raw_json)
                     try:
-                        return json.loads(repaired)
+                        return _normalize_extraction_payload(json.loads(repaired))
                     except json.JSONDecodeError as decode_err:
+                        salvaged = _salvage_entities_only(repaired)
+                        if salvaged["entities"]:
+                            logger.warning(
+                                f"LLM extraction JSONDecodeError; salvaged entities-only payload "
+                                f"(count={len(salvaged['entities'])})"
+                            )
+                            return salvaged
                         logger.warning(f"LLM extraction JSONDecodeError (even after repair): {decode_err} on string: {repaired}")
                         return {"entities": [], "relationships": []}
 
