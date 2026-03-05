@@ -80,27 +80,24 @@ class AIClient:
     def __init__(self):
         judge_key = getattr(settings, "GEMINI_API_KEY_JUDGE", "")
         vlm_key = getattr(settings, "GEMINI_API_KEY_VLM", "")
-        default_key = judge_key or vlm_key
+        default_key = getattr(settings, "GEMINI_API_KEY", "") or judge_key or vlm_key
         can_use_vertex = bool(getattr(settings, "PROJECT_ID", ""))
+        vertex_location = getattr(settings, "VERTEX_REGION_GEMINI", "") or settings.vertex_region or "global"
 
         def _make_gemini(key: str):
             if key:
                 return genai.Client(api_key=key)
-            return genai.Client(
-                vertexai=True,
-                project=settings.PROJECT_ID,
-                location=getattr(settings, "VERTEX_REGION_GEMINI", "") or settings.vertex_region or "global",
-            )
+            if can_use_vertex:
+                return genai.Client(
+                    vertexai=True,
+                    project=settings.PROJECT_ID,
+                    location=vertex_location,
+                )
+            return None
 
-        self._gemini_default = (
-            _make_gemini(default_key) if (default_key or can_use_vertex) else None
-        )
-        self._gemini_judge = (
-            _make_gemini(judge_key) if (judge_key or can_use_vertex) else self._gemini_default
-        )
-        self._gemini_vlm = (
-            _make_gemini(vlm_key) if (vlm_key or can_use_vertex) else self._gemini_default
-        )
+        self._gemini_default = _make_gemini(default_key)
+        self._gemini_judge = _make_gemini(judge_key) or self._gemini_default
+        self._gemini_vlm = _make_gemini(vlm_key) or self._gemini_default
 
         if self._gemini_default:
             backend = "AI Studio key" if default_key else "Vertex AI"
