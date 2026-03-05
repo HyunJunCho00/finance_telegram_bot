@@ -1226,8 +1226,9 @@ def build_analysis_graph():
 
     # VLM node exists in the graph but internally decides whether to run
     # based on triage + deterministic chart rules.
+    # IMPORTANT: Keep a single upstream path to avoid double-triggering
+    # downstream judge/risk nodes and concurrent writes to final_decision.
     graph.add_edge("rule_based_chart", "vlm_expert")
-    graph.add_edge("generate_chart", "vlm_expert")
 
     # Sequential finalization
     graph.add_edge("vlm_expert", "judge_agent")
