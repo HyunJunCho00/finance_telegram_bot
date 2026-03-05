@@ -685,6 +685,10 @@ def node_judge_agent(state: AnalysisState) -> dict:
     funding_context = state.get("funding_context", "")
     feedback_text = state.get("feedback_text", "")
     open_positions = state.get("open_positions", "")
+    narrative_context = "\n\n".join(filter(None, [
+        state.get("narrative_text", ""),
+        state.get("rag_context", ""),
+    ]))
 
     # Pass blackboard (includes synthesis + vlm_geometry) and regime context.
     # Chart image is NOT forwarded ??VLMGeometricAgent is the sole visual analyst.
@@ -700,30 +704,121 @@ def node_judge_agent(state: AnalysisState) -> dict:
         active_orders=state.get("active_orders", []),
         open_positions=open_positions,
         symbol=state.get("symbol", "BTCUSDT"),
-        regime_context=regime_ctx
+        regime_context=regime_ctx,
+        narrative_context=narrative_context
     )
     
-    # [NEW] Probabilistic EV & Strategic Scaling (SOTA 2026)
-    # Calculate Expected Value
-    win_prob = decision.get("win_probability_pct", 0) / 100.0
-    profit_pct = decision.get("expected_profit_pct", 0.0)
-    loss_pct = decision.get("expected_loss_pct", 0.0)
-    
+    # Deterministic EV/RR gating (no additional LLM call)
+    def _to_float(v, default=0.0):
+        try:
+            return float(v)
+        except Exception:
+            return default
+
+    def _infer_direction_from_context(bb: dict, regime: dict) -> str:
+        score = 0
+        for k in ("macro", "liquidity", "microstructure", "vlm_geometry", "chart_rules"):
+            node = bb.get(k, {}) if isinstance(bb, dict) else {}
+            d = str(node.get("decision", "")).upper()
+            if d == "LONG":
+                score += 1
+            elif d == "SHORT":
+                score -= 1
+
+        if score > 0:
+            return "LONG"
+        if score < 0:
+            return "SHORT"
+
+        regime_name = str((regime or {}).get("regime", "")).upper()
+        if "BULL" in regime_name:
+            return "LONG"
+        if "BEAR" in regime_name:
+            return "SHORT"
+        return "HOLD"
+
+    if not isinstance(decision.get("reasoning"), dict):
+        decision["reasoning"] = {"final_logic": str(decision.get("reasoning", ""))}
+    if "final_logic" not in decision["reasoning"]:
+        decision["reasoning"]["final_logic"] = ""
+    if not isinstance(decision.get("key_factors"), list):
+        decision["key_factors"] = []
+
+    win_prob_pct = max(0.0, _to_float(decision.get("win_probability_pct", 0.0)))
+    win_prob = win_prob_pct / 100.0
+    profit_pct = max(0.0, _to_float(decision.get("expected_profit_pct", 0.0)))
+    loss_pct = max(0.0, _to_float(decision.get("expected_loss_pct", 0.0)))
+    rr = (profit_pct / loss_pct) if loss_pct > 0 else (999.0 if profit_pct > 0 else 0.0)
     ev = (win_prob * profit_pct) - ((1.0 - win_prob) * loss_pct)
-    
-    # Scale allocation by Risk Budget
-    risk_budget = regime_ctx.get("risk_budget_pct", 100)
-    original_alloc = decision.get("allocation_pct", 0) if isinstance(decision.get("allocation_pct"), (int, float)) else 0
+
+    min_win = float(getattr(settings, "JUDGE_MIN_WIN_PROB_PCT", 52.0))
+    min_rr = float(getattr(settings, "JUDGE_MIN_RR_FOR_ENTRY", 1.35))
+    min_ev = float(getattr(settings, "JUDGE_MIN_EV_FOR_ENTRY_PCT", 0.20))
+    hold_override = bool(getattr(settings, "JUDGE_ENABLE_HOLD_OVERRIDE", True))
+    direction = str(decision.get("decision", "HOLD")).upper()
+
+    # Veto low-quality entries
+    if direction in ("LONG", "SHORT"):
+        failed = []
+        if ev <= 0:
+            failed.append(f"EV={ev:.2f}<=0")
+        if win_prob_pct < min_win:
+            failed.append(f"WinProb={win_prob_pct:.1f}%<{min_win:.1f}%")
+        if rr < min_rr:
+            failed.append(f"RR={rr:.2f}<{min_rr:.2f}")
+        if failed:
+            logger.warning(f"Judge entry vetoed: {', '.join(failed)}")
+            decision["decision"] = "HOLD"
+            decision["allocation_pct"] = 0
+            decision["leverage"] = 1
+            decision["reasoning"]["final_logic"] = (
+                f"[ENTRY VETO] {'; '.join(failed)}. " + decision["reasoning"].get("final_logic", "")
+            )
+            decision["key_factors"].append("EV/RR/승률 게이트 미충족으로 진입 보류")
+
+    # Promote HOLD to small-size entry only when edge is mathematically strong
+    direction = str(decision.get("decision", "HOLD")).upper()
+    if direction == "HOLD" and hold_override and ev >= min_ev and win_prob_pct >= min_win and rr >= min_rr:
+        inferred = _infer_direction_from_context(blackboard, regime_ctx)
+        if mode == TradingMode.POSITION and inferred == "SHORT":
+            inferred = "HOLD"
+        if inferred in ("LONG", "SHORT"):
+            decision["decision"] = inferred
+            decision["allocation_pct"] = float(
+                getattr(settings, "JUDGE_OVERRIDE_ALLOC_POSITION_PCT", 5.0)
+                if mode == TradingMode.POSITION
+                else getattr(settings, "JUDGE_OVERRIDE_ALLOC_SWING_PCT", 8.0)
+            )
+            decision["leverage"] = 1 if mode == TradingMode.POSITION else max(1, int(_to_float(decision.get("leverage", 1), 1)))
+            current_price = _to_float((state.get("market_data", {}) or {}).get("current_price"), 0.0)
+            if current_price > 0:
+                decision["entry_price"] = _to_float(decision.get("entry_price"), current_price) or current_price
+                ep = float(decision["entry_price"])
+                safe_loss = max(loss_pct, 1.0)
+                safe_profit = max(profit_pct, 1.5)
+                if inferred == "LONG":
+                    decision["stop_loss"] = _to_float(decision.get("stop_loss"), ep * (1 - safe_loss / 100.0))
+                    decision["take_profit"] = _to_float(decision.get("take_profit"), ep * (1 + safe_profit / 100.0))
+                else:
+                    decision["stop_loss"] = _to_float(decision.get("stop_loss"), ep * (1 + safe_loss / 100.0))
+                    decision["take_profit"] = _to_float(decision.get("take_profit"), ep * (1 - safe_profit / 100.0))
+            decision["reasoning"]["final_logic"] = (
+                f"[HOLD OVERRIDE] EV={ev:.2f}, WinProb={win_prob_pct:.1f}%, RR={rr:.2f} >= gates. "
+                + decision["reasoning"].get("final_logic", "")
+            )
+            decision["key_factors"].append("수학적 엣지(EV/승률/RR) 충족으로 소규모 진입")
+
+    # Scale allocation by Meta risk budget
+    risk_budget = _to_float(regime_ctx.get("risk_budget_pct", 100), 100.0)
+    original_alloc = _to_float(decision.get("allocation_pct", 0), 0.0)
     scaled_alloc = original_alloc * (risk_budget / 100.0)
-    
-    if ev <= 0 and decision.get("decision") != "HOLD":
-        logger.warning(f"Judge EV ({ev:.2f}) is negative/zero. Forcing HOLD.")
-        decision["decision"] = "HOLD"
-        decision["reasoning"]["final_logic"] = f"[EV VETO] Forced HOLD because EV is {ev:.2f}. " + decision["reasoning"].get("final_logic", "")
-    elif decision.get("decision") != "HOLD":
+    if str(decision.get("decision", "HOLD")).upper() in ("LONG", "SHORT"):
         decision["allocation_pct"] = scaled_alloc
         logger.info(f"Scaled allocation from {original_alloc}% to {scaled_alloc:.2f}% (Risk Budget: {risk_budget}%)")
-        decision["reasoning"]["final_logic"] = f"[SCALING] Allocation constrained by {risk_budget}% Risk Budget. EV is {ev:.2f}. " + decision["reasoning"].get("final_logic", "")
+        decision["reasoning"]["final_logic"] = (
+            f"[SCALING] Allocation constrained by {risk_budget}% Risk Budget. EV={ev:.2f}, RR={rr:.2f}. "
+            + decision["reasoning"].get("final_logic", "")
+        )
 
     # For compatibility with legacy metrics/logging, set conviction to win_probability_pct
     dual_plan = decision.get("daily_dual_plan", {}) if isinstance(decision, dict) else {}
@@ -732,6 +827,7 @@ def node_judge_agent(state: AnalysisState) -> dict:
         "daily_dual_plan": dual_plan if isinstance(dual_plan, dict) else {},
         "conviction_score": win_prob * 100
     }
+
 
 def node_risk_manager(state: AnalysisState) -> dict:
     """Run Risk Manager (CRO). VETO power over Judge's draft."""
@@ -1374,7 +1470,7 @@ class Orchestrator:
 
         # Run each node sequentially — mirrors the LangGraph DAG order.
         # node_context_gathering consolidates: perplexity, RAG ingest, funding, CVD,
-        # liquidation, RAG query, telegram news, self-correction, microstructure,
+        # liquidation, RAG query, telegram news, microstructure,
         # macro, deribit, and fear&greed context in a single function.
         for node_fn in [
             node_collect_data,

@@ -161,6 +161,13 @@ class Settings(BaseSettings):
     # 7. monitor_hourly OpenRouter (free)
     MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
     MONITOR_SOFT_TRIGGER_THRESHOLD: float = 0.7
+    # Judge post-processing gates (deterministic, no extra LLM call)
+    JUDGE_MIN_WIN_PROB_PCT: float = 52.0
+    JUDGE_MIN_RR_FOR_ENTRY: float = 1.35
+    JUDGE_MIN_EV_FOR_ENTRY_PCT: float = 0.20
+    JUDGE_ENABLE_HOLD_OVERRIDE: bool = True
+    JUDGE_OVERRIDE_ALLOC_SWING_PCT: float = 8.0
+    JUDGE_OVERRIDE_ALLOC_POSITION_PCT: float = 5.0
 
     # 8. cloudflare_triage / cloudflare_rerank (CF infra)
     MODEL_CF_TRIAGE: str = "@cf/meta/llama-3-8b-instruct-awq"

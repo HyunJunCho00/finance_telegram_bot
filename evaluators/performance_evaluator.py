@@ -30,6 +30,29 @@ class PerformanceEvaluator:
             logger.error(f"Error fetching 24h old prediction: {e}")
             return None
 
+    def get_predictions_due_for_evaluation(
+        self,
+        after_created_at: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict]:
+        """Fetch reports older than evaluation window, in chronological order."""
+        try:
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=self.evaluation_hours)
+            query = (
+                db.client.table("ai_reports")
+                .select("*")
+                .lte("created_at", cutoff_time.isoformat())
+                .order("created_at")
+                .limit(limit)
+            )
+            if after_created_at:
+                query = query.gt("created_at", after_created_at)
+            response = query.execute()
+            return response.data if response.data else []
+        except Exception as e:
+            logger.error(f"Error fetching due predictions: {e}")
+            return []
+
     def _get_first_price_after(self, symbol: str, ts: datetime) -> Optional[float]:
         """Price closest after prediction time (entry proxy)."""
         try:
@@ -207,6 +230,8 @@ class PerformanceEvaluator:
                 logger.warning(f"Could not fetch trade note for evaluation: {e}")
 
             evaluation = {
+                "report_id": old_report.get("id"),
+                "report_created_at": old_report.get("created_at"),
                 "symbol": symbol,
                 "prediction_time": prediction_time.isoformat(),
                 "predicted_direction": predicted_direction,
@@ -240,6 +265,23 @@ class PerformanceEvaluator:
         logger.info(f"Evaluation result: {evaluation.get('direction_correct', False)}")
 
         return evaluation
+
+    def run_evaluation_batch(self, after_created_at: Optional[str] = None, limit: int = 20) -> List[Dict]:
+        due_reports = self.get_predictions_due_for_evaluation(after_created_at=after_created_at, limit=limit)
+        results: List[Dict] = []
+        for report in due_reports:
+            evaluation = self.evaluate_prediction(report)
+            results.append({
+                "report_id": report.get("id"),
+                "report_created_at": report.get("created_at"),
+                "symbol": report.get("symbol"),
+                "evaluation": evaluation,
+            })
+        if results:
+            logger.info(f"Batch evaluation processed: {len(results)} report(s)")
+        else:
+            logger.info("No due reports found for batch evaluation")
+        return results
 
 
 performance_evaluator = PerformanceEvaluator()

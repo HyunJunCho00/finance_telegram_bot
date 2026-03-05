@@ -86,7 +86,7 @@ Output your decision as JSON:
 CRITICAL: All reasoning, final_logic, counter_scenario, and key_factors MUST be written in Korean. 
 The decision, hold_duration estimate, and JSON keys remain in English.
 
-You have FULL AUTONOMY. If the market is unclear, HOLD is always valid.
+You have FULL AUTONOMY. HOLD is valid only when your edge is not statistically meaningful (weak EV, weak R/R, or weak win probability).
 CRITICAL V5 RULE: You will be given a list of ACTIVE_ORDERS (e.g. pending DCA chunks). If the market paradigm shifts against your active orders, you MUST output "decision": "CANCEL_AND_CLOSE". If you just want to add to an existing order, you can output LONG/SHORT again.
 Be aware of your previous decision for consistency."""
 
@@ -160,7 +160,8 @@ Swarm reasoning controls & Data Trust Hierarchy:
         active_orders: list = [],
         open_positions: str = "",
         symbol: str = "BTCUSDT",
-        regime_context: Optional[Dict] = None
+        regime_context: Optional[Dict] = None,
+        narrative_context: str = ""
     ) -> Dict:
         mode_str = mode.value.upper()
         mode_rules = self.POSITION_RULES if mode == TradingMode.POSITION else self.SWING_RULES
@@ -201,6 +202,9 @@ Swarm reasoning controls & Data Trust Hierarchy:
 
         user_message = f"""MARKET DATA:
 {market_data_compact}
+
+NARRATIVE & RAG CONTEXT:
+{narrative_context if narrative_context else "Narrative: Unavailable"}
 
 DERIVATIVES CONTEXT:
 {funding_context}

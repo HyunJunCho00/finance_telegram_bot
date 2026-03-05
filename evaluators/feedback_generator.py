@@ -75,12 +75,27 @@ Analyze what went wrong and provide:
             return None
 
     def run_feedback_cycle(self) -> None:
-        from evalutors.performance_evaluator import performance_evaluator
+        from evaluators.performance_evaluator import performance_evaluator
+        from config.local_state import state_manager
 
-        evaluation = performance_evaluator.run_evaluation()
+        cursor_key = "evaluation:last_24h_report_created_at"
+        last_cursor = state_manager.get_system_config(cursor_key, "")
+        batch = performance_evaluator.run_evaluation_batch(after_created_at=last_cursor, limit=30)
+        if not batch:
+            return
 
-        if evaluation and not evaluation.get('error'):
-            self.generate_feedback(evaluation)
+        max_cursor = last_cursor
+        for item in batch:
+            report_created_at = item.get("report_created_at") or ""
+            evaluation = item.get("evaluation", {})
+            if evaluation and not evaluation.get("error"):
+                self.generate_feedback(evaluation)
+            if report_created_at and (not max_cursor or report_created_at > max_cursor):
+                max_cursor = report_created_at
+
+        if max_cursor and max_cursor != last_cursor:
+            state_manager.set_system_config(cursor_key, max_cursor)
+            logger.info(f"24h evaluation cursor advanced to {max_cursor}")
 
 
 feedback_generator = FeedbackGenerator()

@@ -13,6 +13,7 @@ Commands:
 """
 from typing import List, Optional, Dict
 import re
+import asyncio
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from config.settings import settings, TradingMode
@@ -362,19 +363,27 @@ class TradingBot:
 
         symbol = args[0].upper() + 'USDT'
         await update.message.reply_text(
-            f"Running dual-lane analysis for {symbol} "
-            f"(SWING futures hedge + POSITION spot accumulation)..."
+            f"Running precision analysis for {symbol} "
+            f"(single POSITION lane; dual playbook will be refreshed)..."
         )
 
         try:
             from executors.orchestrator import orchestrator
-            result = orchestrator.run_analysis(symbol, is_emergency=False)
+            result = await asyncio.to_thread(
+                orchestrator.run_analysis_with_mode,
+                symbol,
+                TradingMode.POSITION,
+                False,
+                True,
+            )
+
             if result:
                 decision = result.get('decision', 'N/A')
                 confidence = result.get('confidence', 0)
                 await update.message.reply_text(
-                    f"Analysis complete: {decision} ({confidence}%)\n"
-                    f"Full report sent to chat."
+                    f"Analysis complete for {symbol}\n"
+                    f"POSITION: {decision} ({confidence}%)\n"
+                    f"Report sent to chat."
                 )
             else:
                 await update.message.reply_text("Analysis failed. Check logs.")
