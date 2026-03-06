@@ -260,6 +260,10 @@ class TradingBot:
             return text
 
         sanitized = text
+        # Convert common markdown-ish patterns into Telegram-safe HTML/plain text.
+        sanitized = re.sub(r"^\s*#{1,6}\s*(.+)$", r"\n<b>\1</b>", sanitized, flags=re.MULTILINE)
+        sanitized = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", sanitized)
+        sanitized = re.sub(r"^\s*\*\s+", "- ", sanitized, flags=re.MULTILINE)
         sanitized = re.sub(r"</?ul[^>]*>", "", sanitized, flags=re.IGNORECASE)
         sanitized = re.sub(r"<li[^>]*>\s*", "\n- ", sanitized, flags=re.IGNORECASE)
         sanitized = re.sub(r"</li>", "", sanitized, flags=re.IGNORECASE)
@@ -837,7 +841,11 @@ class TradingBot:
             citation_tags = sorted(set(citation_tags))[:20]
 
             responder_system = (
-                "You are a crypto assistant. Answer in Korean with concise, accurate synthesis. "
+                "You are a crypto assistant. Answer in Korean with concise, accurate synthesis for medium/long-term investors. "
+                "Output format MUST be Telegram-safe HTML only (use <b>, <i>, <code>, plain '-' bullets). "
+                "Do NOT use Markdown markers like ###, **, *, or markdown numbered lists. "
+                "Structure strictly as: <b>1) News Summary</b>, <b>2) Technical Summary</b>, "
+                "<b>3) Swing Plan</b>, <b>4) Position Plan</b>, <b>5) Conclusion</b>. "
                 "When claims rely on fetched data, include source tags like [source - url] or [source - telegram]. "
                 "Never invent sources. If evidence is weak, say uncertainty explicitly."
             )
@@ -859,7 +867,8 @@ class TradingBot:
                 False,
                 "chat",
             )
-            await update.message.reply_text(final_answer or "결과를 생성하지 못했습니다.")
+            safe_answer = self._sanitize_html_for_telegram(final_answer or "결과를 생성하지 못했습니다.")
+            await update.message.reply_text(safe_answer, parse_mode='HTML')
 
         except Exception as e:
             logger.error(f"handle_message error: {e}")
