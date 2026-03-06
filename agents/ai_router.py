@@ -196,7 +196,7 @@ class AIClient:
             "risk_eval": ("cerebras", settings.MODEL_RISK_EVAL, 10000),
             "risk_eval_fallback": ("groq", settings.MODEL_RISK_EVAL_FALLBACK, 10000),
             "rag_extraction": ("groq", settings.MODEL_RAG_EXTRACTION, settings.MAX_INPUT_CHARS_RAG_EXTRACTION),
-            "news_summarize": ("groq", settings.MODEL_NEWS_SUMMARIZE, 10000),
+            "news_summarize": ("cerebras", settings.MODEL_NEWS_SUMMARIZE, 10000),
             "post_mortem": ("groq", settings.MODEL_RAG_EXTRACTION, 15000),
             "feedback": ("groq", settings.MODEL_RAG_EXTRACTION, 15000),
             "monitor_hourly": ("cerebras", settings.MODEL_MONITOR_HOURLY, 8000),
@@ -334,6 +334,21 @@ class AIClient:
             )
             if result:
                 return result
+
+        # For judge-critical decisions, try a Gemini fallback model before leaving Gemini.
+        if client_obj and role in ("judge", "self_correction"):
+            judge_fallback = getattr(settings, "MODEL_JUDGE_FALLBACK", "") or "gemini-3-flash-preview"
+            if judge_fallback != model_id and self._is_model_available(judge_fallback):
+                logger.warning(
+                    f"Gemini primary {model_id} failed for role {role}. "
+                    f"Trying judge fallback {judge_fallback}..."
+                )
+                result = self._generate_gemini(
+                    client_obj, judge_fallback, system_prompt, msg, max_tokens, temperature, chart_image_b64
+                )
+                if result:
+                    logger.success(f"Gemini judge fallback succeeded with {judge_fallback}")
+                    return result
 
         logger.warning(f"Gemini {model_id} exhausted or failed for role {role}. Triggering relay...")
         if self._is_critical_role(role) and self.cerebras_client:

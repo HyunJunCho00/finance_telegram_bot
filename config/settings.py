@@ -139,10 +139,11 @@ class Settings(BaseSettings):
 
     # 1. judge Google AI Studio Project A
     MODEL_JUDGE: str = "gemini-3.1-pro-preview"
+    MODEL_JUDGE_FALLBACK: str = "gemini-3-flash-preview"
     MODEL_SELF_CORRECTION: str = "gemini-3.1-pro-preview"
 
     # 2. vlm_geometric / vlm_telegram_chart Google AI Studio Project B
-    MODEL_VLM_GEOMETRIC: str = "gemini-3.1-pro-preview"
+    MODEL_VLM_GEOMETRIC: str = "gemini-3-flash-preview"
     MODEL_VLM_TELEGRAM_CHART: str = "gemini-3-flash-preview"
 
     # 3. meta_regime Cerebras
@@ -154,9 +155,9 @@ class Settings(BaseSettings):
     # 5. risk_eval_fallback Groq
     MODEL_RISK_EVAL_FALLBACK: str = "openai/gpt-oss-20b"
 
-    # 6. news_summarize / rag_extraction Groq
+    # 6. RAG extraction (Groq) + News summarize (Cerebras lightweight)
     MODEL_RAG_EXTRACTION: str = "openai/gpt-oss-20b"
-    MODEL_NEWS_SUMMARIZE: str = "openai/gpt-oss-20b"
+    MODEL_NEWS_SUMMARIZE: str = "llama3.1-8b"
 
     # 7. monitor_hourly OpenRouter (free)
     MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
@@ -382,6 +383,9 @@ class SecretManager:
             "ENABLE_GCS_ARCHIVE",
             "DUNE_API_KEY",
             "GROQ_API_KEY",
+            "CEREBRAS_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OPEN_ROUTER_API_KEY",
         ]
 
         for name in secret_names:

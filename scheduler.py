@@ -22,6 +22,8 @@ from executors.paper_exchange import paper_engine
 from loguru import logger
 import sys
 import threading
+import json
+from datetime import datetime, timezone
 
 
 def job_1min_tick():
@@ -154,15 +156,72 @@ def job_routine_market_status():
             # Volatility
             indicators[symbol]["volatility"] = volatility_monitor.calculate_price_change(symbol)
                 
-        # Telegram Intel (Last 1 hour)
+        # News Intel (Last 1 hour): Telegram + external crypto news synthesized by LLM
         telegram_intel = "최근 1시간 내 주요 뉴스 없음"
         try:
-            from mcp_server.tools import mcp_tools
-            news_res = mcp_tools.get_telegram_summary(hours=1)
-            if "summary" in news_res and news_res["summary"]:
-                telegram_intel = news_res["summary"]
+            from agents.ai_router import ai_client
+
+            tg_messages = db.get_recent_telegram_messages(hours=1) or []
+            tg_items = []
+            for msg in tg_messages[:20]:
+                tg_items.append({
+                    "source_type": "telegram",
+                    "source": msg.get("channel", "telegram"),
+                    "text": str(msg.get("text", ""))[:260],
+                    "timestamp": msg.get("timestamp") or msg.get("created_at", ""),
+                })
+
+            ext_raw = news_collector.fetch_news(
+                categories=["bitcoin", "ethereum", "macro", "trading", "institutional", "defi"],
+                limit=4,
+                lang="en",
+            ) or []
+            ext_items = []
+            seen_links = set()
+            for a in ext_raw:
+                link = a.get("link", "")
+                if not link or link in seen_links:
+                    continue
+                seen_links.add(link)
+                ext_items.append({
+                    "source_type": "external",
+                    "source": a.get("source", "unknown"),
+                    "title": str(a.get("title", ""))[:180],
+                    "description": str(a.get("description", ""))[:220],
+                    "url": link,
+                })
+                if len(ext_items) >= 12:
+                    break
+
+            if tg_items or ext_items:
+                logger.info(
+                    f"Routine news synthesis inputs: telegram={len(tg_items)} external={len(ext_items)}"
+                )
+                payload = {
+                    "telegram_messages": tg_items,
+                    "external_news": ext_items,
+                    "utc_now": datetime.now(timezone.utc).isoformat(),
+                }
+                prompt = (
+                    "Summarize the market situation from BOTH Telegram and external news.\n"
+                    "Output in Korean, concise, max 180 words.\n"
+                    "For every claim, include source tags in this style:\n"
+                    "- [Bloomberg - https://example.com/...]\n"
+                    "- [Whale_Alert - telegram]\n"
+                    "If conflicting signals exist, mention the conflict explicitly.\n"
+                    "Do not invent sources or URLs. Use only provided input."
+                )
+                telegram_intel = ai_client.generate_response(
+                    system_prompt="You are a crypto news synthesis analyst. Return plain text only.",
+                    user_message=f"{prompt}\n\nINPUT_JSON:\n{json.dumps(payload, ensure_ascii=False)}",
+                    temperature=0.2,
+                    max_tokens=900,
+                    role="news_summarize",
+                ) or "최근 1시간 내 주요 뉴스 없음"
+            else:
+                telegram_intel = "최근 1시간 내 주요 뉴스 없음"
         except Exception as e:
-            logger.warning(f"Failed to fetch Telegram intel for routine update: {e}")
+            logger.warning(f"Failed to synthesize market news intel: {e}")
             
         indicators["TELEGRAM_INTEL"] = telegram_intel
 
