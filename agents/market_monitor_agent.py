@@ -1,12 +1,12 @@
-﻿"""Market Monitor Agent ??Hourly trigger evaluator.
+﻿"""Market Monitor Agent | Hourly trigger evaluator.
 
-Role: monitor_hourly ??OpenRouter (free tier)
+Role: monitor_hourly | OpenRouter (free tier)
 
 Every hour:
 1. Load the current Daily Playbook from DB for each symbol+mode.
 2. Compare live indicators against Playbook entry/invalidation conditions.
 3. Output: NO_ACTION | WATCH | TRIGGER
-   - TRIGGER: all entry conditions met ??hand off to orchestrator for order execution.
+   - TRIGGER: all entry conditions met | hand off to orchestrator for order execution.
    - WATCH: partial match, monitoring needed.
    - NO_ACTION: no condition met.
 """
@@ -31,7 +31,7 @@ You will receive:
 1. DAILY PLAYBOOK: The strategy designed this morning (entry/exit/invalidation/risk conditions).
 2. LIVE INDICATORS: Current price, funding rate, OI divergence, MFI proxy, volatility.
 
-Output STRICT JSON ??no extra text:
+Output STRICT JSON | no extra text:
 {
   "status": "NO_ACTION" | "WATCH" | "TRIGGER",
   "symbol": "BTCUSDT",
@@ -140,7 +140,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         playbook = self._load_playbook(symbol, mode)
         if not playbook:
             return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                    "reasoning": "?쒖꽦?붾맂 ?뚮젅?대턿???놁뒿?덈떎."}
+                    "reasoning": "활성화된 플레이북이 없습니다."}
 
         # TTL check
         try:
@@ -149,14 +149,14 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             created_at = dateutil.parser.parse(playbook.get("created_at", ""))
             if datetime.now(timezone.utc) - created_at > timedelta(hours=24):
                 return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                        "reasoning": "?뚮젅?대턿 ?좏슚湲곌컙(>24h)??留뚮즺?섏뿀?듬땲??"}
+                        "reasoning": "플레이북 유효기간(>24h)이 만료되었습니다."}
         except Exception:
             pass
 
         live = self._get_live_indicators(symbol)
         pb_data = playbook.get("playbook", {})
         
-        # ?? Deterministic Evaluation Logic ??
+        # ── Deterministic Evaluation Logic ──
         matched = []
         unmatched = []
         invalidated = False
@@ -180,15 +180,15 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                         logger.debug(f"Invalidation parse error: {e}")
 
         if invalidated:
-            logger.info(f"Monitor [{symbol}/{mode}]: NO_ACTION ??Playbook Invalidated: {inval_reason}")
+            logger.info(f"Monitor [{symbol}/{mode}]: NO_ACTION | Playbook Invalidated: {inval_reason}")
             return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                    "reasoning": f"臾댄슚?붾맖: {inval_reason}"}
+                    "reasoning": f"무효화됨: {inval_reason}"}
                     
         # 2. Check Entry Conditions
         entry_conds = pb_data.get("entry_conditions", [])
         if not entry_conds:
             return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                    "reasoning": "遺꾩꽍 媛?ν븳 吏꾩엯 議곌굔???뺤쓽?섏? ?딆븯?듬땲??"}
+                    "reasoning": "분석 가능한 진입 조건이 정의되지 않았습니다."}
                     
         for ec in entry_conds:
             if isinstance(ec, dict):
@@ -226,9 +226,9 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             result_status = "WATCH"
             
         reasoning = (
-            "紐⑤뱺 寃곗젙濡좎쟻 議곌굔??異⑹”?섏뿀?듬땲??" if result_status == "TRIGGER"
-            else f"{match_count}/{total_entry_count} 議곌굔 留뚯” (Soft-Trigger)." if result_status == "SOFT_TRIGGER"
-            else f"{len(unmatched)}媛?議곌굔 ?湲?以?"
+            "모든 결정론적 조건이 충족되었습니다." if result_status == "TRIGGER"
+            else f"{match_count}/{total_entry_count} 조건 만족 (Soft-Trigger)." if result_status == "SOFT_TRIGGER"
+            else f"{len(unmatched)}개 조건 대기 중"
         )
         
         result = {
@@ -245,7 +245,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             "match_ratio": round(match_ratio, 2)
         }
         
-        logger.info(f"Monitor [{symbol}/{mode}]: {result_status} ({match_count}/{total_entry_count}) ??{reasoning}")
+        logger.info(f"Monitor [{symbol}/{mode}]: {result_status} ({match_count}/{total_entry_count}) | {reasoning}")
         return result
 
     def summarize_current_status(self, indicators: dict) -> str:
@@ -434,5 +434,6 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
 
         lines.append(f"- <i>생성 시각(UTC): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}</i>")
         return "\n".join(lines)
-market_monitor_agent = MarketMonitorAgent()
 
+
+market_monitor_agent = MarketMonitorAgent()

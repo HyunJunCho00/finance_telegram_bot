@@ -5,7 +5,7 @@ Scope: based on current implementation in `scheduler.py`, `executors/`, `agents/
 
 ## 1. Purpose
 
-This system runs an automated crypto analysis and execution pipeline for `BTCUSDT` and `ETHUSDT`, with:
+This system runs an automated crypto analysis and execution pipeline for `TRADING_SYMBOLS` (default: `BTCUSDT`, `ETHUSDT`), with:
 
 - continuous data collection,
 - scheduled AI analysis (daily precision + hourly monitor),
@@ -111,6 +111,7 @@ Defined in `scheduler.py`.
 - hourly at :10: `job_1hour_crypto_news`
 - hourly at :15: `job_hourly_monitor` (daily playbook checks)
 - hourly at :20: `job_routine_market_status` (summary + Telegram push)
+- hourly at :22: `job_hourly_swing_charts` (BTC/ETH swing chart push)
 - hourly at :45: `job_1hour_evaluation`
 - daily 00:00 UTC: `job_daily_precision` (daily playbook generation)
 - daily 00:15 UTC: `job_daily_fear_greed`
@@ -147,13 +148,14 @@ Startup bootstrap also runs immediate initial collectors and Telegram catch-up s
   - role-based model router (Gemini/Cerebras/Groq/OpenRouter/Cloudflare),
   - fallback and circuit-breaking behavior.
 
-### 5.2 Present but not on the main orchestrator path
+### 5.2 Called inside orchestrator triage (not separate LangGraph nodes)
 
 - `agents/liquidity_agent.py`
 - `agents/microstructure_agent.py`
 - `agents/macro_options_agent.py`
 
-These modules exist, but current `Orchestrator` graph does not call them as independent nodes.
+These modules are invoked inside `node_triage` as deterministic/heuristic analyzers.
+They are not registered as independent LangGraph nodes.
 
 ### 5.3 Role-Model-Tool Matrix (Current Config)
 
@@ -168,7 +170,7 @@ These modules exist, but current `Orchestrator` graph does not call them as inde
 | `self_correction` | `evaluators/feedback_generator.py` | Wrong-call feedback and lessons learned | Gemini judge route: `MODEL_SELF_CORRECTION=gemini-3.1-pro-preview` | Evaluation results + original reasoning/execution notes |
 | `macro` | `executors/post_mortem.py` | Post-trade case-study style lesson generation | Cerebras route (mapped to `MODEL_META_REGIME=gpt-oss-120b`) | Trade context + outcome analysis for memory loop |
 | `news_cluster` | `scheduler.py` (job_routine_market_status) | Selecting and merging high-impact news | Groq: `MODEL_NEWS_CLUSTER=qwen/qwen3-32b` | Telegram + External news inputs, JSON-schema grouping |
-| `news_brief_final` | `scheduler.py` (job_routine_market_status) | Writing concise Korean market briefings | Cerebras: `MODEL_NEWS_FINAL=gpt-oss-120b` | Selected news items from cluster step |
+| `news_brief_final` | `scheduler.py` (job_routine_market_status) | Writing concise Korean market briefings | Groq: `MODEL_NEWS_FINAL=openai/gpt-oss-120b` (fallback `MODEL_NEWS_FINAL_FALLBACK=openai/gpt-oss-20b`) | Selected news items from cluster step |
 | `news_summarize` | `agents/market_monitor_agent.py` | Fallback market status summary generation | Groq route: `MODEL_NEWS_SUMMARIZE=llama3.1-8b` | Current market indicators (price/funding/etc.) |
 
 Notes:
