@@ -161,7 +161,8 @@ Swarm reasoning controls & Data Trust Hierarchy:
         open_positions: str = "",
         symbol: str = "BTCUSDT",
         regime_context: Optional[Dict] = None,
-        narrative_context: str = ""
+        narrative_context: str = "",
+        onchain_context: str = "",
     ) -> Dict:
         mode_str = mode.value.upper()
         mode_rules = self.POSITION_RULES if mode == TradingMode.POSITION else self.SWING_RULES
@@ -223,6 +224,9 @@ ACTIVE DCA/TWAP ORDERS (V5 EXECUTION DESK PENDING):
 
 REGIME CONTEXT (META-AGENT TRUST DIRECTIVES):
 {json.dumps(regime_context, indent=2) if regime_context else "No regime context available."}
+
+ON-CHAIN OVERLAY:
+{onchain_context if onchain_context else "On-chain Context: unavailable"}
 
 {previous_context}
 {feedback_text}

@@ -20,6 +20,7 @@ from agents.ai_router import ai_client
 from config.database import db
 from config.settings import settings, TradingMode
 from loguru import logger
+from processors.onchain_signal_engine import onchain_signal_engine
 
 
 class MarketMonitorAgent:
@@ -244,8 +245,32 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             "playbook_id": playbook.get("id"),
             "match_ratio": round(match_ratio, 2)
         }
+
+        try:
+            snapshot = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
+            gate = onchain_signal_engine.build_gate(snapshot)
+            playbook_direction = str(playbook.get("source_decision", "HOLD") or "HOLD").upper()
+            blocked = (
+                playbook_direction == "LONG" and not gate.get("allow_long", True)
+            ) or (
+                playbook_direction == "SHORT" and not gate.get("allow_short", True)
+            )
+            chase_block = playbook_direction == "LONG" and gate.get("chase_long_blocked") and result_status == "TRIGGER"
+
+            if result_status in ["TRIGGER", "SOFT_TRIGGER"] and (blocked or chase_block):
+                result["status"] = "WATCH"
+                suffix = "온체인 상위 필터가 진입을 제한합니다."
+                if chase_block and not blocked:
+                    suffix = "온체인 상위 필터가 추격 롱을 제한합니다."
+                result["reasoning"] = f"{result['reasoning']} {suffix}".strip()
+            result["onchain_gate"] = gate
+        except Exception as e:
+            logger.warning(f"On-chain gate check failed for {symbol}/{mode}: {e}")
         
-        logger.info(f"Monitor [{symbol}/{mode}]: {result_status} ({match_count}/{total_entry_count}) | {reasoning}")
+        logger.info(
+            f"Monitor [{symbol}/{mode}]: {result.get('status')} ({match_count}/{total_entry_count}) | "
+            f"{result.get('reasoning')}"
+        )
         return result
 
     def summarize_current_status(self, indicators: dict) -> str:
@@ -345,12 +370,29 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         def _line_for_mode(snapshot: dict, label: str) -> str:
             if not isinstance(snapshot, dict) or not snapshot:
                 return f"{label}: N/A"
+            trend_map = {
+                "uptrend": "상승추세",
+                "downtrend": "하락추세",
+                "ranging": "횡보",
+                "insufficient_data": "데이터부족",
+                "insufficient_pivots": "피벗부족",
+            }
+            pressure_map = {
+                "strong_bullish": "실시간 상방압력 강함",
+                "bullish": "실시간 상방압력",
+                "early_bullish": "실시간 상방 선행신호",
+                "strong_bearish": "실시간 하방압력 강함",
+                "bearish": "실시간 하방압력",
+                "early_bearish": "실시간 하방 선행신호",
+                "mixed": "실시간 혼조",
+            }
             tf = snapshot.get("primary_tf", "4h")
             ms = ((snapshot.get("market_structure") or {}).get(tf) or {})
             tr = snapshot.get(f"trendlines_{tf}", {}) or {}
             sw = snapshot.get(f"swing_levels_{tf}", {}) or {}
             fib = snapshot.get(f"fibonacci_{tf}", {}) or {}
-            trend = ms.get("trend", "N/A")
+            pressure = snapshot.get("realtime_pressure", {}) or {}
+            trend = trend_map.get(ms.get("trend"), ms.get("trend", "N/A"))
             choch = ms.get("choch")
             msb = ms.get("msb")
             extra = []
@@ -358,8 +400,14 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 extra.append(f"CHoCH={choch}")
             if msb:
                 extra.append(f"MSB={msb}")
+            pressure_summary = pressure_map.get(pressure.get("summary"))
+            pressure_details = pressure.get("details", []) or []
+            pressure_text = pressure_summary
+            if pressure_summary and pressure_details:
+                pressure_text = f"{pressure_summary} ({', '.join(pressure_details[:2])})"
             return (
                 f"{label}({tf}) {trend}"
+                + (f" | {pressure_text}" if pressure_text else "")
                 + (f" [{' | '.join(extra)}]" if extra else "")
                 + f" | S/R {sw.get('nearest_support', 'N/A')}/{sw.get('nearest_resistance', 'N/A')}"
                 + f" | Fib {fib.get('nearest_fib', 'N/A')}"

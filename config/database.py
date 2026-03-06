@@ -340,12 +340,64 @@ class DatabaseClient:
             .execute()
         return response.data[0] if response.data else None
 
+    # On-Chain Daily Snapshots
+
+    @reconnect_on_error
+    def upsert_onchain_daily_snapshot(self, data: Dict) -> Dict:
+        """Upsert Coin Metrics-derived daily snapshot."""
+        return self.client.table("onchain_daily_snapshots").upsert(
+            data, on_conflict="symbol,as_of_date,source"
+        ).execute()
+
+    def get_latest_onchain_snapshot(self, symbol: str, max_age_hours: Optional[int] = 48) -> Optional[Dict]:
+        response = self.client.table("onchain_daily_snapshots")\
+            .select("*")\
+            .eq("symbol", symbol)\
+            .order("as_of_date", desc=True)\
+            .limit(1)\
+            .execute()
+
+        row = response.data[0] if response.data else None
+        if not row or max_age_hours is None:
+            return row
+
+        try:
+            as_of_date = datetime.fromisoformat(str(row["as_of_date"]))
+            age_hours = (datetime.now(timezone.utc) - as_of_date.replace(tzinfo=timezone.utc)).total_seconds() / 3600.0
+            if age_hours > max_age_hours:
+                row = dict(row)
+                row["is_stale"] = True
+                row["age_hours"] = round(age_hours, 2)
+            else:
+                row = dict(row)
+                row["is_stale"] = False
+                row["age_hours"] = round(age_hours, 2)
+        except Exception:
+            row = dict(row)
+            row["is_stale"] = None
+        return row
+
     # ─────────────── AI Reports ───────────────
 
     @reconnect_on_error
     def insert_ai_report(self, data: Dict) -> Optional[str]:
-        response = self.client.table("ai_reports").insert(data).execute()
-        return response.data[0]['id'] if response.data else None
+        try:
+            response = self.client.table("ai_reports").insert(data).execute()
+            return response.data[0]['id'] if response.data else None
+        except Exception as e:
+            msg = str(e).lower()
+            if "onchain_context" in msg or "onchain_snapshot" in msg:
+                logger.warning(
+                    "ai_reports insert fallback: on-chain columns missing in target schema"
+                )
+                legacy_data = {
+                    key: value
+                    for key, value in data.items()
+                    if key not in {"onchain_context", "onchain_snapshot"}
+                }
+                response = self.client.table("ai_reports").insert(legacy_data).execute()
+                return response.data[0]['id'] if response.data else None
+            raise
 
     def get_latest_report(self, symbol: str = None) -> Optional[Dict]:
         query = self.client.table("ai_reports")\
@@ -364,6 +416,56 @@ class DatabaseClient:
         return self.client.table("market_status_events").insert(data).execute()
 
     # ─────────────── Feedback ───────────────
+
+    @reconnect_on_error
+    def get_market_status_events(
+        self,
+        symbol: Optional[str] = None,
+        limit: int = 100,
+        hours: Optional[int] = None,
+    ) -> List[Dict]:
+        query = self.client.table("market_status_events")\
+            .select("*")\
+            .order("created_at", desc=True)\
+            .limit(limit)
+        if symbol:
+            query = query.eq("symbol", symbol)
+        if hours is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            query = query.gte("created_at", cutoff)
+        response = query.execute()
+        return response.data if response.data else []
+
+    @reconnect_on_error
+    def update_market_status_event_technical_snapshot(self, event_id: int, technical_snapshot: Dict) -> Dict:
+        """Replace technical_snapshot JSONB for a market_status_event row."""
+        return self.client.table("market_status_events")\
+            .update({"technical_snapshot": technical_snapshot})\
+            .eq("id", event_id)\
+            .execute()
+
+    @reconnect_on_error
+    def get_market_data_since(
+        self,
+        symbol: str,
+        since: datetime,
+        limit: int = 120,
+        exchange: str = "binance",
+    ) -> pd.DataFrame:
+        response = self.client.table("market_data")\
+            .select("*")\
+            .eq("symbol", symbol)\
+            .eq("exchange", exchange)\
+            .gte("timestamp", since.isoformat())\
+            .order("timestamp")\
+            .limit(limit)\
+            .execute()
+        rows = response.data if response.data else []
+        if rows:
+            df = pd.DataFrame(rows)
+            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
+            return df.sort_values('timestamp').reset_index(drop=True)
+        return pd.DataFrame()
 
     @reconnect_on_error
     def insert_feedback(self, data: Dict) -> Dict:
@@ -529,6 +631,18 @@ class DatabaseClient:
                 results['fear_greed_deleted'] = len(r.data) if r.data else 0
             except Exception:
                 results['fear_greed_deleted'] = 0
+
+            try:
+                cutoff_onchain = (datetime.now(timezone.utc) - timedelta(
+                    days=settings.RETENTION_REPORTS_DAYS
+                )).date().isoformat()
+                r = self.client.table("onchain_daily_snapshots")\
+                    .delete()\
+                    .lt("as_of_date", cutoff_onchain)\
+                    .execute()
+                results['onchain_deleted'] = len(r.data) if r.data else 0
+            except Exception:
+                results['onchain_deleted'] = 0
 
             logger.info(f"Data cleanup completed: {results}")
             return results

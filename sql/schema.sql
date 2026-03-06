@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS ai_reports (
     bear_opinion TEXT,
     risk_assessment TEXT,
     final_decision JSONB,
+    onchain_context TEXT,
+    onchain_snapshot JSONB,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -256,3 +258,68 @@ CREATE TABLE IF NOT EXISTS fear_greed_data (
 );
 
 CREATE INDEX idx_fear_greed_timestamp ON fear_greed_data(timestamp DESC);
+
+-- Liquidation aggregates from Binance force-order websocket
+CREATE TABLE IF NOT EXISTS liquidations (
+    id BIGSERIAL PRIMARY KEY,
+    timestamp TIMESTAMPTZ NOT NULL,
+    symbol VARCHAR(20) NOT NULL,
+    long_liq_usd DECIMAL(20, 2) NOT NULL DEFAULT 0,
+    short_liq_usd DECIMAL(20, 2) NOT NULL DEFAULT 0,
+    long_liq_count INTEGER NOT NULL DEFAULT 0,
+    short_liq_count INTEGER NOT NULL DEFAULT 0,
+    largest_single_usd DECIMAL(20, 2) NOT NULL DEFAULT 0,
+    largest_single_side VARCHAR(10) NOT NULL DEFAULT '',
+    largest_single_price DECIMAL(20, 8) NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(timestamp, symbol)
+);
+
+CREATE INDEX idx_liquidations_symbol_timestamp ON liquidations(symbol, timestamp DESC);
+
+-- Daily playbooks used by the hourly monitor
+CREATE TABLE IF NOT EXISTS daily_playbooks (
+    id BIGSERIAL PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    playbook JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ttl_hours INT NOT NULL DEFAULT 24,
+    source_decision TEXT NOT NULL DEFAULT 'HOLD',
+    UNIQUE (symbol, mode)
+);
+
+CREATE INDEX idx_daily_playbooks_symbol_mode ON daily_playbooks(symbol, mode);
+CREATE INDEX idx_daily_playbooks_created_at ON daily_playbooks(created_at DESC);
+
+-- Hourly monitor debug logs
+CREATE TABLE IF NOT EXISTS monitor_logs (
+    id BIGSERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    symbol TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    status TEXT NOT NULL,
+    matched_conditions JSONB,
+    unmatched_conditions JSONB,
+    live_indicators JSONB,
+    playbook_id BIGINT REFERENCES daily_playbooks(id),
+    reasoning TEXT
+);
+
+CREATE INDEX idx_monitor_logs_symbol_time ON monitor_logs(symbol, created_at DESC);
+CREATE INDEX idx_monitor_logs_playbook ON monitor_logs(playbook_id);
+
+-- Hourly market-status technical snapshots for threshold tuning
+CREATE TABLE IF NOT EXISTS market_status_events (
+    id BIGSERIAL PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    symbol TEXT NOT NULL,
+    regime TEXT,
+    price DOUBLE PRECISION,
+    funding_rate DOUBLE PRECISION,
+    volatility DOUBLE PRECISION,
+    technical_snapshot JSONB NOT NULL
+);
+
+CREATE INDEX idx_market_status_events_symbol_time ON market_status_events(symbol, created_at DESC);
+CREATE INDEX idx_market_status_events_regime_time ON market_status_events(regime, created_at DESC);

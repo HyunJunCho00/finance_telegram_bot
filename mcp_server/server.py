@@ -6,6 +6,11 @@ from loguru import logger
 mcp = FastMCP("Crypto Trading System")
 
 
+def _direct_trade_blocked(reason: str) -> dict:
+    logger.warning(f"MCP direct trade blocked: {reason}")
+    return {"success": False, "error": reason}
+
+
 @mcp.tool()
 def analyze_market(symbol: str) -> dict:
     """Run multi-timeframe technical analysis on a crypto symbol (e.g. BTCUSDT).
@@ -78,7 +83,13 @@ def get_current_position(symbol: str) -> dict:
 
 @mcp.tool()
 def execute_trade(symbol: str, side: str, amount: float, leverage: int = 1) -> dict:
-    """Execute a trade on Binance futures. Use with caution."""
+    """Execute a trade on Binance futures. Disabled by default for safety."""
+    if not settings.ENABLE_DIRECT_MCP_TRADING:
+        return _direct_trade_blocked(
+            "Direct MCP trading is disabled. Use the orchestrator or Telegram-controlled workflow."
+        )
+    if not settings.PAPER_TRADING_MODE:
+        return _direct_trade_blocked("Direct MCP trading is restricted to paper mode.")
     logger.info(f"MCP tool: execute_trade {side} {amount} {symbol} {leverage}x")
     from executors.trade_executor import trade_executor
     return trade_executor.execute(symbol=symbol, side=side, amount=amount, leverage=leverage)

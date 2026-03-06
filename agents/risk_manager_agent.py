@@ -45,6 +45,64 @@ Output Format (Strict JSON):
     "cro_reasoning": "Explanation from the Risk Desk..."
 }"""
 
+    def _apply_onchain_overrides(self, decision: dict, onchain_gate: dict | None, mode: TradingMode) -> dict:
+        if not isinstance(decision, dict):
+            return {"decision": "HOLD", "allocation_pct": 0, "leverage": 1}
+
+        gate = onchain_gate or {}
+        direction = str(decision.get("decision", "HOLD")).upper()
+        if direction not in ["LONG", "SHORT"]:
+            return decision
+
+        note_parts = []
+        allocation = float(decision.get("allocation_pct", 0) or 0)
+        leverage = float(decision.get("leverage", 1) or 1)
+
+        if direction == "LONG" and not gate.get("allow_long", True):
+            decision["decision"] = "HOLD"
+            decision["allocation_pct"] = 0
+            decision["leverage"] = 1
+            decision["cro_veto_applied"] = True
+            decision["risk_manager_note"] = "On-chain gate veto: LONG disabled by daily regime filter."
+            return decision
+
+        if direction == "SHORT" and not gate.get("allow_short", True):
+            decision["decision"] = "HOLD"
+            decision["allocation_pct"] = 0
+            decision["leverage"] = 1
+            decision["cro_veto_applied"] = True
+            decision["risk_manager_note"] = "On-chain gate veto: SHORT disabled by daily regime filter."
+            return decision
+
+        if direction == "LONG":
+            mult = float(gate.get("long_size_multiplier", 1.0) or 1.0)
+            if mult != 1.0:
+                allocation *= mult
+                note_parts.append(f"LONG size x{mult:.2f} by on-chain gate")
+            if gate.get("chase_long_blocked"):
+                leverage = min(leverage, 1.0 if mode == TradingMode.POSITION else 2.0)
+                note_parts.append("chase-long blocked")
+        elif direction == "SHORT":
+            mult = float(gate.get("short_size_multiplier", 1.0) or 1.0)
+            if mult != 1.0:
+                allocation *= mult
+                note_parts.append(f"SHORT size x{mult:.2f} by on-chain gate")
+            if str(gate.get("risk_bias", "NEUTRAL")).upper() == "RISK_ON":
+                leverage = min(leverage, 1.0)
+                note_parts.append("RISK_ON regime caps short leverage")
+
+        if str(gate.get("data_quality", "")).lower() == "stale":
+            allocation *= 0.8
+            note_parts.append("stale on-chain snapshot applied 0.8x size cap")
+
+        decision["allocation_pct"] = round(max(0.0, allocation), 2)
+        decision["leverage"] = round(max(1.0, leverage), 2)
+
+        if note_parts:
+            existing = str(decision.get("risk_manager_note", "") or "").strip()
+            decision["risk_manager_note"] = " | ".join([p for p in [existing, "; ".join(note_parts)] if p])
+        return decision
+
     def _parse_decision(self, response: str, draft: dict) -> dict:
         try:
             s, e = response.find('{'), response.rfind('}') + 1
@@ -86,7 +144,8 @@ Output Format (Strict JSON):
         return {"decision": "HOLD", "allocation_pct": 0, "leverage": 1, "reasoning": "CRO System Failure: Default to HOLD", "cro_veto_applied": True}
 
     def evaluate_trade(self, draft_decision: dict, funding_context: str, deribit_context: str,
-                       mode: TradingMode = TradingMode.SWING) -> dict:
+                       mode: TradingMode = TradingMode.SWING, onchain_context: str = "",
+                       onchain_gate: dict | None = None) -> dict:
         
         # Fast-pass: If PM already voted HOLD or CANCEL_AND_CLOSE, CRO just agrees.
         dec = draft_decision.get('decision', 'HOLD')
@@ -125,6 +184,9 @@ RISK CONTEXT (DERIVATIVES & MACRO):
 Funding Data: {funding_context}
 Deribit Data: {deribit_context}
 
+ON-CHAIN RISK OVERLAY:
+{onchain_context if onchain_context else "On-chain Context: unavailable"}
+
 Please execute your Risk Management oversight and output the final, safe JSON."""
 
         try:
@@ -138,6 +200,7 @@ Please execute your Risk Management oversight and output the final, safe JSON.""
                 role="risk_eval"  # Cerebras gpt-oss-120b; fallback to Groq
             )
             final = self._parse_decision(response, draft_decision)
+            final = self._apply_onchain_overrides(final, onchain_gate, mode)
             if mode == TradingMode.POSITION and final.get('decision') == 'SHORT':
                 final['decision'] = 'HOLD'
                 final['allocation_pct'] = 0
@@ -157,6 +220,7 @@ Please execute your Risk Management oversight and output the final, safe JSON.""
             
         except Exception as e:
             logger.error(f"CRO Agent error: {e}")
-            return {"decision": "HOLD", "allocation_pct": 0, "leverage": 1, "reasoning": f"CRO Error: {e}", "cro_veto_applied": True}
+            fallback = {"decision": "HOLD", "allocation_pct": 0, "leverage": 1, "reasoning": f"CRO Error: {e}", "cro_veto_applied": True}
+            return self._apply_onchain_overrides(fallback, onchain_gate, mode)
 
 risk_manager_agent = RiskManagerAgent()

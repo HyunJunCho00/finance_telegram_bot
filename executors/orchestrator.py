@@ -27,6 +27,7 @@ from config.settings import settings, TradingMode
 from processors.math_engine import math_engine
 from processors.chart_generator import chart_generator
 from processors.light_rag import light_rag
+from processors.onchain_signal_engine import onchain_signal_engine
 # CVD normalizer removed ??CVD pipeline deprecated
 from collectors.perplexity_collector import perplexity_collector
 from collectors.macro_collector import macro_collector
@@ -50,12 +51,12 @@ import json
 
 # [FIX CRASH-2] Module-level cache to avoid 4x duplicate DB queries per cycle
 # Cleared at the start of each analysis in run_analysis()
-_df_cache: dict = {}        # {symbol: DataFrame}
-_market_data_cache: dict = {}  # {symbol: market_data_dict}
-_cvd_cache: dict = {}       # {symbol: DataFrame}
+_df_cache: dict = {}        # {symbol:mode: DataFrame}
+_market_data_cache: dict = {}  # {symbol:mode: market_data_dict}
+_cvd_cache: dict = {}       # {symbol:mode: DataFrame}
 
-_liq_cache: dict = {}       # {symbol: DataFrame}
-_funding_cache: dict = {}   # {symbol: DataFrame}
+_liq_cache: dict = {}       # {symbol:mode: DataFrame}
+_funding_cache: dict = {}   # {symbol:mode: DataFrame}
 
 
 try:
@@ -72,6 +73,18 @@ def merge_dicts(a: dict, b: dict) -> dict:
     out = a.copy() if a else {}
     if b: out.update(b)
     return out
+
+
+def _cache_key(symbol: str, mode: TradingMode | str) -> str:
+    mode_value = mode.value if isinstance(mode, TradingMode) else str(mode).lower()
+    return f"{symbol}:{mode_value}"
+
+
+def _clear_symbol_mode_caches(symbol: str, mode: TradingMode | str) -> None:
+    cache_key = _cache_key(symbol, mode)
+    for cache in (_df_cache, _market_data_cache, _cvd_cache, _liq_cache, _funding_cache):
+        cache.pop(cache_key, None)
+        cache.pop(symbol, None)
 
 # ???? State definition (LangGraph TypedDict) ????
 
@@ -97,6 +110,9 @@ class AnalysisState(TypedDict):
     fear_greed_context: str
     active_orders: list
     open_positions: str
+    onchain_snapshot: dict
+    onchain_context: str
+    onchain_gate: dict
 
     # Blackboard Pattern State
     budget: int
@@ -131,6 +147,7 @@ def node_collect_data(state: AnalysisState) -> dict:
     """Fetch 1m OHLCV data from Supabase + higher TFs from GCS if available."""
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
+    cache_key = _cache_key(symbol, mode)
     candle_limit = settings.POSITION_CANDLE_LIMIT if mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
 
     df = db.get_latest_market_data(symbol, limit=candle_limit)
@@ -138,7 +155,7 @@ def node_collect_data(state: AnalysisState) -> dict:
         return {"df_size": 0, "errors": state.get("errors", []) + [f"No market data for {symbol}"]}
 
     # [FIX CRASH-2] Cache for reuse by node_triage, node_generate_chart, node_generate_report
-    _df_cache[symbol] = df
+    _df_cache[cache_key] = df
 
     # Load higher timeframe data from GCS for deeper indicator history
     df_4h, df_1d, df_1w = None, None, None
@@ -159,7 +176,7 @@ def node_collect_data(state: AnalysisState) -> dict:
     compact = math_engine.format_compact(market_data)
 
     # [FIX RESOURCE-1] Cache market_data so node_generate_chart doesn't recompute
-    _market_data_cache[symbol] = market_data
+    _market_data_cache[cache_key] = market_data
 
     # V5: Fetch currently active orders for this symbol to inject into the PM context
     all_active = state_manager.get_active_orders()
@@ -193,6 +210,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
     updates = {}
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
+    cache_key = _cache_key(symbol, mode)
     is_emergency = state.get("is_emergency", False)
     asset = "BTC" if "BTC" in symbol else "ETH"
     coin_name = "Bitcoin BTC" if "BTC" in symbol else "Ethereum ETH"
@@ -246,7 +264,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 oi_series = [float(r.get("oi_binance", 0) or 0) + float(r.get("oi_bybit", 0) or 0) + float(r.get("oi_okx", 0) or 0) for r in oi_rows.data]
                 oi_now, oi_prev = oi_series[0], oi_series[-1]
                 oi_chg_pct = ((oi_now - oi_prev) / oi_prev * 100) if oi_prev else 0
-                df_snap = _df_cache.get(symbol)
+                df_snap = _df_cache.get(cache_key)
                 price_chg_pct = 0.0
                 if df_snap is not None and not df_snap.empty and len(df_snap) >= 12:
                     p_now = float(df_snap['close'].iloc[-1])
@@ -262,7 +280,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
         # 5. Liquidation Context
         try:
             liq_df = db.get_liquidation_data(symbol, limit=settings.data_lookback_hours * 60)
-            _liq_cache[symbol] = liq_df  # Cache for chart generation
+            _liq_cache[cache_key] = liq_df  # Cache for chart generation
             if not liq_df.empty:
                 t_long, t_short = float(liq_df['long_liq_usd'].sum()), float(liq_df['short_liq_usd'].sum())
                 db_updates["liquidation_context"] = f"[LIQUIDATION] Total=${t_long+t_short:,.0f} (Long=${t_long:,.0f}, Short=${t_short:,.0f})"
@@ -409,17 +427,35 @@ def node_context_gathering(state: AnalysisState) -> dict:
 
         return {"stats_context": stats}
 
+    def fetch_onchain_context():
+        try:
+            snapshot = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
+            return {
+                "onchain_snapshot": snapshot or {},
+                "onchain_context": onchain_signal_engine.format_context(snapshot),
+                "onchain_gate": onchain_signal_engine.build_gate(snapshot),
+            }
+        except Exception as e:
+            logger.warning(f"On-chain context load error for {symbol}: {e}")
+            return {
+                "onchain_snapshot": {},
+                "onchain_context": "On-chain Context: unavailable",
+                "onchain_gate": onchain_signal_engine.build_gate(None),
+            }
+
     # Run network/DB calls in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         f_perp  = executor.submit(fetch_perplexity)
         f_rag   = executor.submit(fetch_rag)
         f_db    = executor.submit(fetch_db_contexts)
         f_stats = executor.submit(fetch_stats_context)
+        f_onchain = executor.submit(fetch_onchain_context)
 
         updates.update(f_perp.result())
         updates.update(f_rag.result())
         updates.update(f_db.result())
         updates.update(f_stats.result())
+        updates.update(f_onchain.result())
 
     return updates
 
@@ -438,6 +474,7 @@ def node_meta_agent(state: AnalysisState) -> dict:
             macro_context=state.get("macro_context", ""),
             rag_context=rag_context,
             telegram_news=telegram_news,
+            onchain_context=state.get("onchain_context", ""),
             mode=TradingMode(state["mode"])
         )
         logger.info(f"Market Regime classified: {result.get('regime', 'UNKNOWN')}")
@@ -454,11 +491,13 @@ def node_triage(state: AnalysisState) -> dict:
     """Evaluate Python/Pandas rules for Anomaly Detection before waking LLMs."""
     anomalies = []
     symbol = state["symbol"]
+    mode = TradingMode(state["mode"])
+    cache_key = _cache_key(symbol, mode)
     
     # 1. Volume-Backed Breakout (Mathematical)
     try:
         # [FIX CRASH-2] Use cached DataFrame from node_collect_data
-        df = _df_cache.get(symbol)
+        df = _df_cache.get(cache_key)
         if df is None:
             df = db.get_latest_market_data(symbol, limit=4320)  # fallback if cache miss
         if not df.empty:
@@ -596,7 +635,9 @@ def node_triage(state: AnalysisState) -> dict:
 def node_rule_based_chart(state: AnalysisState) -> dict:
     """Deterministic chart-rule expert (no LLM cost)."""
     symbol = state.get("symbol", "BTCUSDT")
-    market_data = _market_data_cache.get(symbol, {}) or {}
+    mode = TradingMode(state["mode"])
+    cache_key = _cache_key(symbol, mode)
+    market_data = _market_data_cache.get(cache_key, {}) or {}
     current_price = market_data.get("current_price")
 
     if not market_data or current_price is None:
@@ -696,6 +737,8 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
 
     chart = state.get("chart_image_b64", "")
     symbol = state.get("symbol", "BTCUSDT")
+    mode = TradingMode(state["mode"])
+    cache_key = _cache_key(symbol, mode)
     
     if not chart:
         return {"blackboard": {"vlm_geometry": {
@@ -704,7 +747,7 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
         }}}
 
     # Extract current price from cached market_data for prompt context
-    market_data = _market_data_cache.get(symbol, {})
+    market_data = _market_data_cache.get(cache_key, {})
     current_price = market_data.get('current_price', None)
 
     result = vlm_geometric_agent.analyze(
@@ -721,10 +764,11 @@ def node_generate_chart(state: AnalysisState) -> dict:
     """Generate structure chart for all modes (for Judge VLM)."""
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
+    cache_key = _cache_key(symbol, mode)
     candle_limit = settings.POSITION_CANDLE_LIMIT if mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
 
     # [FIX CRASH-2] Use cached DataFrame from node_collect_data
-    df = _df_cache.get(symbol)
+    df = _df_cache.get(cache_key)
     if df is None:
         df = db.get_latest_market_data(symbol, limit=candle_limit)  # fallback
     if df.empty:
@@ -746,7 +790,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
         logger.warning(f"GCS load for chart skipped: {e}")
 
     # [FIX RESOURCE-1] Use cached market_data from node_collect_data
-    market_data = _market_data_cache.get(symbol)
+    market_data = _market_data_cache.get(cache_key)
     if market_data is None:
         market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
 
@@ -754,11 +798,11 @@ def node_generate_chart(state: AnalysisState) -> dict:
     cvd_df = None
     if settings.CHART_SHOW_CVD_PANEL or settings.CHART_SHOW_CVD_OVERLAY:
         try:
-            cvd_df = _cvd_cache.get(symbol)
+            cvd_df = _cvd_cache.get(cache_key)
             if cvd_df is None:
                 cvd_limit = settings.data_lookback_hours * 60
                 cvd_df = db.get_cvd_data(symbol, limit=cvd_limit)
-                _cvd_cache[symbol] = cvd_df
+                _cvd_cache[cache_key] = cvd_df
         except Exception as e:
             logger.warning(f"CVD data load for chart skipped: {e}")
 
@@ -766,10 +810,11 @@ def node_generate_chart(state: AnalysisState) -> dict:
     # Load liquidation data for chart markers
     liquidation_df = None
     try:
-        liquidation_df = _liq_cache.get(symbol)
+        liquidation_df = _liq_cache.get(cache_key)
         if liquidation_df is None:
             liq_limit = settings.data_lookback_hours * 60
             liquidation_df = db.get_liquidation_data(symbol, limit=liq_limit)
+            _liq_cache[cache_key] = liquidation_df
     except Exception:
         pass
 
@@ -777,35 +822,38 @@ def node_generate_chart(state: AnalysisState) -> dict:
     funding_df = None
     if settings.CHART_SHOW_OI_PANEL or settings.CHART_SHOW_FUNDING_PANEL:
         try:
-            # Fetch funding data (includes OI, LSR) matching the lookback
-            funding_limit = settings.data_lookback_hours * 60
-            funding_df = db.get_funding_history(symbol, limit=funding_limit)
-            if funding_df is not None and not funding_df.empty:
-                funding_df = funding_df.loc[:, ~funding_df.columns.duplicated()].reset_index(drop=True)
-            
-            # Merge with GCS historical funding for long-term charts
-            from processors.gcs_parquet import gcs_parquet_store
-            if gcs_parquet_store.enabled:
-                m_back = settings.history_lookback_months_for_mode(mode)
-                hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
-                if not hist_fnd.empty:
-                    hist_fnd = hist_fnd.loc[:, ~hist_fnd.columns.duplicated()].reset_index(drop=True)
-                    hist_fnd = hist_fnd.rename(columns={
-                        'open_interest_value': 'open_interest'
-                    })
-                    hist_fnd['timestamp'] = pd.to_datetime(hist_fnd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-                    since_fnd = hist_fnd['timestamp'].max()
-                    bridge_fnd = db.get_funding_history(symbol, limit=50000, since=since_fnd)
-                    
-                    dfs = [hist_fnd]
-                    if not bridge_fnd.empty:
-                        dfs.append(bridge_fnd)
-                    if funding_df is not None and not funding_df.empty:
-                        dfs.append(funding_df)
-                    
-                    funding_df = pd.concat(dfs).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-                else:
-                    funding_df = hist_fnd
+            funding_df = _funding_cache.get(cache_key)
+            if funding_df is None:
+                # Fetch funding data (includes OI, LSR) matching the lookback
+                funding_limit = settings.data_lookback_hours * 60
+                funding_df = db.get_funding_history(symbol, limit=funding_limit)
+                if funding_df is not None and not funding_df.empty:
+                    funding_df = funding_df.loc[:, ~funding_df.columns.duplicated()].reset_index(drop=True)
+                
+                # Merge with GCS historical funding for long-term charts
+                from processors.gcs_parquet import gcs_parquet_store
+                if gcs_parquet_store.enabled:
+                    m_back = settings.history_lookback_months_for_mode(mode)
+                    hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
+                    if not hist_fnd.empty:
+                        hist_fnd = hist_fnd.loc[:, ~hist_fnd.columns.duplicated()].reset_index(drop=True)
+                        hist_fnd = hist_fnd.rename(columns={
+                            'open_interest_value': 'open_interest'
+                        })
+                        hist_fnd['timestamp'] = pd.to_datetime(hist_fnd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
+                        since_fnd = hist_fnd['timestamp'].max()
+                        bridge_fnd = db.get_funding_history(symbol, limit=50000, since=since_fnd)
+                        
+                        dfs = [hist_fnd]
+                        if bridge_fnd is not None and not bridge_fnd.empty:
+                            dfs.append(bridge_fnd)
+                        if funding_df is not None and not funding_df.empty:
+                            dfs.append(funding_df)
+                        
+                        funding_df = pd.concat(dfs).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                    else:
+                        funding_df = hist_fnd
+                _funding_cache[cache_key] = funding_df
         except Exception as e:
             logger.warning(f"Funding/OI data load for chart skipped/merged: {e}")
 
@@ -843,6 +891,8 @@ def node_generate_chart(state: AnalysisState) -> dict:
 def node_judge_agent(state: AnalysisState) -> dict:
     """Run Judge (Claude Opus 4.6). Reads Blackboard."""
     mode = TradingMode(state["mode"])
+    symbol = state.get("symbol", "BTCUSDT")
+    cache_key = _cache_key(symbol, mode)
     
     # Extract necessary state variables
     compact = state.get("market_data_compact", "")
@@ -868,9 +918,10 @@ def node_judge_agent(state: AnalysisState) -> dict:
         feedback_text=feedback_text,
         active_orders=state.get("active_orders", []),
         open_positions=open_positions,
-        symbol=state.get("symbol", "BTCUSDT"),
+        symbol=symbol,
         regime_context=regime_ctx,
-        narrative_context=narrative_context
+        narrative_context=narrative_context,
+        onchain_context=state.get("onchain_context", ""),
     )
     
     # Deterministic EV/RR gating (no additional LLM call)
@@ -955,7 +1006,7 @@ def node_judge_agent(state: AnalysisState) -> dict:
                 else getattr(settings, "JUDGE_OVERRIDE_ALLOC_SWING_PCT", 8.0)
             )
             decision["leverage"] = 1 if mode == TradingMode.POSITION else max(1, int(_to_float(decision.get("leverage", 1), 1)))
-            current_price = _to_float((state.get("market_data", {}) or {}).get("current_price"), 0.0)
+            current_price = _to_float((_market_data_cache.get(cache_key, {}) or {}).get("current_price"), 0.0)
             if current_price > 0:
                 decision["entry_price"] = _to_float(decision.get("entry_price"), current_price) or current_price
                 ep = float(decision["entry_price"])
@@ -987,6 +1038,8 @@ def node_judge_agent(state: AnalysisState) -> dict:
 
     # For compatibility with legacy metrics/logging, set conviction to win_probability_pct
     dual_plan = decision.get("daily_dual_plan", {}) if isinstance(decision, dict) else {}
+    if isinstance(decision, dict):
+        decision["daily_dual_plan"] = dual_plan if isinstance(dual_plan, dict) else {}
     return {
         "final_decision": decision,
         "daily_dual_plan": dual_plan if isinstance(dual_plan, dict) else {},
@@ -1006,7 +1059,9 @@ def node_risk_manager(state: AnalysisState) -> dict:
         draft,
         funding,
         deribit,
-        mode=TradingMode(state.get("mode", "swing"))
+        mode=TradingMode(state.get("mode", "swing")),
+        onchain_context=state.get("onchain_context", ""),
+        onchain_gate=state.get("onchain_gate", {}),
     )
     return {"final_decision": final_decision}
 
@@ -1089,14 +1144,15 @@ def node_generate_report(state: AnalysisState) -> dict:
     from executors.metrics_logger import metrics_logger
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
+    cache_key = _cache_key(symbol, mode)
 
-    candle_limit = settings.candle_limit
+    candle_limit = settings.POSITION_CANDLE_LIMIT if mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
     # [FIX CRASH-2] Use cached DataFrame from node_collect_data
-    df = _df_cache.get(symbol)
+    df = _df_cache.get(cache_key)
     if df is None:
         df = db.get_latest_market_data(symbol, limit=candle_limit)  # fallback
     # [FIX RESOURCE-1] Use cached market_data
-    market_data = _market_data_cache.get(symbol)
+    market_data = _market_data_cache.get(cache_key)
     if market_data is None:
         market_data = math_engine.analyze_market(df, mode) if not df.empty else {}
 
@@ -1121,6 +1177,8 @@ def node_generate_report(state: AnalysisState) -> dict:
         final_decision=state.get("final_decision", {}),
         funding_data=raw_funding,
         mode=mode,
+        onchain_context=state.get("onchain_context", ""),
+        onchain_snapshot=state.get("onchain_snapshot", {}),
     )
     
     # [FIX CRITICAL-1] Pass actual last close price (was 0.0 ??all episodic memory inverted)
@@ -1180,201 +1238,7 @@ def _build_full_context(state: AnalysisState) -> str:
         state.get("macro_context", ""),
         state.get("deribit_context", ""),      # DVOL / PCR / IV term / 25d skew
         state.get("fear_greed_context", ""),   # F&G daily sentiment
-        state.get("rag_context", ""),
-        f"Telegram News:\n{state.get('telegram_news', '')}",
-        state.get("feedback_text", ""),
-    ]
-    return "\n\n".join(p for p in parts if p)
-
-    # For compatibility with legacy metrics/logging, set conviction to win_probability_pct
-    return {"final_decision": decision, "conviction_score": win_prob * 100}
-
-def node_risk_manager(state: AnalysisState) -> dict:
-    """Run Risk Manager (CRO). VETO power over Judge's draft."""
-    draft = state.get("final_decision", {})
-    
-    # Needs macro and funding context for risk overlays
-    funding = state.get("funding_context", "")
-    deribit = state.get("deribit_context", "")
-    
-    final_decision = risk_manager_agent.evaluate_trade(
-        draft,
-        funding,
-        deribit,
-        mode=TradingMode(state.get("mode", "swing"))
-    )
-    return {"final_decision": final_decision}
-
-def node_portfolio_leverage_guard(state: AnalysisState) -> dict:
-    """Mathematically enforce 2.0x total account leverage limit."""
-    decision = state.get("final_decision", {})
-    if decision.get("decision") not in ["LONG", "SHORT"]:
-        return {}
-
-    try:
-        from executors.paper_exchange import paper_engine
-        
-        # 1. Fetch total equity and exposure (Paper mode for now as per strategy)
-        target_exchange = decision.get("target_exchange", "BINANCE").lower()
-        if target_exchange == "split":
-            wallet_balance = (
-                paper_engine.get_wallet_balance("binance_spot")
-                + paper_engine.get_wallet_balance("upbit")
-            )
-        else:
-            wallet_balance = paper_engine.get_wallet_balance(target_exchange)
-        
-        # In a real setup, we'd query API for open positions. 
-        # For our specific retail guard, we calculate if THIS trade + current positions exceeds 2.0x.
-        # [MOCK FOR MVP] Assume 2.0x Hard Cap
-        MAX_LEVERAGE_CAP = 2.0
-        
-        # Calculate proposed trade notional
-        allocation_pct = decision.get("allocation_pct", 0)
-        leverage = decision.get("leverage", 1)
-        proposed_notional = wallet_balance * (allocation_pct / 100.0) * leverage
-        
-        # Check current total exposure (Simulated calculation)
-        # In production: exposure = sum(abs(pos.notional) for pos in all_positions)
-        current_exposure = 0.0 # Placeholder: build extraction logic if needed
-        
-        total_projected_exposure = current_exposure + proposed_notional
-        total_leverage = total_projected_exposure / wallet_balance if wallet_balance > 0 else 0
-        
-        if total_leverage > MAX_LEVERAGE_CAP:
-            # Scale down
-            reduction_factor = MAX_LEVERAGE_CAP / total_leverage
-            new_allocation = allocation_pct * reduction_factor
-            
-            logger.warning(f"[LEVERAGE GUARD] Projected leverage {total_leverage:.2f}x exceeds {MAX_LEVERAGE_CAP}x cap. Scaling allocation from {allocation_pct}% to {new_allocation:.2f}%")
-            
-            decision["allocation_pct"] = new_allocation
-            decision["reasoning"]["final_logic"] = f"[LEVERAGE GUARD] Scaled down from {allocation_pct}% due to 2.0x account leverage cap. " + decision["reasoning"].get("final_logic", "")
-            
-        return {"final_decision": decision}
-        
-    except Exception as e:
-        logger.error(f"Leverage Guard error: {e}")
-        return {}
-
-def node_execute_trade(state: AnalysisState) -> dict:
-    """Execute the final approved trade autonomously (Live or Paper)."""
-    decision = state.get("final_decision", {})
-    symbol = state["symbol"]
-    mode = TradingMode(state["mode"]).value.upper()
-
-    # Optional guard: skip execution when explicitly disabled by caller.
-    if not state.get("execute_trades", True):
-        decision["execution_receipt"] = {
-            "status": "SKIPPED",
-            "reason": "execute_trades=False",
-        }
-        return {"final_decision": decision}
-    
-    # Bridge to execution
-    # This will simulate DCA or single entries based on the mode and CRO sizing
-    execution_result = trade_executor.execute_from_decision(decision, mode, symbol)
-    
-    # Attach execution receipt back to the decision for reporting
-    decision["execution_receipt"] = execution_result
-    return {"final_decision": decision}
-
-def node_generate_report(state: AnalysisState) -> dict:
-    """Generate and send report to Telegram."""
-    from executors.metrics_logger import metrics_logger
-    symbol = state["symbol"]
-    mode = TradingMode(state["mode"])
-
-    candle_limit = settings.candle_limit
-    # [FIX CRASH-2] Use cached DataFrame from node_collect_data
-    df = _df_cache.get(symbol)
-    if df is None:
-        df = db.get_latest_market_data(symbol, limit=candle_limit)  # fallback
-    # [FIX RESOURCE-1] Use cached market_data
-    market_data = _market_data_cache.get(symbol)
-    if market_data is None:
-        market_data = math_engine.analyze_market(df, mode) if not df.empty else {}
-
-    # [FIX] Reuse raw_funding from node_funding_context (no duplicate Supabase query)
-    raw_funding = state.get("raw_funding", {})
-    if not raw_funding:
-        try:
-            response = db.client.table("funding_data")\
-                .select("*").eq("symbol", symbol)\
-                .order("timestamp", desc=True).limit(1).execute()
-            raw_funding = response.data[0] if response.data else {}
-        except Exception:
-            raw_funding = {}
-
-    bb_str = json.dumps(state.get("blackboard", {}), indent=2)
-    report = report_generator.generate_report(
-        symbol=symbol,
-        market_data=market_data,
-        bull_opinion=f"Blackboard:\n{bb_str}",
-        bear_opinion=f"Anomalies Detected: {state.get('anomalies', [])}",
-        risk_assessment="",
-        final_decision=state.get("final_decision", {}),
-        funding_data=raw_funding,
-        mode=mode,
-    )
-    
-    # [FIX CRITICAL-1] Pass actual last close price (was 0.0 ??all episodic memory inverted)
-    # [FIX MEDIUM-19]  Include blackboard so post-mortem LLM has decision context
-    last_close = 0.0
-    if not df.empty:
-        last_close = float(df.iloc[-1]['close'])
-    write_post_mortem({
-        "symbol": symbol,
-        "final_decision": state.get("final_decision", {}),
-        "blackboard": state.get("blackboard", {}),
-        "bear_opinion": f"Anomalies: {state.get('anomalies', [])}"
-    }, current_price=last_close)
-
-    if report:
-        chart_bytes = state.get("chart_bytes")
-        if chart_bytes:
-            logger.info(f"Passing {len(chart_bytes)} bytes of chart data to notify.")
-        else:
-            logger.warning("No chart data found in state at generate_report node.")
-        report_generator.notify(report, chart_bytes=chart_bytes, mode=mode)
-        
-        # Log prediction for academic/quantitative evaluation
-        metrics_logger.log_prediction(
-            symbol=symbol,
-            mode=mode.value,
-            final_decision=state.get("final_decision", {}),
-            blackboard=state.get("blackboard", {}),
-            anomalies=state.get("anomalies", [])
-        )
-
-    decision = state.get("final_decision", {}).get("decision", "N/A")
-    logger.info(f"Analysis completed for {symbol}: {decision} ({mode.value})")
-    return {"report": report}
-
-
-def node_data_synthesis(state: AnalysisState) -> dict:
-    """Run Data-Synthesis pipeline to extract high-quality training examples."""
-    report = state.get("report")
-    if report:
-        # Inject additional context for synthesis
-        report["market_regime"] = state.get("market_regime", "UNKNOWN")
-        report["blackboard"] = state.get("blackboard", {})
-        report["mode"] = state.get("mode", "SWING")
-        synthesize_training_data(report)
-    return {}
-
-
-# ???? Helper ????
-
-def _build_full_context(state: AnalysisState) -> str:
-    """Build full context string for agents."""
-    parts = [
-        state.get("narrative_text", ""),
-        state.get("liquidation_context", ""),  # cvd_context removed (OI_DIV in funding_context)
-        state.get("microstructure_context", ""),
-        state.get("macro_context", ""),
-        state.get("deribit_context", ""),      # DVOL / PCR / IV term / 25d skew
-        state.get("fear_greed_context", ""),   # F&G daily sentiment
+        state.get("onchain_context", ""),      # Coin Metrics daily regime overlay
         state.get("rag_context", ""),
         f"Telegram News:\n{state.get('telegram_news', '')}",
         state.get("feedback_text", ""),
@@ -1570,12 +1434,8 @@ class Orchestrator:
         logger.info(f"Starting {'EMERGENCY' if is_emergency else 'SCHEDULED'} {mode.value.upper()} analysis for {symbol}")
 
         try:
-            # [FIX CRASH-2] Clear per-symbol cache at the start of each analysis
-            _df_cache.pop(symbol, None)
-            _market_data_cache.pop(symbol, None)
-            _cvd_cache.pop(symbol, None)
-            _liq_cache.pop(symbol, None)
-            _funding_cache.pop(symbol, None)
+            # [FIX CRASH-2] Clear per-symbol+mode cache at the start of each analysis
+            _clear_symbol_mode_caches(symbol, mode)
 
             if self.graph:
                 return self._run_with_langgraph(symbol, mode, is_emergency, execute_trades=execute_trades)
@@ -1594,6 +1454,7 @@ class Orchestrator:
             "market_data_compact": "",
             "narrative_text": "",
             "funding_context": "",
+            "cvd_context": "",
             "liquidation_context": "",
             "rag_context": "",
             "telegram_news": "",
@@ -1602,6 +1463,11 @@ class Orchestrator:
             "macro_context": "",
             "deribit_context": "",
             "fear_greed_context": "",
+            "active_orders": [],
+            "open_positions": "",
+            "onchain_snapshot": {},
+            "onchain_context": "",
+            "onchain_gate": {},
             "budget": 100,
             "turn_count": 0,
             "anomalies": [],
@@ -1615,6 +1481,7 @@ class Orchestrator:
             "final_decision": {},
             "daily_dual_plan": {},
             "report": None,
+            "stats_context": {},
             "errors": [],
         }
 
@@ -1631,6 +1498,7 @@ class Orchestrator:
         state = {
             "symbol": symbol, "mode": mode.value,
             "is_emergency": is_emergency, "execute_trades": execute_trades, "errors": [],
+            "onchain_snapshot": {}, "onchain_context": "", "onchain_gate": {},
         }
 
         # Run each node sequentially — mirrors the LangGraph DAG order.
@@ -1679,6 +1547,11 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Risk Manager error (sequential): {e}")
 
+        try:
+            state.update(node_portfolio_leverage_guard(state))
+        except Exception as e:
+            logger.error(f"Leverage Guard error (sequential): {e}")
+
         # [FIX CRASH-1] Trade Execution — was missing, so Judge decisions were never executed
         try:
             state.update(node_execute_trade(state))
@@ -1690,6 +1563,11 @@ class Orchestrator:
             state.update(node_generate_report(state))
         except Exception as e:
             logger.error(f"Report error: {e}")
+
+        try:
+            state.update(node_data_synthesis(state))
+        except Exception as e:
+            logger.error(f"Data synthesis error (sequential): {e}")
 
         return state.get("final_decision", {})
 
@@ -1726,10 +1604,7 @@ class Orchestrator:
                 _time.sleep(3 * 60)
             try:
                 logger.info(f"[Daily] {symbol} {mode.value.upper()} starting...")
-                _df_cache.pop(symbol, None)
-                _market_data_cache.pop(symbol, None)
-                _liq_cache.pop(symbol, None)
-                _funding_cache.pop(symbol, None)
+                _clear_symbol_mode_caches(symbol, mode)
 
                 if self.graph:
                     state = self._run_with_langgraph(symbol, mode, is_emergency=False, execute_trades=True)

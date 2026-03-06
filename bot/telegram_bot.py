@@ -6,6 +6,7 @@ Commands:
 /analyze   - Run immediate analysis (BTC or ETH)
 /mode      - Show fixed dual-mode policy
 /report    - Resend latest analysis report
+/onchain   - Show latest on-chain snapshot
 /chart     - Generate premium technical chart
 /report_on - Resume automated AI analysis
 /report_off - Pause automated AI analysis (Save cost)
@@ -289,6 +290,7 @@ class TradingBot:
             f"Commands:\n"
             f"/status  - Current position & equity\n"
             f"/analyze - Live analysis (BTC/ETH)\n"
+            f"/onchain - Latest on-chain snapshot\n"
             f"/chart   - Generate HD technical chart\n"
             f"/mode    - Show fixed policy\n"
             f"/report  - Resend latest report\n"
@@ -302,6 +304,7 @@ class TradingBot:
             "📚 <b>Available Commands</b>\n\n"
             "/status - Real-time positions & PnL\n"
             "/analyze [BTC|ETH] - Trigger instant AI analysis\n"
+            "/onchain [BTC|ETH] - Show latest on-chain snapshot and MVRV\n"
             "/chart [BTC|ETH] [swing|position] - Generate premium HD chart\n"
             "/report - Resend latest analysis report\n"
             "/mode - Show fixed dual-mode policy (change disabled)\n"
@@ -311,6 +314,21 @@ class TradingBot:
             "💡 <i>Tip: You can also talk to me in natural language!</i>",
             parse_mode='HTML'
         )
+
+    @staticmethod
+    def _normalize_symbol_arg(raw_symbol: str) -> Optional[str]:
+        token = str(raw_symbol or "").strip().upper()
+        if not token:
+            return None
+        if token in settings.trading_symbols:
+            return token
+        if token in settings.trading_symbols_base:
+            return f"{token}USDT"
+        alias_map = {
+            "BITCOIN": "BTCUSDT",
+            "ETHEREUM": "ETHUSDT",
+        }
+        return alias_map.get(token)
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -471,6 +489,11 @@ class TradingBot:
                     fd = report.get('final_decision')
                     if isinstance(fd, str):
                         fd = json.loads(fd)
+                    reasoning_value = fd.get('reasoning', 'N/A')
+                    if isinstance(reasoning_value, dict):
+                        reasoning_text = reasoning_value.get('final_logic') or json.dumps(reasoning_value, ensure_ascii=False)
+                    else:
+                        reasoning_text = str(reasoning_value)
 
                     text = (
                         f"Latest {symbol} Report\n"
@@ -481,13 +504,47 @@ class TradingBot:
                         f"SL: {fd.get('stop_loss', 'N/A')}\n"
                         f"TP: {fd.get('take_profit', 'N/A')}\n"
                         f"Hold: {fd.get('hold_duration', 'N/A')}\n\n"
-                        f"Reasoning: {fd.get('reasoning', 'N/A')[:500]}"
+                        f"Reasoning: {reasoning_text[:500]}"
                     )
+                    if report.get("onchain_context"):
+                        text += "\n\nOn-chain context saved: Yes (/onchain or Deep Analysis)"
                     await update.message.reply_text(text)
                 else:
                     await update.message.reply_text(f"No report for {symbol}")
         except Exception as e:
             logger.error(f"Report command error: {e}")
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_onchain(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        args = context.args or []
+        symbols = settings.trading_symbols
+
+        if args:
+            normalized = self._normalize_symbol_arg(args[0])
+            if not normalized:
+                await update.message.reply_text(
+                    f"Usage: /onchain [{'|'.join(settings.trading_symbols_base)}]"
+                )
+                return
+            symbols = [normalized]
+
+        try:
+            from executors.report_generator import report_generator
+
+            found = False
+            for symbol in symbols:
+                snapshot = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
+                if not snapshot:
+                    await update.message.reply_text(f"No on-chain snapshot for {symbol}")
+                    continue
+                found = True
+                text = report_generator.format_onchain_message(symbol, snapshot)
+                await update.message.reply_text(text, parse_mode='HTML')
+
+            if not found and not args:
+                await update.message.reply_text("No on-chain snapshots available.")
+        except Exception as e:
+            logger.error(f"On-chain command error: {e}")
             await update.message.reply_text(f"Error: {e}")
 
     async def cmd_report_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -895,6 +952,7 @@ class TradingBot:
         app.add_handler(CommandHandler("analyze", self.cmd_analyze))
         app.add_handler(CommandHandler("mode", self.cmd_mode))
         app.add_handler(CommandHandler("report", self.cmd_report))
+        app.add_handler(CommandHandler("onchain", self.cmd_onchain))
         app.add_handler(CommandHandler("report_on", self.cmd_report_on))
         app.add_handler(CommandHandler("report_off", self.cmd_report_off))
         app.add_handler(CommandHandler("chart", self.cmd_chart))

@@ -41,6 +41,7 @@ YOUR OUTPUT (Strict JSON):
         macro_context: str,
         rag_context: str = "",
         telegram_news: str = "",
+        onchain_context: str = "",
         mode: TradingMode = TradingMode.SWING
     ) -> Dict:
         """Determines the current market regime based on multi-source data."""
@@ -62,6 +63,9 @@ NARRATIVE & NEWS (RAG):
 
 RECENT TELEGRAM:
 {telegram_news}
+
+ON-CHAIN CONTEXT:
+{onchain_context if onchain_context else "On-chain Context: unavailable"}
 
 MODE: {mode.value.upper()}
 

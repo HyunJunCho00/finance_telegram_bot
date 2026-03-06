@@ -114,10 +114,17 @@ class Settings(BaseSettings):
     ENABLE_GCS_ARCHIVE: bool = False
     GCS_ARCHIVE_BUCKET: str = ""
 
+    # Coin Metrics Community API (daily on-chain regime overlay)
+    COINMETRICS_ENABLED: bool = True
+    COINMETRICS_BASE_URL: str = "https://community-api.coinmetrics.io/v4"
+    COINMETRICS_TIMEOUT_SECONDS: int = 20
+    COINMETRICS_LOOKBACK_DAYS: int = 90
+
 
     # ===== Paper trading / sandbox safety =====
     PAPER_TRADING_MODE: bool = True  # default safe mode (no real orders)
     PAPER_TRADING_PRICE_SOURCE: str = "ticker"  # ticker | last_report
+    ENABLE_DIRECT_MCP_TRADING: bool = False
     BINANCE_USE_TESTNET: bool = False
     UPBIT_PAPER_ONLY: bool = True
     
@@ -384,6 +391,7 @@ class SecretManager:
             "CLOUDFLARE_AI_API_KEY",
             "GCS_ARCHIVE_BUCKET",
             "ENABLE_GCS_ARCHIVE",
+            "ENABLE_DIRECT_MCP_TRADING",
             "DUNE_API_KEY",
             "GROQ_API_KEY",
             "CEREBRAS_API_KEY",

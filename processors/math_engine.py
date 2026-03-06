@@ -185,10 +185,14 @@ class MathEngine:
             ts1 = pd.to_datetime(ts1, utc=True)
             ts2 = pd.to_datetime(ts2, utc=True)
 
+            current_val = y2 + ((y2 - y1) / (x2 - x1)) * (len(df) - 1 - x2)
+
             return {
                 'point1': (ts1, y1),
                 'point2': (ts2, y2),
                 'pivot_count': len(local_min_idx),
+                'support_price': round(float(current_val), 2),
+                'type': 'support',
                 '_x1': int(x1),
                 '_x2': int(x2),
             }
@@ -224,10 +228,14 @@ class MathEngine:
             ts1 = pd.to_datetime(ts1, utc=True)
             ts2 = pd.to_datetime(ts2, utc=True)
 
+            current_val = y2 + ((y2 - y1) / (x2 - x1)) * (len(df) - 1 - x2)
+
             return {
                 'point1': (ts1, y1),
                 'point2': (ts2, y2),
                 'pivot_count': len(local_max_idx),
+                'resistance_price': round(float(current_val), 2),
+                'type': 'resistance',
                 '_x1': int(x1),
                 '_x2': int(x2),
             }
@@ -388,12 +396,13 @@ class MathEngine:
         """Fibonacci retracement levels from recent swing high/low.
         Pro traders use OTE entry zones: 50%, 61.8%, 70.5%, 78.6%."""
         try:
-            local_min_idx, local_max_idx = self.find_pivot_points(df, order=max(3, len(df) // 20))
+            working_df = df.tail(min(len(df), 180)).reset_index(drop=True)
+            local_min_idx, local_max_idx = self.find_pivot_points(working_df, order=max(3, len(working_df) // 18))
             if len(local_min_idx) == 0 or len(local_max_idx) == 0:
                 return None
 
-            swing_low = float(df.iloc[local_min_idx[-1]]['low'])
-            swing_high = float(df.iloc[local_max_idx[-1]]['high'])
+            swing_low = float(working_df.iloc[local_min_idx[-1]]['low'])
+            swing_high = float(working_df.iloc[local_max_idx[-1]]['high'])
 
             # Determine trend direction
             is_uptrend = local_min_idx[-1] < local_max_idx[-1]
@@ -422,7 +431,7 @@ class MathEngine:
                     'trend': 'down',
                 }
 
-            current_price = float(df.iloc[-1]['close'])
+            current_price = float(working_df.iloc[-1]['close'])
             levels['current_price'] = round(current_price, 2)
             levels['nearest_fib'] = self._nearest_fib(current_price, levels)
             return levels
@@ -806,14 +815,15 @@ class MathEngine:
         if len(df) < 10:
             return {}
 
-        order = lookback or max(5, len(df) // 10)
-        highs = df['high'].astype(float).values
-        lows = df['low'].astype(float).values
+        working_df = df.tail(min(len(df), 180)).reset_index(drop=True)
+        order = lookback or max(4, min(14, len(working_df) // 12))
+        highs = working_df['high'].astype(float).values
+        lows = working_df['low'].astype(float).values
 
         high_idx = argrelextrema(highs, np.greater, order=order)[0]
         low_idx = argrelextrema(lows, np.less, order=order)[0]
 
-        current_price = float(df.iloc[-1]['close'])
+        current_price = float(working_df.iloc[-1]['close'])
 
         result = {
             'swing_highs': [round(highs[i], 2) for i in high_idx[-5:]],
@@ -841,11 +851,12 @@ class MathEngine:
         if len(df) < 20:
             return {'structure': 'insufficient_data'}
         try:
-            high  = df['high'].astype(float).values
-            low   = df['low'].astype(float).values
-            close = df['close'].astype(float).values
+            working_df = df.tail(min(len(df), 160)).reset_index(drop=True)
+            high  = working_df['high'].astype(float).values
+            low   = working_df['low'].astype(float).values
+            close = working_df['close'].astype(float).values
 
-            order = max(10, len(df) // 10) if mode == TradingMode.POSITION else max(3, len(df) // 15)
+            order = max(8, min(18, len(working_df) // 10)) if mode == TradingMode.POSITION else max(3, min(12, len(working_df) // 14))
             min_idx = argrelextrema(low,  np.less,    order=order)[0]
             max_idx = argrelextrema(high, np.greater, order=order)[0]
 
@@ -1039,50 +1050,54 @@ class MathEngine:
 
         weight_map = {'1w': 4, '1d': 3, '4h': 2, '1h': 1, '15m': 1}
 
-        for tf, analysis in multi_tf_analysis.items():
-            if not isinstance(analysis, dict):
+        fib_data = multi_tf_analysis.get('fibonacci', {})
+        for fib_tf, fib in fib_data.items():
+            if not isinstance(fib, dict):
                 continue
-            w = weight_map.get(tf, 1)
+            fib_w = weight_map.get(fib_tf, 1)
+            for key, price in fib.items():
+                if key.startswith('fib_') and isinstance(price, (int, float)):
+                    levels.append({
+                        'price': float(price),
+                        'source': key,
+                        'tf': fib_tf,
+                        'weight': fib_w,
+                    })
 
-            # Fibonacci levels
-            fib_data = analysis.get('fibonacci', {})
-            for fib_tf, fib in fib_data.items():
-                if not isinstance(fib, dict):
-                    continue
-                fib_w = weight_map.get(fib_tf, 1)
-                for key, price in fib.items():
-                    if key.startswith('fib_') and isinstance(price, (int, float)):
-                        levels.append({'price': float(price), 'source': key,
-                                       'tf': fib_tf, 'weight': fib_w})
+        struct = multi_tf_analysis.get('structure', {})
+        for key, val in struct.items():
+            if not isinstance(val, dict):
+                continue
+            tf = key.replace('support_', '').replace('resistance_', '')
+            base_weight = weight_map.get(tf, 1) + 1
+            if 'support' in key:
+                p = val.get('support_price')
+                if isinstance(p, (int, float)):
+                    levels.append({
+                        'price': float(p),
+                        'source': 'diag_support',
+                        'tf': tf,
+                        'weight': base_weight,
+                    })
+            elif 'resistance' in key:
+                p = val.get('resistance_price')
+                if isinstance(p, (int, float)):
+                    levels.append({
+                        'price': float(p),
+                        'source': 'diag_resistance',
+                        'tf': tf,
+                        'weight': base_weight,
+                    })
 
-            # Diagonal support / resistance
-            struct = analysis.get('structure', {})
-            for key, val in struct.items():
-                if not isinstance(val, dict):
-                    continue
-                if 'support' in key:
-                    p = val.get('support_price')
-                    if p:
-                        levels.append({'price': float(p), 'source': 'diag_support',
-                                       'tf': key.replace('support_', ''), 'weight': w + 1})
-                elif 'resistance' in key:
-                    p = val.get('resistance_price')
-                    if p:
-                        levels.append({'price': float(p), 'source': 'diag_resistance',
-                                       'tf': key.replace('resistance_', ''), 'weight': w + 1})
-
-            # Swing levels
-            swing_data = analysis.get('swing_levels', {})
-            for stf, swing in swing_data.items():
-                if not isinstance(swing, dict):
-                    continue
-                sw = weight_map.get(stf, 1)
-                for h in swing.get('swing_highs', []):
-                    levels.append({'price': float(h), 'source': 'swing_high',
-                                   'tf': stf, 'weight': sw})
-                for l in swing.get('swing_lows', []):
-                    levels.append({'price': float(l), 'source': 'swing_low',
-                                   'tf': stf, 'weight': sw})
+        swing_data = multi_tf_analysis.get('swing_levels', {})
+        for stf, swing in swing_data.items():
+            if not isinstance(swing, dict):
+                continue
+            sw = weight_map.get(stf, 1)
+            for h in swing.get('swing_highs', []):
+                levels.append({'price': float(h), 'source': 'swing_high', 'tf': stf, 'weight': sw})
+            for l in swing.get('swing_lows', []):
+                levels.append({'price': float(l), 'source': 'swing_low', 'tf': stf, 'weight': sw})
 
         if not levels:
             return []
@@ -1173,6 +1188,10 @@ class MathEngine:
                 result['structure'][f'resistance_{tf_name}'] = self.calculate_diagonal_resistance(tf_df)
                 result['structure'][f'divergence_{tf_name}'] = self.detect_divergences(tf_df)
                 result['market_structure'][tf_name]          = self.detect_market_structure(tf_df)
+                if result['structure'].get(f'support_{tf_name}'):
+                    result['structure'][f'support_{tf_name}']['timeframe'] = tf_name
+                if result['structure'].get(f'resistance_{tf_name}'):
+                    result['structure'][f'resistance_{tf_name}']['timeframe'] = tf_name
 
                 sup = result['structure'].get(f'support_{tf_name}')
                 res = result['structure'].get(f'resistance_{tf_name}')
@@ -1188,6 +1207,10 @@ class MathEngine:
             result['structure']['resistance_1d'] = self.calculate_diagonal_resistance(tf_1d)
             result['structure']['divergence_1d'] = self.detect_divergences(tf_1d)
             result['market_structure']['1d']     = self.detect_market_structure(tf_1d)
+            if result['structure'].get('support_1d'):
+                result['structure']['support_1d']['timeframe'] = '1d'
+            if result['structure'].get('resistance_1d'):
+                result['structure']['resistance_1d']['timeframe'] = '1d'
             sup_1d = result['structure'].get('support_1d')
             res_1d = result['structure'].get('resistance_1d')
             if sup_1d:
@@ -1272,6 +1295,10 @@ class MathEngine:
             result['structure']['resistance_1d'] = self.calculate_diagonal_resistance(tf_1d, mode=TradingMode.POSITION)
             result['structure']['divergence_1d'] = self.detect_divergences(tf_1d)
             result['market_structure']['1d']     = self.detect_market_structure(tf_1d, mode=TradingMode.POSITION)
+            if result['structure'].get('support_1d'):
+                result['structure']['support_1d']['timeframe'] = '1d'
+            if result['structure'].get('resistance_1d'):
+                result['structure']['resistance_1d']['timeframe'] = '1d'
 
             # Trendline quality scores
             sup  = result['structure'].get('support_1d')
@@ -1287,6 +1314,10 @@ class MathEngine:
             # Structure on 1w (chart overlay: POSITION chart draws 1W candles)
             result['structure']['support_1w']    = self.calculate_diagonal_support(tf_1w, mode=TradingMode.POSITION)
             result['structure']['resistance_1w'] = self.calculate_diagonal_resistance(tf_1w, mode=TradingMode.POSITION)
+            if result['structure'].get('support_1w'):
+                result['structure']['support_1w']['timeframe'] = '1w'
+            if result['structure'].get('resistance_1w'):
+                result['structure']['resistance_1w']['timeframe'] = '1w'
             sup_1w = result['structure'].get('support_1w')
             res_1w = result['structure'].get('resistance_1w')
             if sup_1w:
@@ -1373,6 +1404,10 @@ class MathEngine:
             'swing_levels': {timeframe: self.calculate_swing_levels(tf_df)},
             'confluence_zones': [],
         }
+        if result['structure'].get(f'support_{timeframe}'):
+            result['structure'][f'support_{timeframe}']['timeframe'] = timeframe
+        if result['structure'].get(f'resistance_{timeframe}'):
+            result['structure'][f'resistance_{timeframe}']['timeframe'] = timeframe
         
         # Scoring
         for t in ['support', 'resistance']:

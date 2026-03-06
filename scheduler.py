@@ -8,12 +8,14 @@ from collectors.macro_collector import macro_collector
 from collectors.deribit_collector import deribit_collector
 from collectors.fear_greed_collector import fear_greed_collector
 from collectors.crypto_news_collector import collector as news_collector
+from collectors.coinmetrics_collector import coinmetrics_collector
 from executors.orchestrator import orchestrator
 from evaluators.feedback_generator import feedback_generator
 from processors.light_rag import light_rag
 from processors.gcs_archive import gcs_archive_exporter
 from processors.math_engine import math_engine
 from agents.market_monitor_agent import market_monitor_agent
+from tools.evaluate_market_status_pressure import run_evaluation as run_pressure_signal_evaluation
 from config import scheduler_config
 from config.settings import settings, TradingMode
 from config.database import db
@@ -46,6 +48,138 @@ def _project_trendline_price(line_info: dict, candle_len: int) -> float | None:
         return float(current_val)
     except Exception:
         return None
+
+
+def _pct_change(latest: float | None, prev: float | None) -> float | None:
+    if not isinstance(latest, (int, float)) or not isinstance(prev, (int, float)) or prev == 0:
+        return None
+    return float((latest - prev) / prev * 100.0)
+
+
+def _build_realtime_pressure(symbol: str, df) -> dict:
+    """Summarize near-real-time directional pressure from recent price, CVD, whale flow, and liquidations."""
+    result = {
+        "summary": None,
+        "signal": None,
+        "details": [],
+        "metrics": {},
+    }
+    try:
+        if df is None or df.empty or len(df) < 6:
+            return result
+
+        closes = df["close"].astype(float).reset_index(drop=True)
+        current_price = float(closes.iloc[-1])
+        chg_1m = _pct_change(current_price, float(closes.iloc[-2])) if len(closes) >= 2 else None
+        chg_3m = _pct_change(current_price, float(closes.iloc[-4])) if len(closes) >= 4 else None
+        chg_5m = _pct_change(current_price, float(closes.iloc[-6])) if len(closes) >= 6 else None
+
+        cvd_df = db.get_cvd_data(symbol, limit=15)
+        liq_df = db.get_liquidation_data(symbol, limit=15)
+
+        cvd_3m = cvd_5m = whale_delta_5m = None
+        whale_buy_5m = whale_sell_5m = 0.0
+        if cvd_df is not None and not cvd_df.empty:
+            cvd_df = cvd_df.sort_values("timestamp").reset_index(drop=True)
+            last_3 = cvd_df.tail(min(3, len(cvd_df)))
+            last_5 = cvd_df.tail(min(5, len(cvd_df)))
+            if "volume_delta" in cvd_df.columns:
+                cvd_3m = float(last_3["volume_delta"].fillna(0).sum())
+                cvd_5m = float(last_5["volume_delta"].fillna(0).sum())
+            if "whale_buy_vol" in cvd_df.columns and "whale_sell_vol" in cvd_df.columns:
+                whale_buy_5m = float(last_5["whale_buy_vol"].fillna(0).sum())
+                whale_sell_5m = float(last_5["whale_sell_vol"].fillna(0).sum())
+                whale_delta_5m = whale_buy_5m - whale_sell_5m
+
+        long_liq_5m = short_liq_5m = 0.0
+        if liq_df is not None and not liq_df.empty:
+            liq_df = liq_df.sort_values("timestamp").reset_index(drop=True)
+            last_5_liq = liq_df.tail(min(5, len(liq_df)))
+            if "long_liq_usd" in last_5_liq.columns:
+                long_liq_5m = float(last_5_liq["long_liq_usd"].fillna(0).sum())
+            if "short_liq_usd" in last_5_liq.columns:
+                short_liq_5m = float(last_5_liq["short_liq_usd"].fillna(0).sum())
+
+        price_up = (
+            isinstance(chg_3m, (int, float)) and chg_3m > 0.12
+        ) or (
+            isinstance(chg_5m, (int, float)) and chg_5m > 0.20
+        )
+        price_down = (
+            isinstance(chg_3m, (int, float)) and chg_3m < -0.12
+        ) or (
+            isinstance(chg_5m, (int, float)) and chg_5m < -0.20
+        )
+
+        flow_up = (
+            isinstance(cvd_3m, (int, float)) and cvd_3m > 0
+        ) and (
+            isinstance(whale_delta_5m, (int, float)) and whale_delta_5m > 0
+        )
+        flow_down = (
+            isinstance(cvd_3m, (int, float)) and cvd_3m < 0
+        ) and (
+            isinstance(whale_delta_5m, (int, float)) and whale_delta_5m < 0
+        )
+
+        squeeze_up = short_liq_5m > max(long_liq_5m * 1.35, 250000.0)
+        squeeze_down = long_liq_5m > max(short_liq_5m * 1.35, 250000.0)
+
+        details = []
+        if price_up:
+            details.append("3-5분 가격 상방 가속")
+        elif price_down:
+            details.append("3-5분 가격 하방 가속")
+        if flow_up:
+            details.append("CVD·whale 순매수 우세")
+        elif flow_down:
+            details.append("CVD·whale 순매도 우세")
+        if squeeze_up:
+            details.append("숏 청산 우세")
+        elif squeeze_down:
+            details.append("롱 청산 우세")
+
+        if price_up and flow_up and squeeze_up:
+            signal = "bullish"
+            summary = "strong_bullish"
+        elif price_down and flow_down and squeeze_down:
+            signal = "bearish"
+            summary = "strong_bearish"
+        elif price_up and (flow_up or squeeze_up):
+            signal = "bullish"
+            summary = "bullish"
+        elif price_down and (flow_down or squeeze_down):
+            signal = "bearish"
+            summary = "bearish"
+        elif flow_up and squeeze_up:
+            signal = "bullish"
+            summary = "early_bullish"
+        elif flow_down and squeeze_down:
+            signal = "bearish"
+            summary = "early_bearish"
+        else:
+            signal = "mixed"
+            summary = "mixed"
+
+        result["signal"] = signal
+        result["summary"] = summary
+        result["details"] = details[:3]
+        result["metrics"] = {
+            "price_change_1m_pct": round(chg_1m, 4) if isinstance(chg_1m, (int, float)) else None,
+            "price_change_3m_pct": round(chg_3m, 4) if isinstance(chg_3m, (int, float)) else None,
+            "price_change_5m_pct": round(chg_5m, 4) if isinstance(chg_5m, (int, float)) else None,
+            "cvd_delta_3m": round(cvd_3m, 4) if isinstance(cvd_3m, (int, float)) else None,
+            "cvd_delta_5m": round(cvd_5m, 4) if isinstance(cvd_5m, (int, float)) else None,
+            "whale_buy_5m_usd": round(whale_buy_5m, 2),
+            "whale_sell_5m_usd": round(whale_sell_5m, 2),
+            "whale_delta_5m_usd": round(whale_delta_5m, 2) if isinstance(whale_delta_5m, (int, float)) else None,
+            "long_liq_5m_usd": round(long_liq_5m, 2),
+            "short_liq_5m_usd": round(short_liq_5m, 2),
+        }
+        return result
+    except Exception as e:
+        logger.warning(f"Failed to build realtime pressure for {symbol}: {e}")
+        return result
 
 
 def _build_mode_technical_snapshot(symbol: str, mode: TradingMode) -> dict:
@@ -123,6 +257,7 @@ def _build_mode_technical_snapshot(symbol: str, mode: TradingMode) -> dict:
                 "fib_705": fib_primary.get("fib_705"),
                 "fib_786": fib_primary.get("fib_786"),
             },
+            "realtime_pressure": _build_realtime_pressure(symbol, df),
             "confluence_zones": zones,
         }
     except Exception as e:
@@ -338,6 +473,17 @@ def job_daily_fear_greed():
         logger.error(f"Fear & Greed collection job error: {e}")
 
 
+def job_daily_coinmetrics():
+    """Collect daily Coin Metrics snapshots used for regime and risk gating."""
+    try:
+        if not settings.COINMETRICS_ENABLED:
+            logger.info("Coin Metrics job skipped (disabled)")
+            return
+        coinmetrics_collector.run()
+    except Exception as e:
+        logger.error(f"Coin Metrics daily job error: {e}")
+
+
 def job_routine_market_status():
     """V13.3: Routine Market Status check (Free-First) with Multi-Coin & Telegram Intel."""
     try:
@@ -370,6 +516,11 @@ def job_routine_market_status():
             indicators[symbol]["technical_snapshot"] = {
                 "swing": swing_snapshot,
                 "position": position_snapshot,
+                "realtime_pressure": (
+                    swing_snapshot.get("realtime_pressure")
+                    or position_snapshot.get("realtime_pressure")
+                    or {}
+                ),
                 "events": _detect_technical_events(
                     symbol=symbol,
                     swing=swing_snapshot,
@@ -379,6 +530,17 @@ def job_routine_market_status():
                     regime=latest_regime,
                 ),
             }
+            try:
+                onchain = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
+                if onchain:
+                    indicators[symbol]["onchain_snapshot"] = {
+                        "risk_bias": onchain.get("risk_bias"),
+                        "bias_score": onchain.get("bias_score"),
+                        "regime_flags": onchain.get("regime_flags", {}),
+                        "is_stale": onchain.get("is_stale"),
+                    }
+            except Exception:
+                pass
             try:
                 db.insert_market_status_event({
                     "symbol": symbol,
@@ -660,6 +822,16 @@ def job_1hour_crypto_news():
         logger.error(f"1-hour Crypto News API job error: {e}")
 
 
+def job_pressure_signal_evaluation():
+    """Backfill forward-return evaluation into market_status_events.technical_snapshot.evaluation."""
+    try:
+        logger.info("Running realtime pressure signal evaluation")
+        result = run_pressure_signal_evaluation(limit=200, hours=72, dry_run=False)
+        logger.info(f"Realtime pressure evaluation result: {result}")
+    except Exception as e:
+        logger.error(f"Realtime pressure evaluation job error: {e}")
+
+
 def job_daily_cleanup():
     """Cleanup old data + archive to GCS Parquet."""
     try:
@@ -695,6 +867,7 @@ def job_daily_precision():
         if not state_manager.is_analysis_enabled():
             logger.info("Daily precision skipped (analysis disabled)")
             return
+        job_daily_coinmetrics()
         macro_collector.run()
         orchestrator.run_daily_playbook()
     except Exception as e:
@@ -728,7 +901,7 @@ def main():
     logger.info(f"  Chart for VLM: {settings.should_use_chart}")
     logger.info(f"  Symbols: {', '.join(settings.trading_symbols)}")
     logger.info(f"  AI: Gemini Judge/VLM (Project A/B) + Cerebras (meta/risk) + Groq (news/rag) + OpenRouter (monitor)")
-    logger.info(f"  Data: Global OI + OI Divergence + MFI Proxy + Liquidations + Perplexity + LightRAG")
+    logger.info(f"  Data: Global OI + OI Divergence + MFI Proxy + Liquidations + Coin Metrics + Perplexity + LightRAG")
     logger.info(f"  Dune: {'enabled' if dune_collector else 'disabled'}")
     logger.info(f"  LightRAG: Neo4j {'connected' if settings.NEO4J_URI else 'in-memory'} + "
                 f"Milvus {'connected' if settings.MILVUS_URI else 'in-memory'}")
@@ -838,6 +1011,14 @@ def main():
         max_instances=1
     )
 
+    # Coin Metrics daily snapshot refresh
+    scheduler_config.scheduler.add_job(
+        job_daily_coinmetrics,
+        CronTrigger(hour=0, minute=12),
+        id='job_daily_coinmetrics',
+        max_instances=1
+    )
+
     # 1-Hour Telegram Batching & Ingestion
     scheduler_config.scheduler.add_job(
         job_1hour_telegram,
@@ -852,6 +1033,14 @@ def main():
         CronTrigger(minute=10),
         id='job_1hour_crypto_news',
         max_instances=1
+    )
+
+    # Realtime pressure signal evaluation -> write 5m/15m/30m outcomes into market_status_events JSONB
+    scheduler_config.scheduler.add_job(
+        job_pressure_signal_evaluation,
+        CronTrigger(minute='*/15'),
+        id='job_pressure_signal_evaluation',
+        max_instances=1,
     )
 
     # ?? Daily Precision (00:00 UTC) ??BTC/ETH 횞 SWING/POSITION Playbook generation ??
@@ -938,6 +1127,8 @@ def main():
         ("Volatility", lambda: volatility_monitor.run()),
         ("Deribit", lambda: deribit_collector.run()),
         ("Fear & Greed", lambda: fear_greed_collector.run()),
+        ("Coin Metrics", lambda: job_daily_coinmetrics()),
+        ("Pressure signal evaluation", lambda: job_pressure_signal_evaluation()),
         ("Telegram catch-up (24h)", _startup_telegram_catchup),
     ]
     for name, fn in _initial_collectors:

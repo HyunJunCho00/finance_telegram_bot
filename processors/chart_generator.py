@@ -24,6 +24,7 @@ Two modes:
 
 import pandas as pd
 import numpy as np
+import copy
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -62,7 +63,23 @@ class ChartGenerator:
         # Filter analysis data for visual clarity (active elements only)
         current_price = float(df['close'].iloc[-1])
         analysis = self._filter_active_elements(current_price, analysis)
-        
+
+        timeframe_norm = (timeframe or "").lower().strip()
+        is_lane_chart = (
+            (mode == TradingMode.SWING and timeframe_norm in ("", "4h")) or
+            (mode == TradingMode.POSITION and timeframe_norm in ("", "1d"))
+        )
+        if is_lane_chart:
+            return self._generate_lane_chart(
+                df, analysis, symbol, mode,
+                liquidation_df=liquidation_df,
+                cvd_df=cvd_df,
+                funding_df=funding_df,
+                df_4h=df_4h,
+                df_1d=df_1d,
+                df_1w=df_1w,
+            )
+
         return self._generate_structure_chart(df, analysis, symbol, config,
                                               liquidation_df, cvd_df, funding_df,
                                               df_4h=df_4h, df_1d=df_1d, df_1w=df_1w, mode=mode)
@@ -119,6 +136,185 @@ class ChartGenerator:
 
         return config
 
+    def _get_lane_panel_configs(self, mode: TradingMode) -> List[Dict]:
+        if mode == TradingMode.POSITION:
+            return [
+                {
+                    'resample_rule': '1W-MON',
+                    'tail_candles': 140,
+                    'min_candles': 30,
+                    'title_suffix': 'TOP 1W STRUCTURE',
+                    'panel_label': 'Top: 1W Structure',
+                    'fib_tf': '1w',
+                    'structure_tfs': ['1w'],
+                    'swing_tf': None,
+                    'is_custom': False,
+                    'draw_pivots': False,
+                    'draw_market_structure_labels': False,
+                    'draw_structure_events': False,
+                    'draw_ema200': True,
+                    'draw_diagonal_lines': True,
+                    'draw_fibonacci': True,
+                    'draw_swing_levels': False,
+                    'draw_confluence': True,
+                    'draw_execution_plan': False,
+                    'draw_volume_profile': False,
+                    'draw_liquidations': False,
+                    'draw_fvg': False,
+                    'draw_macro_order_blocks': False,
+                    'draw_avwap': False,
+                    'draw_macro_alpha': False,
+                    'draw_session_breaks': False,
+                },
+                {
+                    'resample_rule': '1D',
+                    'tail_candles': 220,
+                    'min_candles': 40,
+                    'title_suffix': 'BOTTOM 1D EXECUTION',
+                    'panel_label': 'Bottom: 1D Execution',
+                    'fib_tf': '1d',
+                    'structure_tfs': ['1d'],
+                    'swing_tf': '1d',
+                    'is_custom': False,
+                    'draw_pivots': False,
+                    'draw_market_structure_labels': False,
+                    'draw_structure_events': True,
+                    'draw_ema200': True,
+                    'draw_diagonal_lines': True,
+                    'draw_fibonacci': True,
+                    'draw_swing_levels': True,
+                    'draw_confluence': True,
+                    'draw_execution_plan': True,
+                    'draw_volume_profile': False,
+                    'draw_liquidations': False,
+                    'draw_fvg': False,
+                    'draw_macro_order_blocks': False,
+                    'draw_avwap': False,
+                    'draw_macro_alpha': False,
+                    'draw_session_breaks': False,
+                },
+            ]
+
+        return [
+            {
+                'resample_rule': '1D',
+                'tail_candles': 220,
+                'min_candles': 40,
+                'title_suffix': 'TOP 1D STRUCTURE',
+                'panel_label': 'Top: 1D Structure',
+                'fib_tf': '1d',
+                'structure_tfs': ['1d'],
+                'swing_tf': None,
+                'is_custom': False,
+                'draw_pivots': False,
+                'draw_market_structure_labels': False,
+                'draw_structure_events': False,
+                'draw_ema200': True,
+                'draw_diagonal_lines': True,
+                'draw_fibonacci': True,
+                'draw_swing_levels': False,
+                'draw_confluence': True,
+                'draw_execution_plan': False,
+                'draw_volume_profile': False,
+                'draw_liquidations': False,
+                'draw_fvg': False,
+                'draw_macro_order_blocks': False,
+                'draw_avwap': False,
+                'draw_macro_alpha': False,
+                'draw_session_breaks': False,
+            },
+            {
+                'resample_rule': '4h',
+                'tail_candles': 160,
+                'min_candles': 40,
+                'title_suffix': 'BOTTOM 4H EXECUTION',
+                'panel_label': 'Bottom: 4H Execution',
+                'fib_tf': '4h',
+                'structure_tfs': ['4h'],
+                'swing_tf': '4h',
+                'is_custom': False,
+                'draw_pivots': False,
+                'draw_market_structure_labels': False,
+                'draw_structure_events': True,
+                'draw_ema200': True,
+                'draw_diagonal_lines': True,
+                'draw_fibonacci': True,
+                'draw_swing_levels': True,
+                'draw_confluence': True,
+                'draw_execution_plan': True,
+                'draw_volume_profile': False,
+                'draw_liquidations': False,
+                'draw_fvg': False,
+                'draw_macro_order_blocks': False,
+                'draw_avwap': False,
+                'draw_macro_alpha': False,
+                'draw_session_breaks': True,
+            },
+        ]
+
+    def _generate_lane_chart(self, df: pd.DataFrame, analysis: Dict, symbol: str,
+                             mode: TradingMode,
+                             liquidation_df: Optional[pd.DataFrame] = None,
+                             cvd_df: Optional[pd.DataFrame] = None,
+                             funding_df: Optional[pd.DataFrame] = None,
+                             df_4h: Optional[pd.DataFrame] = None,
+                             df_1d: Optional[pd.DataFrame] = None,
+                             df_1w: Optional[pd.DataFrame] = None) -> Optional[bytes]:
+        panel_configs = self._get_lane_panel_configs(mode)
+        panel_images: List[bytes] = []
+
+        for panel_cfg in panel_configs:
+            img = self._generate_structure_chart(
+                df, analysis, symbol, panel_cfg,
+                liquidation_df=liquidation_df,
+                cvd_df=cvd_df,
+                funding_df=funding_df,
+                df_4h=df_4h,
+                df_1d=df_1d,
+                df_1w=df_1w,
+                mode=mode,
+            )
+            if img:
+                panel_images.append(img)
+
+        if not panel_images:
+            return None
+        if len(panel_images) == 1:
+            return panel_images[0]
+        return self._stack_images_vertical(
+            panel_images,
+            title=(
+                f"{symbol} {mode.value.upper()} | "
+                f"Top: {'1D Structure' if mode == TradingMode.SWING else '1W Structure'} / "
+                f"Bottom: {'4H Execution' if mode == TradingMode.SWING else '1D Execution'}"
+            ),
+        )
+
+    def _stack_images_vertical(self, images: List[bytes], title: str) -> Optional[bytes]:
+        try:
+            arrays = [plt.imread(BytesIO(img), format='png') for img in images]
+            ratios = [arr.shape[0] / max(arr.shape[1], 1) for arr in arrays]
+            fig_height = (self.width / self.dpi) * sum(ratios) + 0.8
+            fig, axes = plt.subplots(len(arrays), 1, figsize=(self.width / self.dpi, fig_height), dpi=self.dpi)
+            if not isinstance(axes, np.ndarray):
+                axes = np.array([axes])
+
+            fig.patch.set_facecolor('white')
+            fig.suptitle(title, fontsize=13, fontweight='bold', y=0.995)
+            for ax, arr in zip(axes, arrays):
+                ax.imshow(arr)
+                ax.axis('off')
+
+            fig.subplots_adjust(top=0.965, hspace=0.04)
+            buf = BytesIO()
+            fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight', facecolor='white')
+            plt.close(fig)
+            buf.seek(0)
+            return buf.getvalue()
+        except Exception as e:
+            logger.error(f"Lane chart stack error: {e}")
+            return None
+
     def _filter_active_elements(self, current_price: float, analysis: Dict) -> Dict:
         """Filter analysis data to keep only elements relevant to current price action.
         Reduces visual noise and prevents VLM 'encyclopedia' overexposure.
@@ -126,7 +322,7 @@ class ChartGenerator:
         if not analysis:
             return {}
         
-        filtered = analysis.copy()
+        filtered = copy.deepcopy(analysis)
         
         # 1. Filter Swing Levels (Liquidity Pools)
         # Keep only levels near current price (e.g., within 5%) or the closest 2 above/below
@@ -144,7 +340,24 @@ class ChartGenerator:
                 new_swing[tf] = {'swing_highs': active_sh, 'swing_lows': active_sl}
             filtered['swing_levels'] = new_swing
 
-        # 2. Structure Labels (HH/HL/LH/LL)
+        # 2. Keep only the strongest/nearest confluence zones
+        zones = filtered.get('confluence_zones', [])
+        if isinstance(zones, list) and zones:
+            zones = [
+                z for z in zones
+                if isinstance(z, dict)
+                and isinstance(z.get('price_low'), (int, float))
+                and isinstance(z.get('price_high'), (int, float))
+            ]
+            zones.sort(
+                key=lambda z: (
+                    abs((((float(z['price_low']) + float(z['price_high'])) / 2.0) - current_price)),
+                    -float(z.get('strength', 0) or 0),
+                )
+            )
+            filtered['confluence_zones'] = zones[:2]
+
+        # 3. Structure Labels (HH/HL/LH/LL)
         # Usually handled by the drafting logic itself, but we can prune history if needed
         # (Already handled in _draw_market_structure_labels via 'order' and visual slicing)
         
@@ -424,62 +637,85 @@ class ChartGenerator:
                          color=text_color, alpha=0.03, ha='center', va='center', zorder=0)
 
             # ── Overlay 1: Pivot Points (turning points) — SWING only ──
-            if mode != TradingMode.POSITION:
+            if config.get('draw_pivots', mode != TradingMode.POSITION):
                 self._draw_pivot_points(price_ax, chart_df)
 
             # ── Overlay 2: Market Structure Labels (HH/HL/LH/LL) ──
-            self._draw_market_structure_labels(price_ax, chart_df)
+            if config.get('draw_market_structure_labels', True):
+                self._draw_market_structure_labels(price_ax, chart_df)
+            if config.get('draw_structure_events', False):
+                tf_label = str(config.get('fib_tf') or config.get('structure_tfs', [''])[0])
+                market_structure = (analysis.get('market_structure', {}) or {}).get(tf_label)
+                self._draw_structure_events(price_ax, chart_df, market_structure, tf_label)
 
             # ── Overlay 3: EMA200 line ──
-            self._draw_ema200(price_ax, chart_df)
+            if config.get('draw_ema200', True):
+                self._draw_ema200(price_ax, chart_df)
 
             # ── Overlay 4: Diagonal Trendlines (support/resistance) ──
             structure = analysis.get('structure', {}) or {}
-            for tf in config['structure_tfs']:
-                self._draw_diagonal_line(price_ax, chart_df,
-                                         structure.get(f'support_{tf}'),
-                                         'support_price', '#089981', theme, text_color)
-                self._draw_diagonal_line(price_ax, chart_df,
-                                         structure.get(f'resistance_{tf}'),
-                                         'resistance_price', '#F23645', theme, text_color)
+            if config.get('draw_diagonal_lines', True):
+                for tf in config['structure_tfs']:
+                    self._draw_diagonal_line(price_ax, chart_df,
+                                             structure.get(f'support_{tf}'),
+                                             'support_price', '#089981', theme, text_color)
+                    self._draw_diagonal_line(price_ax, chart_df,
+                                             structure.get(f'resistance_{tf}'),
+                                             'resistance_price', '#F23645', theme, text_color)
 
             # ── Overlay 5: Fibonacci Levels ──
-            fib = (analysis.get('fibonacci', {}) or {}).get(config['fib_tf'])
-            if not fib:
-                # Fallback to any available fib
-                fib_data = analysis.get('fibonacci', {}) or {}
-                for tf_key in ['4h', '1d', '1w', '15m']:
-                    if tf_key in fib_data and fib_data[tf_key]:
-                        fib = fib_data[tf_key]
-                        break
-            self._draw_fibonacci(price_ax, chart_df, fib)
+            fib = None
+            if config.get('draw_fibonacci', True):
+                fib = (analysis.get('fibonacci', {}) or {}).get(config['fib_tf'])
+                if not fib:
+                    fib_data = analysis.get('fibonacci', {}) or {}
+                    for tf_key in ['4h', '1d', '1w', '15m']:
+                        if tf_key in fib_data and fib_data[tf_key]:
+                            fib = fib_data[tf_key]
+                            break
+                self._draw_fibonacci(price_ax, chart_df, fib, config.get('fib_tf'))
+            if config.get('draw_confluence', False):
+                self._draw_confluence_zones(
+                    price_ax,
+                    chart_df,
+                    analysis.get('confluence_zones', []) or [],
+                    focus_tfs=config.get('structure_tfs', []),
+                )
 
             # ── Overlay 6: Swing High/Low (Liquidity Levels) ──
-            swing = (analysis.get('swing_levels', {}) or {}).get(config['swing_tf'])
-            self._draw_swing_levels(price_ax, chart_df, swing)
+            if config.get('draw_swing_levels', False) and config.get('swing_tf'):
+                swing = (analysis.get('swing_levels', {}) or {}).get(config['swing_tf'])
+                self._draw_swing_levels(price_ax, chart_df, swing, config.get('swing_tf'))
+            if config.get('draw_execution_plan', False):
+                execution_plan = self._derive_execution_plan(chart_df, analysis, config)
+                self._draw_execution_plan(price_ax, chart_df, execution_plan)
 
             # ── Overlay 7: Volume Profile Histogram (right side) ──
-            self._draw_volume_profile_histogram(price_ax, chart_df)
+            if config.get('draw_volume_profile', True):
+                self._draw_volume_profile_histogram(price_ax, chart_df)
 
             # ── Overlay 8: Liquidation Markers — SWING only ──
-            if mode != TradingMode.POSITION and liquidation_df is not None and not liquidation_df.empty:
+            if config.get('draw_liquidations', mode != TradingMode.POSITION) and liquidation_df is not None and not liquidation_df.empty:
                 self._draw_liquidation_markers(price_ax, chart_df, liquidation_df)
 
             # ── Overlay 9: Fair Value Gaps (FVG) ──
-            self._draw_fair_value_gaps(price_ax, chart_df, trading_mode)
+            if config.get('draw_fvg', True):
+                self._draw_fair_value_gaps(price_ax, chart_df, trading_mode)
 
             # ── [NEW] Overlay 10: Macro Order Blocks (OB) ──
             # count=4 → returns up to 8 candidates (obs[:count*2])
             # Ensures enough pool to guarantee 1 above + 1 below current price
             # even in strongly trending markets where recent OBs cluster on one side
-            macro_obs = math_engine.calculate_macro_order_blocks(full_resampled, count=4)
-            self._draw_macro_order_blocks(price_ax, chart_df, macro_obs)
+            if config.get('draw_macro_order_blocks', True):
+                macro_obs = math_engine.calculate_macro_order_blocks(full_resampled, count=4)
+                self._draw_macro_order_blocks(price_ax, chart_df, macro_obs)
 
             # ── [NEW] Overlay 11: Anchored VWAP ──
-            self._draw_anchored_vwap(price_ax, chart_df, full_resampled)
+            if config.get('draw_avwap', True):
+                self._draw_anchored_vwap(price_ax, chart_df, full_resampled)
 
             # Overlay 12: optional CVD alpha divergence markers
-            if show_cvd_overlay and cvd_df is not None and not cvd_df.empty:
+            if config.get('draw_macro_alpha', show_cvd_overlay) and cvd_df is not None and not cvd_df.empty:
                 div = math_engine.detect_macro_divergences(full_resampled, cvd_df)
                 self._draw_macro_alpha_markers(price_ax, chart_df, div)
 
@@ -487,7 +723,7 @@ class ChartGenerator:
             self._draw_header_legend(price_ax, chart_df, symbol, config, text_color)
 
             # ── [PRO] Overlay 14: Session Breaks (Day-dividers) — SWING only ──
-            if mode != TradingMode.POSITION:
+            if config.get('draw_session_breaks', mode != TradingMode.POSITION):
                 self._draw_session_breaks(price_ax, chart_df)
             
             # ── [PRO] Overlay 15: Current Price Label (On Y-axis) ──
@@ -745,15 +981,15 @@ class ChartGenerator:
             # Clamp to prevent autoscaling issues
             y_plot = np.clip(y_vals, y_lo - margin, y_hi + margin)
             
-            kind = "SUP" if "support" in line_info.get('type', value_key) else "RES"
-            tf = value_key.split('_')[-1].upper() if '_' in value_key else ''
-            label_text = f"{tf} {kind} TREND" # Explicitly tell VLM the Timeframe and Type
+            kind = "SUP" if "support" in str(line_info.get('type', value_key)).lower() else "RES"
+            tf = str(line_info.get('timeframe') or '').upper()
+            label_text = f"{tf} {kind} TREND".strip()
             
             # Solid line for strong visibility for VLM
             ax.plot(x_vals, y_plot, color=color, linewidth=2.0,
                     linestyle='-', alpha=0.8, zorder=10)
             
-            ax.text(x_vals[-1] - 1.5, y_vals[-1], f' {label_text}', color=color,
+            ax.text(x_vals[-1] - 1.5, y_plot[-1], f' {label_text}', color=color,
                     fontsize=8, fontweight='bold', va='bottom', ha='right',
                     bbox=dict(facecolor=text_color if theme == 'light_premium' else '#131722', 
                               alpha=0.7, edgecolor='none', pad=1))
@@ -762,7 +998,7 @@ class ChartGenerator:
             logger.debug(f"Trendline draw error: {e}")
             return
 
-    def _draw_fibonacci(self, ax, chart_df: pd.DataFrame, fib: Optional[Dict]):
+    def _draw_fibonacci(self, ax, chart_df: pd.DataFrame, fib: Optional[Dict], fib_tf: Optional[str] = None):
         """Draw Fibonacci retracement horizontal lines with anchor markers.
         Anchor markers are critical: VLM schema now requires explicit anchor_high/anchor_low,
         so the anchors must be visually identifiable in the chart image.
@@ -770,21 +1006,20 @@ class ChartGenerator:
         if not fib:
             return
 
+        tf_prefix = f"{str(fib_tf).upper()} " if fib_tf else ""
         fib_styles = {
-            'fib_500': ('#34495E', 0.5, 'FIB 50%'),
-            'fib_618': ('#95A5A6', 0.4, 'FIB 61.8%'),
-            'fib_705': ('#95A5A6', 0.4, 'FIB 70.5%'),
-            'fib_786': ('#95A5A6', 0.3, 'FIB 78.6%'),
+            'fib_500': ('#F39C12', 0.75, f'{tf_prefix}FIB 50.0'),
+            'fib_618': ('#F39C12', 0.80, f'{tf_prefix}FIB 61.8'),
+            'fib_705': ('#F39C12', 0.72, f'{tf_prefix}FIB 70.5'),
+            'fib_786': ('#F39C12', 0.65, f'{tf_prefix}FIB 78.6'),
         }
 
         n = len(chart_df)
         for key, (color, alpha, label) in fib_styles.items():
             val = fib.get(key)
             if isinstance(val, (int, float)):
-                # Dotted -> Dashed for better VLM visibility
                 ax.axhline(val, color=color, linestyle='--', linewidth=1.2,
-                           alpha=alpha + 0.5, zorder=2)
-                # Move text slightly left of the edge to ensure it's on-canvas
+                           alpha=alpha, zorder=2)
                 ax.text(n - 0.5, val, f' {label}',
                         color=color, fontsize=8, va='center', ha='left',
                         alpha=1.0, fontweight='bold',
@@ -797,23 +1032,24 @@ class ChartGenerator:
         if isinstance(anchor_high, (int, float)):
             ax.axhline(anchor_high, color='#F39C12', linestyle='-', linewidth=1.0,
                        alpha=0.5, zorder=3)
-            ax.text(1, anchor_high, ' FIB HIGH ▲',
+            ax.text(1, anchor_high, f' {tf_prefix}FIB HIGH',
                     color='#F39C12', fontsize=7, va='bottom', ha='left',
                     fontweight='bold', alpha=0.9)
         if isinstance(anchor_low, (int, float)):
             ax.axhline(anchor_low, color='#F39C12', linestyle='-', linewidth=1.0,
                        alpha=0.5, zorder=3)
-            ax.text(1, anchor_low, ' FIB LOW ▼',
+            ax.text(1, anchor_low, f' {tf_prefix}FIB LOW',
                     color='#F39C12', fontsize=7, va='top', ha='left',
                     fontweight='bold', alpha=0.9)
 
-    def _draw_swing_levels(self, ax, chart_df: pd.DataFrame, swing: Optional[Dict]):
+    def _draw_swing_levels(self, ax, chart_df: pd.DataFrame, swing: Optional[Dict], tf_label: Optional[str] = None):
         """Draw horizontal lines and shaded zones at swing highs/lows (liquidity pools)."""
         if not swing:
             return
 
+        tf_prefix = f"{str(tf_label).upper()} " if tf_label else ""
         n = len(chart_df)
-        for high in swing.get('swing_highs', []):
+        for idx, high in enumerate(swing.get('swing_highs', [])):
             if isinstance(high, (int, float)):
                 # Draw main line
                 ax.axhline(high, color='#C0392B', linestyle='-', linewidth=0.8,
@@ -821,12 +1057,12 @@ class ChartGenerator:
                 # Draw subtle shaded zone for "Liquidity Pool" (+/- 0.3% range)
                 ax.axhspan(high * 0.997, high * 1.003, color='#C0392B', 
                            alpha=0.08, zorder=1)
-                # Add label
-                ax.text(2, high, " SWING HIGH LIQ", color='#C0392B', 
-                        fontsize=7, fontweight='bold', va='bottom', alpha=1.0,
-                        bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
+                if idx == 0:
+                    ax.text(2, high, f" {tf_prefix}SWING HIGH", color='#C0392B', 
+                            fontsize=7, fontweight='bold', va='bottom', alpha=1.0,
+                            bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
 
-        for low in swing.get('swing_lows', []):
+        for idx, low in enumerate(swing.get('swing_lows', [])):
             if isinstance(low, (int, float)):
                 # Draw main line
                 ax.axhline(low, color='#27AE60', linestyle='-', linewidth=0.8,
@@ -834,10 +1070,245 @@ class ChartGenerator:
                 # Draw subtle shaded zone for "Liquidity Pool" (+/- 0.3% range)
                 ax.axhspan(low * 0.997, low * 1.003, color='#27AE60', 
                            alpha=0.08, zorder=1)
-                # Add label
-                ax.text(2, low, " SWING LOW LIQ", color='#27AE60', 
-                        fontsize=7, fontweight='bold', va='top', alpha=1.0,
-                        bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
+                if idx == 0:
+                    ax.text(2, low, f" {tf_prefix}SWING LOW", color='#27AE60', 
+                            fontsize=7, fontweight='bold', va='top', alpha=1.0,
+                            bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
+
+    def _draw_structure_events(self, ax, chart_df: pd.DataFrame, market_structure: Optional[Dict], tf_label: str):
+        """Draw execution-panel structure events such as CHoCH/MSB and last swing bounds."""
+        if not market_structure:
+            return
+
+        tf_prefix = str(tf_label or '').upper()
+        n = len(chart_df)
+
+        last_high = market_structure.get('last_swing_high')
+        if isinstance(last_high, (int, float)):
+            ax.axhline(last_high, color='#C0392B', linestyle=':', linewidth=1.0, alpha=0.45, zorder=2)
+            ax.text(n - 1, last_high, f' {tf_prefix} LAST HIGH', color='#C0392B',
+                    fontsize=7, fontweight='bold', va='bottom', ha='right',
+                    bbox=dict(facecolor='black', alpha=0.25, edgecolor='none', pad=1))
+
+        last_low = market_structure.get('last_swing_low')
+        if isinstance(last_low, (int, float)):
+            ax.axhline(last_low, color='#27AE60', linestyle=':', linewidth=1.0, alpha=0.45, zorder=2)
+            ax.text(n - 1, last_low, f' {tf_prefix} LAST LOW', color='#27AE60',
+                    fontsize=7, fontweight='bold', va='top', ha='right',
+                    bbox=dict(facecolor='black', alpha=0.25, edgecolor='none', pad=1))
+
+        current_price = float(chart_df['close'].iloc[-1])
+        choch = market_structure.get('choch')
+        msb = market_structure.get('msb')
+        msb_price = msb.get('price') if isinstance(msb, dict) else None
+        if not isinstance(msb_price, (int, float)) and isinstance(msb, dict):
+            msb_price = msb.get('broken_level')
+        prices_too_close = (
+            isinstance(choch, dict)
+            and isinstance(choch.get('price'), (int, float))
+            and isinstance(msb_price, (int, float))
+            and abs(float(choch['price']) - float(msb_price)) <= (current_price * 0.004)
+        )
+        if isinstance(choch, dict) and isinstance(choch.get('price'), (int, float)):
+            choch_type = str(choch.get('type', '')).lower()
+            direction = 'BULLISH' if 'bullish' in choch_type else 'BEARISH'
+            color = '#3498DB' if direction == 'BULLISH' else '#E74C3C'
+            if not prices_too_close:
+                ax.text(n - 2, float(choch['price']), f' {tf_prefix} {direction} CHOCH', color=color,
+                        fontsize=8, fontweight='bold', va='center', ha='right',
+                        bbox=dict(facecolor='black', alpha=0.35, edgecolor='none', pad=1))
+
+        if isinstance(msb, dict) and isinstance(msb_price, (int, float)):
+            msb_type = str(msb.get('type', '')).lower()
+            direction = 'BULLISH' if 'bullish' in msb_type else 'BEARISH'
+            color = '#3498DB' if direction == 'BULLISH' else '#E74C3C'
+            ax.text(n - 2, float(msb_price), f' {tf_prefix} {direction} MSB', color=color,
+                    fontsize=8, fontweight='bold', va='center', ha='right',
+                    bbox=dict(facecolor='black', alpha=0.35, edgecolor='none', pad=1))
+
+    def _draw_confluence_zones(self, ax, chart_df: pd.DataFrame, zones: List[Dict], focus_tfs: List[str]):
+        """Draw up to two visible confluence zones for the active panel timeframes."""
+        if not zones:
+            return
+
+        focus = {str(tf).lower() for tf in (focus_tfs or []) if tf}
+        filtered: List[Dict] = []
+        for zone in zones:
+            zone_tfs = {str(tf).lower() for tf in zone.get('timeframes', [])}
+            if not focus or focus.intersection(zone_tfs):
+                filtered.append(zone)
+
+        if not filtered:
+            filtered = list(zones)
+
+        chart_low = float(chart_df['low'].min())
+        chart_high = float(chart_df['high'].max())
+        visible: List[Dict] = []
+        for zone in filtered:
+            low = zone.get('price_low')
+            high = zone.get('price_high')
+            if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
+                continue
+            if high < chart_low or low > chart_high:
+                continue
+            visible.append(zone)
+
+        current_price = float(chart_df['close'].iloc[-1])
+        visible.sort(key=lambda z: abs(((float(z['price_low']) + float(z['price_high'])) / 2.0) - current_price))
+
+        for zone in visible[:2]:
+            low = float(zone['price_low'])
+            high = float(zone['price_high'])
+            label_tfs = "/".join(str(tf).upper() for tf in zone.get('timeframes', [])[:2])
+            label = f"{(label_tfs or 'HTF')} CONFLUENCE".strip()
+            ax.axhspan(low, high, color='#F1C40F', alpha=0.14, zorder=1)
+            ax.text(len(chart_df) - 1, high, f' {label}', color='#F1C40F',
+                    fontsize=7, fontweight='bold', va='bottom', ha='right',
+                    bbox=dict(facecolor='black', alpha=0.25, edgecolor='none', pad=1))
+
+    def _derive_execution_plan(self, chart_df: pd.DataFrame, analysis: Dict, config: Dict) -> Dict:
+        """Infer practical execution levels from local structure for the lower panel."""
+        current_price = float(chart_df['close'].iloc[-1])
+        tf = str(config.get('swing_tf') or config.get('fib_tf') or '').lower()
+
+        structure = (analysis.get('structure', {}) or {})
+        market_structure = (analysis.get('market_structure', {}) or {}).get(tf, {}) or {}
+        fib = (analysis.get('fibonacci', {}) or {}).get(tf, {}) or {}
+        swing = (analysis.get('swing_levels', {}) or {}).get(tf, {}) or {}
+        zones = analysis.get('confluence_zones', []) or []
+
+        supports: List[float] = []
+        resistances: List[float] = []
+        entry_zone = None
+
+        diag_support = ((structure.get(f'support_{tf}') or {}).get('support_price'))
+        if isinstance(diag_support, (int, float)):
+            supports.append(float(diag_support))
+        diag_resistance = ((structure.get(f'resistance_{tf}') or {}).get('resistance_price'))
+        if isinstance(diag_resistance, (int, float)):
+            resistances.append(float(diag_resistance))
+
+        for key in ('fib_500', 'fib_618', 'fib_705', 'fib_786'):
+            val = fib.get(key)
+            if isinstance(val, (int, float)):
+                if val <= current_price:
+                    supports.append(float(val))
+                if val >= current_price:
+                    resistances.append(float(val))
+
+        for val in swing.get('swing_lows', []) or []:
+            if isinstance(val, (int, float)):
+                supports.append(float(val))
+        for val in swing.get('swing_highs', []) or []:
+            if isinstance(val, (int, float)):
+                resistances.append(float(val))
+
+        last_low = market_structure.get('last_swing_low')
+        if isinstance(last_low, (int, float)):
+            supports.append(float(last_low))
+        last_high = market_structure.get('last_swing_high')
+        if isinstance(last_high, (int, float)):
+            resistances.append(float(last_high))
+
+        bias = 'neutral'
+        msb_type = str((market_structure.get('msb') or {}).get('type', '')).lower()
+        choch_type = str((market_structure.get('choch') or {}).get('type', '')).lower()
+        structure_state = str(market_structure.get('structure', '')).lower()
+        if 'bullish' in msb_type or 'bullish' in choch_type or structure_state == 'uptrend':
+            bias = 'bullish'
+        elif 'bearish' in msb_type or 'bearish' in choch_type or structure_state == 'downtrend':
+            bias = 'bearish'
+
+        relevant_zones = []
+        for zone in zones:
+            if not isinstance(zone, dict):
+                continue
+            low = zone.get('price_low')
+            high = zone.get('price_high')
+            if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
+                continue
+            zone_tfs = {str(x).lower() for x in zone.get('timeframes', [])}
+            if tf and tf not in zone_tfs:
+                continue
+            relevant_zones.append(zone)
+
+        if bias != 'bearish':
+            support_candidates = sorted({round(v, 2) for v in supports if v < current_price}, reverse=True)
+            nearest_support = support_candidates[0] if support_candidates else None
+            invalidation = support_candidates[1] if len(support_candidates) > 1 else nearest_support
+            target_candidates = sorted({round(v, 2) for v in resistances if v > current_price})
+            target = target_candidates[0] if target_candidates else None
+
+            for zone in relevant_zones:
+                mid = (float(zone['price_low']) + float(zone['price_high'])) / 2.0
+                if mid <= current_price * 1.01:
+                    entry_zone = (float(zone['price_low']), float(zone['price_high']))
+                    break
+            if entry_zone is None and nearest_support is not None:
+                band = max(current_price * 0.0025, nearest_support * 0.002)
+                entry_zone = (nearest_support - band, nearest_support + band)
+
+            if invalidation is None and nearest_support is not None:
+                invalidation = nearest_support * 0.995
+        else:
+            resistance_candidates = sorted({round(v, 2) for v in resistances if v > current_price})
+            nearest_resistance = resistance_candidates[0] if resistance_candidates else None
+            invalidation = resistance_candidates[1] if len(resistance_candidates) > 1 else nearest_resistance
+            target_candidates = sorted({round(v, 2) for v in supports if v < current_price}, reverse=True)
+            target = target_candidates[0] if target_candidates else None
+
+            for zone in relevant_zones:
+                mid = (float(zone['price_low']) + float(zone['price_high'])) / 2.0
+                if mid >= current_price * 0.99:
+                    entry_zone = (float(zone['price_low']), float(zone['price_high']))
+                    break
+            if entry_zone is None and nearest_resistance is not None:
+                band = max(current_price * 0.0025, nearest_resistance * 0.002)
+                entry_zone = (nearest_resistance - band, nearest_resistance + band)
+
+            if invalidation is None and nearest_resistance is not None:
+                invalidation = nearest_resistance * 1.005
+
+        return {
+            'bias': bias,
+            'timeframe': tf.upper(),
+            'entry_zone': entry_zone,
+            'invalidation': invalidation,
+            'target': target,
+        }
+
+    def _draw_execution_plan(self, ax, chart_df: pd.DataFrame, execution_plan: Dict):
+        """Draw trader-style execution zone, invalidation, and next target."""
+        if not execution_plan:
+            return
+
+        bias = execution_plan.get('bias', 'neutral')
+        tf = execution_plan.get('timeframe', '')
+        entry_zone = execution_plan.get('entry_zone')
+        invalidation = execution_plan.get('invalidation')
+        target = execution_plan.get('target')
+        n = len(chart_df)
+
+        if isinstance(entry_zone, tuple) and len(entry_zone) == 2:
+            low, high = float(entry_zone[0]), float(entry_zone[1])
+            color = '#2ECC71' if bias != 'bearish' else '#E67E22'
+            label = 'LONG ENTRY ZONE' if bias != 'bearish' else 'SHORT ENTRY ZONE'
+            ax.axhspan(low, high, color=color, alpha=0.12, zorder=1)
+            ax.text(n - 1, high, f' {tf} {label}'.strip(), color=color,
+                    fontsize=8, fontweight='bold', va='bottom', ha='right',
+                    bbox=dict(facecolor='black', alpha=0.28, edgecolor='none', pad=1))
+
+        if isinstance(invalidation, (int, float)):
+            ax.axhline(float(invalidation), color='#F23645', linestyle='-.', linewidth=1.3, alpha=0.85, zorder=3)
+            ax.text(n - 1, float(invalidation), f' {tf} INVALIDATION'.strip(), color='#F23645',
+                    fontsize=8, fontweight='bold', va='center', ha='right',
+                    bbox=dict(facecolor='black', alpha=0.30, edgecolor='none', pad=1))
+
+        if isinstance(target, (int, float)):
+            ax.axhline(float(target), color='#95A5A6', linestyle='--', linewidth=1.1, alpha=0.85, zorder=3)
+            ax.text(n - 1, float(target), f' {tf} NEXT TARGET'.strip(), color='#95A5A6',
+                    fontsize=8, fontweight='bold', va='center', ha='right',
+                    bbox=dict(facecolor='black', alpha=0.28, edgecolor='none', pad=1))
 
     def _draw_liquidation_markers(self, ax, chart_df: pd.DataFrame,
                                    liq_df: pd.DataFrame):
@@ -1105,11 +1576,12 @@ class ChartGenerator:
         """Draw a professional TradingView-style header legend in the top-left."""
         try:
             last_candle = chart_df.iloc[-1]
-            tf_str = config.get('title_suffix', '4H').split(' ')[0] # Get '15M' from '15M' or '1D' from '1D SWING'
+            tf_str = config.get('title_suffix', '4H').split(' ')[0]
+            panel_label = config.get('panel_label', '')
             
             # 1. Main Header: SYMBOL TF EXCHANGE (Data up to: TIMESTAMP)
             last_ts_str = chart_df.index[-1].strftime('%Y-%m-%d %H:%M')
-            header_text = f"{symbol} · {tf_str} · CRYPTO (Data up to: {last_ts_str})"
+            header_text = f"{symbol} | {tf_str} | {panel_label} | Data up to {last_ts_str}"
             ax.text(0.01, 0.98, header_text, transform=ax.transAxes, 
                     fontsize=10, fontweight='bold', color=text_color, alpha=0.9,
                     ha='left', va='top')
@@ -1123,7 +1595,7 @@ class ChartGenerator:
             
             # 3. Indicators Legend
             indicators = []
-            if 'ema200' in chart_df.columns:
+            if config.get('draw_ema200', True) and 'ema200' in chart_df.columns:
                 ema_val = last_candle['ema200']
                 if not pd.isna(ema_val):
                     indicators.append(f"EMA 200: {ema_val:.2f}")
@@ -1136,8 +1608,10 @@ class ChartGenerator:
             
             # 4. [VLM OPT] Analytical Overlay Guide (Rosetta Stone)
             # This helps VLM map visual colors to semantic concepts
-            overlay_guide = ("LEGEND: [Green Box=Bull FVG/OB] [Red Box=Bear FVG/OB] "
-                            "[Yellow Line=AVWAP] [Blue X=Structure Low] [Red X=Structure High]")
+            overlay_guide = (
+                "LEGEND: Green=Support  Red=Resistance  Orange=Fib  Yellow=Confluence  "
+                "Blue=Bullish Structure"
+            )
             ax.text(0.01, 0.02, overlay_guide, transform=ax.transAxes,
                     fontsize=7, color=text_color, alpha=0.5,
                     ha='left', va='bottom', fontweight='bold',
