@@ -11,7 +11,7 @@ Commands:
 /report_off - Pause automated AI analysis (Save cost)
 /help     - List all commands
 """
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any, Callable
 import re
 import asyncio
 from telegram import Update
@@ -184,6 +184,54 @@ _CHAT_TOOLS = [
         },
     },
 ]
+
+_TYPE_CHECKERS: Dict[str, Callable[[Any], bool]] = {
+    "string": lambda v: isinstance(v, str),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "boolean": lambda v: isinstance(v, bool),
+}
+
+
+def _coerce_tool_args(schema: Dict[str, Any], raw_args: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate and minimally coerce function-call args from model output."""
+    args = dict(raw_args or {})
+    props = schema.get("properties", {}) or {}
+    required = schema.get("required", []) or []
+
+    for key in required:
+        if key not in args:
+            raise ValueError(f"Missing required arg: {key}")
+
+    for key, spec in props.items():
+        if key not in args:
+            continue
+        expected = spec.get("type", "string")
+        value = args[key]
+
+        if expected == "integer" and isinstance(value, str) and value.strip().isdigit():
+            args[key] = int(value.strip())
+            value = args[key]
+        elif expected == "number" and isinstance(value, str):
+            try:
+                args[key] = float(value.strip())
+                value = args[key]
+            except Exception:
+                pass
+        elif expected == "boolean" and isinstance(value, str):
+            low = value.strip().lower()
+            if low in ("true", "1", "yes", "on"):
+                args[key] = True
+                value = True
+            elif low in ("false", "0", "no", "off"):
+                args[key] = False
+                value = False
+
+        checker = _TYPE_CHECKERS.get(expected)
+        if checker and not checker(value):
+            raise ValueError(f"Invalid arg type for '{key}': expected {expected}")
+
+    return args
 
 
 class TradingBot:
@@ -569,9 +617,6 @@ class TradingBot:
         try:
             import asyncio
             from agents.ai_router import ai_client
-            from google.genai import types as gtypes
-
-            gemini = ai_client._gemini_client
 
             _mcp_tools = None
             def _get_mcp_tools():
@@ -609,110 +654,212 @@ class TradingBot:
                 "search_web":                lambda a: _get_mcp_tools().search_web(a["query"]),
             }
 
-            # _CHAT_TOOLS (Anthropic 포맷) -> Gemini FunctionDeclaration 변환
-            _type_map = {
-                "object": "OBJECT", "string": "STRING",
-                "integer": "INTEGER", "number": "NUMBER", "boolean": "BOOLEAN",
+            tool_aliases = {
+                "get_news_brief": "get_news_summary",
+                "query_kg": "query_knowledge_graph",
             }
 
-            def _to_gemini_schema(js: dict):
-                props = {
-                    k: gtypes.Schema(
-                        type=_type_map.get(v.get("type", "string"), "STRING"),
-                        description=v.get("description", ""),
-                    )
-                    for k, v in js.get("properties", {}).items()
+            tool_schemas = {t["name"]: t["input_schema"] for t in _CHAT_TOOLS}
+            tool_registry = {
+                name: {
+                    "schema": tool_schemas.get(name, {"type": "object", "properties": {}, "required": []}),
+                    "handler": handler,
                 }
-                return gtypes.Schema(
-                    type=_type_map.get(js.get("type", "object"), "OBJECT"),
-                    properties=props or None,
-                    required=js.get("required") or None,
-                )
+                for name, handler in tool_fn_map.items()
+            }
 
-            fn_decls = [
-                gtypes.FunctionDeclaration(
-                    name=t["name"],
-                    description=t["description"],
-                    parameters=_to_gemini_schema(t["input_schema"])
-                    if t["input_schema"].get("properties")
-                    else None,
-                )
-                for t in _CHAT_TOOLS
-            ]
+            declared = {t["name"] for t in _CHAT_TOOLS}
+            executable = set(tool_registry.keys())
+            if declared - executable:
+                logger.warning(f"Tool declarations without handlers: {sorted(declared - executable)}")
+            if executable - declared:
+                logger.warning(f"Tool handlers missing declarations: {sorted(executable - declared)}")
 
-            config = gtypes.GenerateContentConfig(
-                system_instruction=_CHAT_SYSTEM,
-                tools=[gtypes.Tool(function_declarations=fn_decls)],
-                automatic_function_calling=gtypes.AutomaticFunctionCallingConfig(disable=True),
-                max_output_tokens=2000,
-                thinking_config=gtypes.ThinkingConfig(thinking_level="LOW"),
+            def _extract_first_json(text_val: str) -> Dict[str, Any]:
+                if not text_val:
+                    return {}
+                start_idx = text_val.find("{")
+                if start_idx < 0:
+                    return {}
+                depth = 0
+                in_string = False
+                escape = False
+                for i in range(start_idx, len(text_val)):
+                    ch = text_val[i]
+                    if escape:
+                        escape = False
+                        continue
+                    if ch == "\\":
+                        escape = True
+                        continue
+                    if ch == "\"":
+                        in_string = not in_string
+                        continue
+                    if in_string:
+                        continue
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            raw = text_val[start_idx:i + 1]
+                            try:
+                                obj = json.loads(raw)
+                                return obj if isinstance(obj, dict) else {}
+                            except Exception:
+                                return {}
+                return {}
+
+            def _extract_sources(obj: Any) -> List[str]:
+                tags: List[str] = []
+                if isinstance(obj, dict):
+                    src = obj.get("source")
+                    channel = obj.get("channel")
+                    url = obj.get("url")
+                    if src and url:
+                        tags.append(f"[{src} - {url}]")
+                    elif src and channel:
+                        tags.append(f"[{src} - telegram]")
+                    elif src:
+                        tags.append(f"[{src}]")
+                    for v in obj.values():
+                        tags.extend(_extract_sources(v))
+                elif isinstance(obj, list):
+                    for v in obj:
+                        tags.extend(_extract_sources(v))
+                return tags
+
+            planner_system = (
+                "You are a query planner for a crypto trading assistant. "
+                "Return STRICT JSON only. Do not include markdown fences."
+            )
+            available_tools = ", ".join(sorted(tool_registry.keys()))
+            planner_user = (
+                "Plan tool usage for this user query. Keep plan short and deterministic.\n"
+                f"Allowed tools: {available_tools}\n"
+                "Output JSON schema:\n"
+                "{\n"
+                "  \"intent\": \"market|portfolio|news|knowledge|ops|other\",\n"
+                "  \"needs_tools\": true|false,\n"
+                "  \"tool_plan\": [{\"tool\": \"name\", \"args\": {}}],\n"
+                "  \"answer_style\": \"brief|detailed\",\n"
+                "  \"clarify\": \"question if missing critical args, else empty\"\n"
+                "}\n"
+                "Rules: max 3 tools; use symbols BTCUSDT/ETHUSDT when relevant; if no tools needed set needs_tools=false.\n\n"
+                f"USER_QUERY:\n{user_text}"
             )
 
-            contents = [gtypes.Content(role="user", parts=[gtypes.Part.from_text(text=user_text)])]
+            planner_raw = await asyncio.to_thread(
+                ai_client.generate_response,
+                planner_system,
+                planner_user,
+                800,
+                0.1,
+                None,
+                False,
+                "triage",
+            )
+            plan_obj = _extract_first_json(planner_raw)
 
-            for _ in range(5):  # 최대 5회 agentic 루프
-                response = await asyncio.to_thread(
-                    gemini.models.generate_content,
-                    model=settings.MODEL_CHAT,
-                    contents=contents,
-                    config=config,
+            if not plan_obj:
+                fallback = await asyncio.to_thread(
+                    ai_client.generate_response,
+                    _CHAT_SYSTEM,
+                    user_text,
+                    1500,
+                    0.3,
+                    None,
+                    False,
+                    "chat",
                 )
+                await update.message.reply_text(fallback or "요청을 이해하지 못했습니다.")
+                return
 
-                if not response.candidates:
-                    break
+            tool_calls = plan_obj.get("tool_plan", []) if isinstance(plan_obj.get("tool_plan"), list) else []
+            if len(tool_calls) > 3:
+                tool_calls = tool_calls[:3]
+            clarify_q = str(plan_obj.get("clarify", "")).strip()
+            if clarify_q and not tool_calls:
+                await update.message.reply_text(clarify_q)
+                return
 
-                model_parts = response.candidates[0].content.parts
-                fn_call_parts = [p for p in model_parts if p.function_call is not None]
+            execution_results: List[Dict[str, Any]] = []
+            citation_tags: List[str] = []
 
-                if not fn_call_parts:
-                    # 최종 텍스트 답변
-                    text = "".join(p.text for p in model_parts if p.text)
-                    await update.message.reply_text(text or "결과가 없습니다.")
-                    return
+            if bool(plan_obj.get("needs_tools", True)):
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    requested = str(call.get("tool", "")).strip()
+                    fn_name = tool_aliases.get(requested, requested)
+                    raw_args = call.get("args", {})
+                    if not isinstance(raw_args, dict):
+                        raw_args = {}
 
-                # 모델 응답 히스토리에 추가
-                contents.append(gtypes.Content(role="model", parts=model_parts))
+                    reg = tool_registry.get(fn_name)
+                    if reg is None:
+                        execution_results.append({
+                            "tool": requested,
+                            "status": "error",
+                            "result": {"error": f"Unknown tool: {requested}"},
+                        })
+                        continue
 
-                # 툴 실행 및 function_response 수집
-                fn_response_parts = []
-                for part in fn_call_parts:
-                    fn_name = part.function_call.name
-                    fn_args = dict(part.function_call.args)
-                    fn = tool_fn_map.get(fn_name)
-                    if fn is None:
-                        result = {"error": f"Unknown tool: {fn_name}"}
-                    else:
-                        result = await asyncio.to_thread(fn, fn_args)
+                    try:
+                        safe_args = _coerce_tool_args(reg["schema"], raw_args)
+                        result = await asyncio.to_thread(reg["handler"], safe_args)
+                    except Exception as tool_err:
+                        result = {"error": f"Tool execution failed: {type(tool_err).__name__}: {tool_err}"}
+                        safe_args = raw_args
 
-                    # 차트 이미지 특수 처리: base64 -> reply_photo()
-                    if fn_name == "get_chart_image" and "chart_base64" in result:
+                    if fn_name == "get_chart_image" and isinstance(result, dict) and "chart_base64" in result:
                         try:
                             chart_bytes = base64.b64decode(result["chart_base64"])
                             buf = BytesIO(chart_bytes)
-                            buf.name = f"{fn_args.get('symbol', 'chart')}.png"
+                            buf.name = f"{safe_args.get('symbol', 'chart')}.png"
                             await update.message.reply_photo(photo=buf)
                             result = {
-                                "status": "차트 전송 완료",
-                                "symbol": fn_args.get("symbol", ""),
+                                "status": "chart_sent",
+                                "symbol": safe_args.get("symbol", ""),
                                 "size_bytes": result.get("size_bytes", 0),
                             }
                         except Exception as img_err:
-                            logger.error(f"Chart send error: {img_err}")
-                            result = {"error": f"차트 전송 실패: {img_err}"}
+                            result = {"error": f"Chart send failed: {img_err}"}
 
-                    result_str = json.dumps(result, ensure_ascii=False, default=str)[:3000]
-                    fn_response_parts.append(
-                        gtypes.Part(
-                            function_response=gtypes.FunctionResponse(
-                                name=fn_name,
-                                response={"result": result_str},
-                            )
-                        )
-                    )
+                    execution_results.append({
+                        "tool": fn_name,
+                        "args": safe_args,
+                        "status": "ok" if not (isinstance(result, dict) and result.get("error")) else "error",
+                        "result": result,
+                    })
+                    citation_tags.extend(_extract_sources(result))
 
-                contents.append(gtypes.Content(role="user", parts=fn_response_parts))
+            citation_tags = sorted(set(citation_tags))[:20]
 
-            await update.message.reply_text("응답을 처리하지 못했습니다.")
+            responder_system = (
+                "You are a crypto assistant. Answer in Korean with concise, accurate synthesis. "
+                "When claims rely on fetched data, include source tags like [source - url] or [source - telegram]. "
+                "Never invent sources. If evidence is weak, say uncertainty explicitly."
+            )
+            responder_payload = {
+                "user_query": user_text,
+                "plan": plan_obj,
+                "tool_results": execution_results,
+                "source_tags": citation_tags,
+            }
+            responder_user = "Use this JSON as ground truth:\n" + json.dumps(responder_payload, ensure_ascii=False, default=str)
+
+            final_answer = await asyncio.to_thread(
+                ai_client.generate_response,
+                responder_system,
+                responder_user,
+                1800,
+                0.2,
+                None,
+                False,
+                "chat",
+            )
+            await update.message.reply_text(final_answer or "결과를 생성하지 못했습니다.")
 
         except Exception as e:
             logger.error(f"handle_message error: {e}")

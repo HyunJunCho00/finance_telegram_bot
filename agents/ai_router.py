@@ -196,7 +196,7 @@ class AIClient:
             "risk_eval": ("cerebras", settings.MODEL_RISK_EVAL, 10000),
             "risk_eval_fallback": ("groq", settings.MODEL_RISK_EVAL_FALLBACK, 10000),
             "rag_extraction": ("groq", settings.MODEL_RAG_EXTRACTION, settings.MAX_INPUT_CHARS_RAG_EXTRACTION),
-            "news_summarize": ("cerebras", settings.MODEL_NEWS_SUMMARIZE, 10000),
+            "news_summarize": ("groq", settings.MODEL_NEWS_SUMMARIZE, 10000),
             "post_mortem": ("groq", settings.MODEL_RAG_EXTRACTION, 15000),
             "feedback": ("groq", settings.MODEL_RAG_EXTRACTION, 15000),
             "monitor_hourly": ("cerebras", settings.MODEL_MONITOR_HOURLY, 8000),
@@ -400,7 +400,7 @@ class AIClient:
             max_tokens,
             temperature,
             chart_image_b64,
-            timeout=30.0,
+            timeout=120.0,  # [FIX] 늘어난 타임아웃 (실패 방지)
             name="Cerebras",
         )
         if result:
@@ -437,7 +437,7 @@ class AIClient:
                 max_tokens,
                 temperature,
                 chart_image_b64,
-                timeout=25.0,
+                timeout=60.0,
                 name="Groq",
             )
             if result:
@@ -511,7 +511,7 @@ class AIClient:
             max_tokens,
             temperature,
             None,
-            timeout=30.0,
+            timeout=90.0,
             name="OpenRouter",
         )
         if result:
@@ -603,8 +603,8 @@ class AIClient:
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
 
-            user_content = []
             if chart_image_b64:
+                user_content = []
                 mime = mimetypes.guess_type("chart.png")[0] or "image/png"
                 user_content.append(
                     {
@@ -612,8 +612,11 @@ class AIClient:
                         "image_url": {"url": f"data:{mime};base64,{chart_image_b64}"},
                     }
                 )
-            user_content.append({"type": "text", "text": user_message})
-            messages.append({"role": "user", "content": user_content})
+                user_content.append({"type": "text", "text": user_message})
+                messages.append({"role": "user", "content": user_content})
+            else:
+                # [FIX] 이미지 없을 때는 단순 문자열로 전달 (호환성 상향)
+                messages.append({"role": "user", "content": user_message})
 
             resp = client.chat.completions.create(
                 model=model_id,

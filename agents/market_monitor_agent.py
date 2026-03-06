@@ -266,13 +266,14 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             "3. 📰 주요 뉴스 및 내러티브 (텔레그램 인텔 기반)\n"
         )
         try:
-            return ai_client.generate_response(
+            response = ai_client.generate_response(
                 system_prompt=system_prompt,
                 user_message=user_message,
                 role=self.role,
                 temperature=0.4,
                 max_tokens=500,
             )
+            return response or "현재 시장 지표 요약을 생성할 수 없습니다. (LLM 반환값 없음)"
         except Exception as e:
             logger.error(f"MarketMonitorAgent.summarize error: {e}")
             return "시장 요약을 생성하지 못했습니다."
