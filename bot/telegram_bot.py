@@ -4,6 +4,7 @@ Commands:
 /start     - Welcome message & status overview
 /status    - Current position and latest decision
 /analyze   - Run immediate analysis (BTC or ETH)
+/evaluate  - Show recent realtime-pressure evaluation summary
 /mode      - Show fixed dual-mode policy
 /report    - Resend latest analysis report
 /onchain   - Show latest on-chain snapshot
@@ -290,6 +291,7 @@ class TradingBot:
             f"Commands:\n"
             f"/status  - Current position & equity\n"
             f"/analyze - Live analysis (BTC/ETH)\n"
+            f"/evaluate - Pressure signal scorecard\n"
             f"/onchain - Latest on-chain snapshot\n"
             f"/chart   - Generate HD technical chart\n"
             f"/mode    - Show fixed policy\n"
@@ -304,6 +306,9 @@ class TradingBot:
             "📚 <b>Available Commands</b>\n\n"
             "/status - Real-time positions & PnL\n"
             "/analyze [BTC|ETH] - Trigger instant AI analysis\n"
+            "/evaluate [BTC|ETH] [hours] - Realtime pressure hit-rate summary\n"
+            "  Example: /evaluate BTC\n"
+            "  Example: /evaluate ETH 72\n"
             "/onchain [BTC|ETH] - Show latest on-chain snapshot and MVRV\n"
             "/chart [BTC|ETH] [swing|position] - Generate premium HD chart\n"
             "/report - Resend latest analysis report\n"
@@ -329,6 +334,98 @@ class TradingBot:
             "ETHEREUM": "ETHUSDT",
         }
         return alias_map.get(token)
+
+    @staticmethod
+    def _extract_pressure_eval(snapshot: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        if not isinstance(snapshot, dict):
+            return {}, {}
+        pressure = (
+            snapshot.get("realtime_pressure")
+            or (snapshot.get("swing") or {}).get("realtime_pressure")
+            or (snapshot.get("position") or {}).get("realtime_pressure")
+            or {}
+        )
+        evaluation = snapshot.get("evaluation") if isinstance(snapshot.get("evaluation"), dict) else {}
+        return pressure if isinstance(pressure, dict) else {}, evaluation
+
+    def _build_pressure_evaluation_summary(self, symbol: str, hours: int = 168, limit: int = 300) -> str:
+        rows = db.get_market_status_events(symbol=symbol, limit=limit, hours=hours)
+        if not rows:
+            return f"<b>{symbol} Pressure Evaluation</b>\n- 최근 {hours}시간 이벤트가 없습니다."
+
+        horizons = (5, 15, 30)
+        overall = {m: {"correct": 0, "total": 0, "returns": []} for m in horizons}
+        groups: Dict[str, Dict[str, Any]] = {}
+        evaluated_rows = 0
+
+        for row in rows:
+            snapshot = row.get("technical_snapshot") if isinstance(row.get("technical_snapshot"), dict) else {}
+            pressure, evaluation = self._extract_pressure_eval(snapshot)
+            signal = evaluation.get("signal") or pressure.get("signal")
+            summary = str(evaluation.get("summary") or pressure.get("summary") or "unknown")
+            if signal not in ("bullish", "bearish"):
+                continue
+
+            group = groups.setdefault(
+                summary,
+                {"count": 0, "signal": signal, "returns": {m: [] for m in horizons}, "correct": {m: 0 for m in horizons}, "total": {m: 0 for m in horizons}},
+            )
+            group["count"] += 1
+            evaluated_rows += 1
+
+            for minutes in horizons:
+                ret_key = f"forward_{minutes}m_return_pct"
+                outcome_key = f"outcome_{minutes}m"
+                ret = evaluation.get(ret_key)
+                outcome = evaluation.get(outcome_key)
+                if not isinstance(ret, (int, float)):
+                    continue
+                group["returns"][minutes].append(float(ret))
+                group["total"][minutes] += 1
+                overall[minutes]["returns"].append(float(ret))
+                overall[minutes]["total"] += 1
+                if outcome == "correct":
+                    group["correct"][minutes] += 1
+                    overall[minutes]["correct"] += 1
+
+        if not groups:
+            return f"<b>{symbol} Pressure Evaluation</b>\n- 최근 {hours}시간 내 평가 완료된 신호가 없습니다."
+
+        lines = [
+            f"<b>{symbol} Pressure Evaluation</b>",
+            f"- Window: 최근 {hours}시간",
+            f"- Evaluated signals: {evaluated_rows}",
+            "<b>Overall</b>",
+        ]
+
+        for minutes in horizons:
+            total = overall[minutes]["total"]
+            correct = overall[minutes]["correct"]
+            avg_ret = sum(overall[minutes]["returns"]) / len(overall[minutes]["returns"]) if overall[minutes]["returns"] else None
+            rate = (correct / total * 100.0) if total else None
+            lines.append(
+                f"- {minutes}m: {correct}/{total} "
+                f"({rate:.1f}% ) | avg {avg_ret:+.3f}%"
+                if total and avg_ret is not None
+                else f"- {minutes}m: N/A"
+            )
+
+        lines.append("<b>By Summary</b>")
+        for summary, data in sorted(groups.items(), key=lambda item: item[1]["count"], reverse=True)[:6]:
+            line = f"- {summary} ({data['signal']}) n={data['count']}"
+            details = []
+            for minutes in horizons:
+                total = data["total"][minutes]
+                if not total:
+                    continue
+                correct = data["correct"][minutes]
+                avg_ret = sum(data["returns"][minutes]) / len(data["returns"][minutes]) if data["returns"][minutes] else 0.0
+                details.append(f"{minutes}m {correct}/{total} {correct/total*100:.0f}% avg {avg_ret:+.3f}%")
+            if details:
+                line += " | " + " | ".join(details)
+            lines.append(line)
+
+        return "\n".join(lines)
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -470,6 +567,32 @@ class TradingBot:
                 await update.message.reply_text("Analysis failed. Check logs.")
         except Exception as e:
             logger.error(f"Analyze command error: {e}")
+            await update.message.reply_text(f"Error: {e}")
+
+    async def cmd_evaluate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        args = context.args or []
+        if not args:
+            await update.message.reply_text(f"Usage: /evaluate {'|'.join(settings.trading_symbols_base)} [hours]")
+            return
+
+        symbol = self._normalize_symbol_arg(args[0])
+        if not symbol:
+            await update.message.reply_text(f"Usage: /evaluate {'|'.join(settings.trading_symbols_base)} [hours]")
+            return
+
+        hours = 168
+        if len(args) > 1:
+            try:
+                hours = max(1, min(24 * 30, int(args[1])))
+            except Exception:
+                await update.message.reply_text("Hours must be an integer. Example: /evaluate BTC 168")
+                return
+
+        try:
+            text = await asyncio.to_thread(self._build_pressure_evaluation_summary, symbol, hours, 300)
+            await update.message.reply_text(text, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f"Evaluate command error: {e}")
             await update.message.reply_text(f"Error: {e}")
 
     async def cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -950,6 +1073,7 @@ class TradingBot:
         app.add_handler(CommandHandler("help", self.cmd_help))
         app.add_handler(CommandHandler("status", self.cmd_status))
         app.add_handler(CommandHandler("analyze", self.cmd_analyze))
+        app.add_handler(CommandHandler("evaluate", self.cmd_evaluate))
         app.add_handler(CommandHandler("mode", self.cmd_mode))
         app.add_handler(CommandHandler("report", self.cmd_report))
         app.add_handler(CommandHandler("onchain", self.cmd_onchain))
