@@ -118,7 +118,28 @@ class MicrostructureAgent:
 
             result["signal_quality"] = liq_label
 
-            # ── Spread crisis: 절대값 OR Z ≥ 3.0 (평소 대비 3배 이상 확대) ─────
+            abs_imb = abs(imbalance)
+
+            # ── 우선 검사: Spread Z ≥ 3.0 + Imbalance Z ≥ 2.5 동시 발생 ───────
+            # → '유동성 고갈에 의한 추세 전환' (단순 breakdown보다 강한 신호)
+            if (spread_z is not None and spread_z >= 3.0
+                    and imb_z is not None and imb_z >= 2.5):
+                conf = min((imb_z + spread_z) / 10.0, 1.0)
+                direction = "BID_HEAVY" if imbalance > 0 else "ASK_HEAVY"
+                bias = "BULLISH" if imbalance > 0 else "BEARISH"
+                if mode.upper() == "POSITION":
+                    conf *= 0.6
+                result["anomaly"] = "liquidity_exhaustion_breakout"
+                result["confidence"] = round(conf, 3)
+                result["directional_bias"] = bias
+                result["rationale"] = (
+                    f"Orderbook {direction}: imbalance={imbalance:.3f} Z={imb_z:.1f}, "
+                    f"spread={spread_bps:.2f}bps Z={spread_z:.1f} "
+                    f"— 유동성 고갈 + 강한 방향 압력 (추세 전환 가능)."
+                )
+                return result
+
+            # ── Spread crisis 단독: 절대값 OR Z ≥ 3.0 (방향성 없음) ─────────────
             spread_crisis = (spread_bps > self.SPREAD_CRISIS) or (spread_z is not None and spread_z >= 3.0)
             if spread_crisis:
                 result["anomaly"] = "microstructure_breakdown"
@@ -132,43 +153,52 @@ class MicrostructureAgent:
                 return result
 
             # ── Imbalance 게이트: Z ≥ 2.5 OR 절대값 ≥ IMBALANCE_STRONG ────────
-            abs_imb = abs(imbalance)
             imb_gate = (imb_z is not None and imb_z >= 2.5) or (abs_imb >= self.IMBALANCE_STRONG)
 
             if imb_gate:
-                # Spoofing check: extreme imbalance on wide spread = likely spoofed
-                if abs_imb >= self.IMBALANCE_EXTREME and spread_bps > self.SPREAD_WIDE:
+                z_imb_str = f" Z={imb_z:.1f}" if imb_z is not None else ""
+                z_spd_str = f" SpreadZ={spread_z:.1f}" if spread_z is not None else ""
+
+                # ── Spoofing 판단: Z-Score 활용 ────────────────────────────────
+                # spread_z도 함께 높으면 '실제 유동성 고갈 + 압박' → spoofing 아님
+                is_spoofed = (
+                    abs_imb >= self.IMBALANCE_EXTREME
+                    and spread_bps > self.SPREAD_WIDE
+                    and (spread_z is None or spread_z < 3.0)
+                )
+
+                if is_spoofed:
                     result["anomaly"] = "potential_spoofing"
                     result["confidence"] = 0.4
                     result["directional_bias"] = "NEUTRAL"
                     result["rationale"] = (
-                        f"Extreme imbalance ({imbalance:.2f}) with wide spread "
-                        f"({spread_bps:.1f}bps) — likely spoofed wall, directional signal unreliable."
+                        f"Extreme imbalance ({imbalance:.2f}{z_imb_str}) with wide spread "
+                        f"({spread_bps:.1f}bps{z_spd_str}) — likely spoofed wall, directional signal unreliable."
                     )
                 else:
+                    result["anomaly"] = "microstructure_imbalance"
                     conf = min(abs_imb * liq_mult, 1.0)
+
                     direction = "BID_HEAVY" if imbalance > 0 else "ASK_HEAVY"
                     bias = "BULLISH" if imbalance > 0 else "BEARISH"
 
-                    # SWING mode: sustained imbalance matters more
-                    # POSITION mode: single snapshot less reliable for multi-week thesis
                     if mode.upper() == "POSITION":
                         conf *= 0.6
                         bias_note = " (downweighted for POSITION timeframe)"
                     else:
                         bias_note = ""
 
-                    result["anomaly"] = "microstructure_imbalance"
                     result["confidence"] = round(conf, 3)
                     result["directional_bias"] = bias
                     result["rationale"] = (
-                        f"Orderbook {direction}: imbalance={imbalance:.3f}, "
-                        f"spread={spread_bps:.2f}bps (quality={liq_label}){bias_note}."
+                        f"Orderbook {direction}: imbalance={imbalance:.3f}{z_imb_str}, "
+                        f"spread={spread_bps:.2f}bps{z_spd_str} (quality={liq_label}){bias_note}."
                     )
             else:
                 result["directional_bias"] = "NEUTRAL"
+                z_note = f" (Z={imb_z:.1f})" if imb_z is not None else ""
                 result["rationale"] = (
-                    f"Imbalance {imbalance:.3f} below threshold — no directional signal. "
+                    f"Imbalance {imbalance:.3f}{z_note} below threshold — no directional signal. "
                     f"Spread={spread_bps:.2f}bps."
                 )
 

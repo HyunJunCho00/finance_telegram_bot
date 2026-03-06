@@ -51,6 +51,7 @@
 import re
 from typing import Optional
 from loguru import logger
+from processors.math_engine import calculate_z_score
 
 
 class MacroOptionsAgent:
@@ -81,7 +82,8 @@ class MacroOptionsAgent:
         deribit_context: str = "",
         macro_context: str = "",
         mode: str = "SWING",
-        dgs10_1w_chg: float = None  # 1-week change in 10Y yield (e.g. +0.4 for 40bps)
+        dgs10_1w_chg: float = None,   # 1-week change in 10Y yield (e.g. +0.4 for 40bps)
+        options_stats: dict = None,    # 24h rolling stats: {dvol_mean, dvol_std, pcr_mean, pcr_std}
     ) -> dict:
         result = {
             "anomaly": "none",
@@ -90,6 +92,8 @@ class MacroOptionsAgent:
             "dvol": 0.0,
             "pcr": 0.0,
             "skew25d": 0.0,
+            "dvol_z": None,          # Z-Score vs 24h rolling baseline
+            "pcr_z": None,
             "regime": "NORMAL",
             "requires_llm": False,   # True = meta_agent에게 추가 해석 위임 신호
             "rationale": "no options data",
@@ -116,20 +120,54 @@ class MacroOptionsAgent:
 
             iv_inverted = "INVERTED" in deribit_context
 
-            # ── DVOL signal ─────────────────────────────────────────────────
+            # ── Z-Score 계산 (24h rolling 기준선 대비 현재 공포 정도) ───────────
+            dvol_z = None
+            pcr_z  = None
+            if options_stats and isinstance(options_stats, dict):
+                _d_mean = options_stats.get("dvol_mean")
+                _d_std  = options_stats.get("dvol_std")
+                _p_mean = options_stats.get("pcr_mean")
+                _p_std  = options_stats.get("pcr_std")
+                if dvol is not None and _d_mean is not None and _d_std and _d_std > 0:
+                    dvol_z = calculate_z_score(dvol, _d_mean, _d_std)
+                    result["dvol_z"] = round(dvol_z, 2)
+                if pcr is not None and _p_mean is not None and _p_std and _p_std > 0:
+                    pcr_z = calculate_z_score(pcr, _p_mean, _p_std)
+                    result["pcr_z"] = round(pcr_z, 2)
+
+            # ── DVOL signal: Z-Score 우선, fallback 절대값 ──────────────────
             if dvol is not None:
-                if dvol > self.DVOL_HIGH:
-                    signals.append(f"DVOL={dvol:.0f} (PANIC level)")
-                    option_score += 0.4
-                    # Counter-signal: extreme fear can be buy
-                    if dvol > 90:
-                        signals.append(f"DVOL>{dvol:.0f} EXTREME → potential capitulation bottom")
-                elif dvol > self.DVOL_ELEVATED:
-                    signals.append(f"DVOL={dvol:.0f} (elevated)")
-                    option_score += 0.2
-                elif dvol < self.DVOL_LOW:
-                    signals.append(f"DVOL={dvol:.0f} (complacency—breakout risk)")
-                    option_score += 0.1
+                if dvol_z is not None:
+                    # Z-Score 기반: 절대 수준이 낮아도 급등이면 공황 탐지
+                    if dvol_z >= 3.0:
+                        signals.append(f"DVOL={dvol:.0f} Z={dvol_z:.1f} (PANIC surge — 갑작스러운 공포 확산)")
+                        option_score += 0.4
+                        result["anomaly"] = "options_panic_zscore"
+                    elif dvol_z >= 2.0:
+                        signals.append(f"DVOL={dvol:.0f} Z={dvol_z:.1f} (elevated — 공포 확산 중)")
+                        option_score += 0.25
+                    elif dvol_z <= -1.5:
+                        signals.append(f"DVOL={dvol:.0f} Z={dvol_z:.1f} (비정상적 고요 — complacency)")
+                        option_score += 0.1
+                    # 절대값 극단은 Z-Score와 무관하게 추가 반영
+                    if dvol > self.DVOL_HIGH:
+                        signals.append(f"DVOL={dvol:.0f} (절대 PANIC level)")
+                        option_score = min(option_score + 0.15, 0.6)
+                        if dvol > 90:
+                            signals.append(f"DVOL={dvol:.0f} EXTREME → potential capitulation bottom")
+                else:
+                    # Fallback: 기존 절대값 로직
+                    if dvol > self.DVOL_HIGH:
+                        signals.append(f"DVOL={dvol:.0f} (PANIC level)")
+                        option_score += 0.4
+                        if dvol > 90:
+                            signals.append(f"DVOL>{dvol:.0f} EXTREME → potential capitulation bottom")
+                    elif dvol > self.DVOL_ELEVATED:
+                        signals.append(f"DVOL={dvol:.0f} (elevated)")
+                        option_score += 0.2
+                    elif dvol < self.DVOL_LOW:
+                        signals.append(f"DVOL={dvol:.0f} (complacency—breakout risk)")
+                        option_score += 0.1
 
             # ── IV Term Inversion ───────────────────────────────────────────
             if iv_inverted:
@@ -140,23 +178,25 @@ class MacroOptionsAgent:
             elif dvol is not None and dvol > self.DVOL_ELEVATED:
                 result["options_bias"] = "BEARISH"
 
-            # ── PCR signal ──────────────────────────────────────────────────
+            # ── PCR signal: Z-Score로 '평소 대비 얼마나 극단적인가' 판단 ──────
             if pcr is not None:
+                pcr_z_note = f" Z={pcr_z:.1f}" if pcr_z is not None else ""
                 if pcr < self.PCR_CALL_OVERLOADED:
-                    signals.append(f"PCR={pcr:.2f} (call overloaded—contrarian BEARISH)")
+                    signals.append(f"PCR={pcr:.2f}{pcr_z_note} (call overloaded—contrarian BEARISH)")
                     if result["options_bias"] == "BULLISH":
-                        contradictions += 1  # skew says bullish, PCR says contrarian-bearish
+                        contradictions += 1
                     result["options_bias"] = "BEARISH" if result["options_bias"] == "NEUTRAL" else result["options_bias"]
-                    option_score += 0.25
+                    # Z-Score 기반 가중치: 평소보다 극단적일수록 신뢰도 상승
+                    option_score += 0.30 if (pcr_z is not None and pcr_z <= -2.0) else 0.25
                 elif pcr > self.PCR_HEDGE_EXTREME:
-                    signals.append(f"PCR={pcr:.2f} (extreme put hedge—contrarian BULLISH)")
+                    signals.append(f"PCR={pcr:.2f}{pcr_z_note} (extreme put hedge—contrarian BULLISH)")
                     if result["options_bias"] == "BEARISH":
                         contradictions += 1
                     result["options_bias"] = "BULLISH"
-                    option_score += 0.30
+                    option_score += 0.35 if (pcr_z is not None and pcr_z >= 2.0) else 0.30
                 elif pcr > self.PCR_HEDGE_START:
-                    signals.append(f"PCR={pcr:.2f} (elevated put hedging—BEARISH bias)")
-                    option_score += 0.15
+                    signals.append(f"PCR={pcr:.2f}{pcr_z_note} (elevated put hedging—BEARISH bias)")
+                    option_score += 0.20 if (pcr_z is not None and pcr_z >= 2.0) else 0.15
 
             # ── 25d Skew ────────────────────────────────────────────────────
             if skew is not None:
@@ -230,12 +270,17 @@ class MacroOptionsAgent:
         except Exception as e:
             logger.warning(f"MacroOptionsAgent macro parse error: {e}")
 
-        # ── 3. Regime Classifier ──────────────────────────────────────────────
+        # ── 3. Regime Classifier (Z-Score 기반 레짐 우선 적용) ───────────────
         dvol_val = result["dvol"]
         pcr_val  = result["pcr"]
         inverted = "INVERTED" in deribit_context
+        dvol_z_val = result.get("dvol_z")
+        pcr_z_val  = result.get("pcr_z")
 
-        if dvol_val > self.DVOL_ELEVATED and inverted and pcr_val > self.PCR_HEDGE_START:
+        # Z-Score 기반 레짐: 절대값이 낮아도 급변이면 SUDDEN_FEAR 포착
+        if dvol_z_val is not None and dvol_z_val >= 3.0:
+            result["regime"] = "SUDDEN_FEAR"          # 24h 내 급격한 공포 확산
+        elif dvol_val > self.DVOL_ELEVATED and inverted and pcr_val > self.PCR_HEDGE_START:
             result["regime"] = "PANIC_HEDGE"
         elif dvol_val < self.DVOL_LOW and pcr_val < self.PCR_CALL_OVERLOADED:
             result["regime"] = "COMPLACENCY"

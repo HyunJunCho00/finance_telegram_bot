@@ -34,6 +34,9 @@ from agents.vlm_geometric_agent import vlm_geometric_agent
 from agents.meta_agent import meta_agent
 from agents.judge_agent import judge_agent
 from agents.risk_manager_agent import risk_manager_agent
+from agents.liquidity_agent import liquidity_agent
+from agents.microstructure_agent import microstructure_agent
+from agents.macro_options_agent import macro_options_agent
 from config.local_state import state_manager
 from executors.report_generator import report_generator
 from executors.trade_executor import trade_executor
@@ -113,6 +116,9 @@ class AnalysisState(TypedDict):
     final_decision: Dict
     daily_dual_plan: dict
     report: Optional[Dict]
+
+    # Z-Score 동적 임계값용 역사적 통계 (context_gathering에서 수집)
+    stats_context: dict  # {liq_mean, liq_std, imbalance_mean, ..., dvol_mean, dvol_std, ...}
 
     # Error tracking
     errors: Annotated[list, operator.add]
@@ -294,15 +300,81 @@ def node_context_gathering(state: AnalysisState) -> dict:
 
         return db_updates
 
+    def fetch_stats_context():
+        """Z-Score 계산용 역사적 통계 수집 (7일 청산, 마이크로스트럭처, 24h DVOL)."""
+        stats = {}
+        currency = symbol[:-4] if symbol.endswith("USDT") else symbol
+
+        # ── 1. Liquidation 7-day hourly stats ─────────────────────────────
+        try:
+            liq_df_wide = db.get_liquidation_data(symbol, limit=10080)  # 7d × 1440
+            if not liq_df_wide.empty and "timestamp" in liq_df_wide.columns:
+                hourly = (
+                    liq_df_wide.set_index("timestamp")[["long_liq_usd", "short_liq_usd"]]
+                    .resample("1h").sum()
+                )
+                hourly["total"] = hourly["long_liq_usd"] + hourly["short_liq_usd"]
+                stats["liq_mean"] = float(hourly["total"].mean())
+                stats["liq_std"]  = float(hourly["total"].std())
+                logger.debug(f"[Stats] liq mean=${stats['liq_mean']:,.0f} std=${stats['liq_std']:,.0f}")
+        except Exception as e:
+            logger.warning(f"[Stats] liq error: {e}")
+
+        # ── 2. Microstructure 7-day stats (최대 168개 hourly snapshot) ────
+        try:
+            rows = (
+                db.client.table("microstructure_data")
+                .select("spread_bps,orderbook_imbalance")
+                .eq("symbol", symbol)
+                .order("timestamp", desc=True)
+                .limit(168)
+                .execute()
+            )
+            if rows.data and len(rows.data) >= 10:
+                imbs    = [abs(float(r.get("orderbook_imbalance") or 0)) for r in rows.data]
+                spreads = [float(r.get("spread_bps") or 0) for r in rows.data]
+                stats["imbalance_mean"] = float(np.mean(imbs))
+                stats["imbalance_std"]  = float(np.std(imbs))
+                stats["spread_mean"]    = float(np.mean(spreads))
+                stats["spread_std"]     = float(np.std(spreads))
+        except Exception as e:
+            logger.warning(f"[Stats] micro error: {e}")
+
+        # ── 3. DVOL/PCR 24h stats ─────────────────────────────────────────
+        try:
+            rows = (
+                db.client.table("deribit_data")
+                .select("dvol,pcr_oi")
+                .eq("currency", currency)
+                .order("timestamp", desc=True)
+                .limit(24)
+                .execute()
+            )
+            if rows.data and len(rows.data) >= 5:
+                dvols = [float(r["dvol"])    for r in rows.data if r.get("dvol")]
+                pcrs  = [float(r["pcr_oi"])  for r in rows.data if r.get("pcr_oi")]
+                if dvols:
+                    stats["dvol_mean"] = float(np.mean(dvols))
+                    stats["dvol_std"]  = float(np.std(dvols))
+                if pcrs:
+                    stats["pcr_mean"] = float(np.mean(pcrs))
+                    stats["pcr_std"]  = float(np.std(pcrs))
+        except Exception as e:
+            logger.warning(f"[Stats] dvol error: {e}")
+
+        return {"stats_context": stats}
+
     # Run network/DB calls in parallel
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-        f_perp = executor.submit(fetch_perplexity)
-        f_rag = executor.submit(fetch_rag)
-        f_db = executor.submit(fetch_db_contexts)
-        
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+        f_perp  = executor.submit(fetch_perplexity)
+        f_rag   = executor.submit(fetch_rag)
+        f_db    = executor.submit(fetch_db_contexts)
+        f_stats = executor.submit(fetch_stats_context)
+
         updates.update(f_perp.result())
         updates.update(f_rag.result())
         updates.update(f_db.result())
+        updates.update(f_stats.result())
 
     return updates
 
@@ -394,31 +466,79 @@ def node_triage(state: AnalysisState) -> dict:
     except Exception as e:
         logger.error(f"Triage volatility math error: {e}")
 
-    # 2. The Big Squeeze 
-    liq_ctx = state.get("liquidation_context", "")
-    if "LONGS_REKT" in liq_ctx or "SHORTS_REKT" in liq_ctx:
-        # Require >$100k liquidation in 1H for emergency trigger
-        import re
-        match = re.search(r"Total=\$?([\d\.]+)", liq_ctx.replace(',', ''))
-        if match and float(match.group(1)) > 100000:
-            if not is_on_cooldown("liquidation_cluster", symbol):
-                anomalies.append("liquidation_cluster")
-                set_cooldown("liquidation_cluster", symbol)
+    # ── Z-Score Enhanced Agent Checks (2, 3, 4) ──────────────────────────────
+    _stats = state.get("stats_context") or {}
 
-    # 3. Microstructure Breakdown
-    micro_ctx = state.get("microstructure_context", "")
-    if "imbalance" in micro_ctx:
-        # Require > 70% (0.7) imbalance
-        import re
-        match = re.search(r"imbalance[:=]\s*([-0-9\.]+)", micro_ctx)
-        if match and abs(float(match.group(1))) > 0.7:
-            anomalies.append("microstructure_imbalance")
-        
-    # 4. Options Panic (DVOL Spike or Term Inversion)
-    if "INVERTED" in state.get("deribit_context", "") or "DVOL=" in state.get("deribit_context", ""):
-        if not is_on_cooldown("options_panic", symbol):
-            anomalies.append("options_panic")
-            set_cooldown("options_panic", symbol)
+    # 2. Liquidity Agent (Z-Score 기반 청산 이상 탐지)
+    try:
+        _liq_stats = None
+        if _stats.get("liq_mean") is not None and _stats.get("liq_std") is not None:
+            _liq_stats = {"mean": _stats["liq_mean"], "std": _stats["liq_std"]}
+        _liq_result = liquidity_agent.analyze(
+            cvd_context=state.get("funding_context", ""),
+            liquidation_context=state.get("liquidation_context", ""),
+            mode=state.get("mode", "SWING"),
+            liq_stats=_liq_stats,
+        )
+        _liq_anomaly = _liq_result.get("anomaly", "none")
+        if _liq_anomaly != "none" and _liq_result.get("confidence", 0) > 0.15:
+            if not is_on_cooldown(_liq_anomaly, symbol):
+                anomalies.append(_liq_anomaly)
+                set_cooldown(_liq_anomaly, symbol)
+                logger.info(
+                    f"[Triage/Liq] anomaly={_liq_anomaly} "
+                    f"conf={_liq_result['confidence']:.2f} "
+                    f"z={_liq_result.get('liq_z_score')}"
+                )
+    except Exception as e:
+        logger.error(f"Triage liquidity agent error: {e}")
+
+    # 3. Microstructure Agent (Z-Score 기반 오더북 이상 탐지)
+    try:
+        _micro_stats = None
+        _micro_keys = ("imbalance_mean", "imbalance_std", "spread_mean", "spread_std")
+        if all(k in _stats for k in _micro_keys):
+            _micro_stats = {k: _stats[k] for k in _micro_keys}
+        _micro_result = microstructure_agent.analyze(
+            microstructure_context=state.get("microstructure_context", ""),
+            mode=state.get("mode", "SWING"),
+            micro_stats=_micro_stats,
+        )
+        _micro_anomaly = _micro_result.get("anomaly", "none")
+        if _micro_anomaly != "none" and _micro_result.get("confidence", 0) > 0.2:
+            anomalies.append(_micro_anomaly)
+            logger.info(
+                f"[Triage/Micro] anomaly={_micro_anomaly} "
+                f"conf={_micro_result['confidence']:.2f} "
+                f"imb_z={_micro_result.get('imbalance_z')} "
+                f"spd_z={_micro_result.get('spread_z')}"
+            )
+    except Exception as e:
+        logger.error(f"Triage microstructure agent error: {e}")
+
+    # 4. Macro Options Agent (Z-Score 기반 DVOL/PCR 공황 탐지)
+    try:
+        _opts_stats = None
+        _opts_keys = ("dvol_mean", "dvol_std")
+        if all(k in _stats for k in _opts_keys):
+            _opts_stats = {k: _stats[k] for k in ("dvol_mean", "dvol_std", "pcr_mean", "pcr_std") if k in _stats}
+        _opts_result = macro_options_agent.analyze(
+            deribit_context=state.get("deribit_context", ""),
+            macro_context=state.get("macro_context", ""),
+            mode=state.get("mode", "SWING"),
+            options_stats=_opts_stats,
+        )
+        _opts_anomaly = _opts_result.get("anomaly", "none")
+        if _opts_anomaly != "none" and _opts_result.get("confidence", 0) > 0.2:
+            if not is_on_cooldown(_opts_anomaly, symbol):
+                anomalies.append(_opts_anomaly)
+                set_cooldown(_opts_anomaly, symbol)
+                logger.info(
+                    f"[Triage/Opts] anomaly={_opts_anomaly} regime={_opts_result.get('regime')} "
+                    f"dvol_z={_opts_result.get('dvol_z')}"
+                )
+    except Exception as e:
+        logger.error(f"Triage macro options agent error: {e}")
 
     # If is_emergency was forced via UI/Telegram command
     if state.get("is_emergency") and not anomalies:
