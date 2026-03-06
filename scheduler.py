@@ -12,6 +12,7 @@ from executors.orchestrator import orchestrator
 from evaluators.feedback_generator import feedback_generator
 from processors.light_rag import light_rag
 from processors.gcs_archive import gcs_archive_exporter
+from processors.math_engine import math_engine
 from agents.market_monitor_agent import market_monitor_agent
 from config import scheduler_config
 from config.settings import settings, TradingMode
@@ -25,6 +26,213 @@ import threading
 import json
 import base64
 from datetime import datetime, timezone
+
+
+def _project_trendline_price(line_info: dict, candle_len: int) -> float | None:
+    """Project diagonal trendline value at the latest candle index."""
+    if not isinstance(line_info, dict):
+        return None
+    try:
+        x1 = line_info.get("_x1")
+        x2 = line_info.get("_x2")
+        p1 = line_info.get("point1")
+        p2 = line_info.get("point2")
+        if x1 is None or x2 is None or not p1 or not p2 or x2 == x1:
+            return None
+        y1 = float(p1[1])
+        y2 = float(p2[1])
+        slope = (y2 - y1) / (x2 - x1)
+        current_val = y2 + slope * (candle_len - 1 - x2)
+        return float(current_val)
+    except Exception:
+        return None
+
+
+def _build_mode_technical_snapshot(symbol: str, mode: TradingMode) -> dict:
+    """Build deterministic mode-specific technical snapshot for hourly Telegram status."""
+    snapshot = {}
+    try:
+        limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.POSITION_CANDLE_LIMIT
+        df = db.get_latest_market_data(symbol, limit=limit)
+        if df is None or df.empty:
+            return snapshot
+
+        analysis = math_engine.analyze_market(df, mode)
+        current_price = float(df["close"].iloc[-1])
+
+        primary_tf = "4h" if mode == TradingMode.SWING else "1d"
+        higher_tf = "1d" if mode == TradingMode.SWING else "1w"
+
+        swing_primary = (analysis.get("swing_levels", {}) or {}).get(primary_tf, {}) or {}
+        fib_primary = (analysis.get("fibonacci", {}) or {}).get(primary_tf, {}) or {}
+        ms_primary = (analysis.get("market_structure", {}) or {}).get(primary_tf, {}) or {}
+        ms_higher = (analysis.get("market_structure", {}) or {}).get(higher_tf, {}) or {}
+        structure = analysis.get("structure", {}) or {}
+        tq = analysis.get("trendline_quality", {}) or {}
+        zones = (analysis.get("confluence_zones", []) or [])[:2]
+
+        sup_line = structure.get(f"support_{primary_tf}")
+        res_line = structure.get(f"resistance_{primary_tf}")
+        tf_df_len = len(math_engine.resample_to_timeframe(df, primary_tf))
+        sup_price = _project_trendline_price(sup_line, tf_df_len)
+        res_price = _project_trendline_price(res_line, tf_df_len)
+
+        tf_ind = ((analysis.get("timeframes", {}) or {}).get(primary_tf, {}) or {})
+        atr_val = tf_ind.get("atr")
+        atr_pct = None
+        if isinstance(atr_val, (int, float)) and current_price:
+            atr_pct = abs(float(atr_val) / float(current_price) * 100.0)
+
+        snapshot = {
+            "mode": mode.value,
+            "primary_tf": primary_tf,
+            "higher_tf": higher_tf,
+            "current_price": round(current_price, 2),
+            "atr_percent": round(atr_pct, 4) if isinstance(atr_pct, (int, float)) else None,
+            "market_structure": {
+                primary_tf: {
+                    "trend": ms_primary.get("structure"),
+                    "choch": (ms_primary.get("choch") or {}).get("type"),
+                    "msb": (ms_primary.get("msb") or {}).get("type"),
+                    "last_swing_high": ms_primary.get("last_swing_high"),
+                    "last_swing_low": ms_primary.get("last_swing_low"),
+                },
+                higher_tf: {
+                    "trend": ms_higher.get("structure"),
+                    "choch": (ms_higher.get("choch") or {}).get("type"),
+                    "msb": (ms_higher.get("msb") or {}).get("type"),
+                    "last_swing_high": ms_higher.get("last_swing_high"),
+                    "last_swing_low": ms_higher.get("last_swing_low"),
+                },
+            },
+            f"trendlines_{primary_tf}": {
+                "diagonal_support": round(sup_price, 2) if isinstance(sup_price, (int, float)) else None,
+                "diagonal_resistance": round(res_price, 2) if isinstance(res_price, (int, float)) else None,
+                "support_quality": tq.get(f"support_{primary_tf}"),
+                "resistance_quality": tq.get(f"resistance_{primary_tf}"),
+            },
+            f"swing_levels_{primary_tf}": {
+                "nearest_support": swing_primary.get("nearest_support"),
+                "nearest_resistance": swing_primary.get("nearest_resistance"),
+            },
+            f"fibonacci_{primary_tf}": {
+                "trend": fib_primary.get("trend"),
+                "nearest_fib": fib_primary.get("nearest_fib"),
+                "fib_500": fib_primary.get("fib_500"),
+                "fib_618": fib_primary.get("fib_618"),
+                "fib_705": fib_primary.get("fib_705"),
+                "fib_786": fib_primary.get("fib_786"),
+            },
+            "confluence_zones": zones,
+        }
+    except Exception as e:
+        logger.warning(f"Failed to build {mode.value} technical snapshot for {symbol}: {e}")
+
+    return snapshot
+
+
+def _distance_pct(price: float | None, level: float | None) -> float | None:
+    if not isinstance(price, (int, float)) or not isinstance(level, (int, float)) or price == 0:
+        return None
+    return abs(price - level) / abs(price) * 100.0
+
+
+def _get_recent_market_regime(symbol: str) -> str:
+    """Read latest persisted market regime from ai_reports."""
+    try:
+        report = db.get_latest_report(symbol=symbol)
+        if isinstance(report, dict):
+            regime = str(report.get("market_regime", "") or "").upper().strip()
+            if regime:
+                return regime
+    except Exception:
+        pass
+    return "UNKNOWN"
+
+
+def _detect_technical_events(symbol: str, swing: dict, position: dict, funding: float | None,
+                             volatility: float | None, regime: str = "UNKNOWN") -> dict:
+    """Detect event flags for conditional detailed commentary."""
+    events = []
+    swing_atr = swing.get("atr_percent") if isinstance(swing, dict) else None
+    position_atr = position.get("atr_percent") if isinstance(position, dict) else None
+    atr_candidates = [x for x in [swing_atr, position_atr] if isinstance(x, (int, float)) and x > 0]
+    base_atr_pct = sum(atr_candidates) / len(atr_candidates) if atr_candidates else 1.0
+
+    # ATR-adaptive thresholds with safety clamps.
+    level_touch = min(1.2, max(0.25, base_atr_pct * 0.45))
+    diag_touch = min(1.5, max(0.30, base_atr_pct * 0.60))
+    fib_touch = min(1.0, max(0.20, base_atr_pct * 0.35))
+    volatility_evt = min(5.0, max(1.2, base_atr_pct * 2.0))
+    funding_evt = 0.01  # keep fixed until per-symbol funding distribution calibration
+
+    # Regime-aware multiplier (from MetaAgent output persisted in ai_reports.market_regime).
+    regime = str(regime or "UNKNOWN").upper()
+    regime_mult_map = {
+        "RANGE_BOUND": 0.85,
+        "SIDEWAYS_ACCUMULATION": 0.90,
+        "BULL_MOMENTUM": 1.10,
+        "BEAR_MOMENTUM": 1.10,
+        "VOLATILITY_PANIC": 1.35,
+    }
+    regime_mult = regime_mult_map.get(regime, 1.00)
+    level_touch = min(1.8, max(0.18, level_touch * regime_mult))
+    diag_touch = min(2.0, max(0.22, diag_touch * regime_mult))
+    fib_touch = min(1.4, max(0.15, fib_touch * regime_mult))
+    volatility_evt = min(7.0, max(0.9, volatility_evt * regime_mult))
+
+    thresholds = {
+        "base_atr_pct": round(base_atr_pct, 4),
+        "regime_multiplier": round(regime_mult, 3),
+        "level_touch_pct": round(level_touch, 4),
+        "diag_touch_pct": round(diag_touch, 4),
+        "fib_touch_pct": round(fib_touch, 4),
+        "funding_abs_pct": funding_evt,
+        "volatility_abs_pct": round(volatility_evt, 4),
+    }
+
+    def _scan_mode(snapshot: dict, mode_name: str):
+        if not isinstance(snapshot, dict):
+            return
+        primary_tf = snapshot.get("primary_tf", "4h")
+        price = snapshot.get("current_price")
+        ms = (snapshot.get("market_structure", {}) or {}).get(primary_tf, {}) or {}
+        sw = snapshot.get(f"swing_levels_{primary_tf}", {}) or {}
+        tr = snapshot.get(f"trendlines_{primary_tf}", {}) or {}
+        fib = snapshot.get(f"fibonacci_{primary_tf}", {}) or {}
+
+        if ms.get("choch"):
+            events.append(f"{mode_name.upper()}: CHoCH 감지 ({primary_tf})")
+        if ms.get("msb"):
+            events.append(f"{mode_name.upper()}: MSB 감지 ({primary_tf})")
+
+        for label, level, th in [
+            (f"{mode_name.upper()} nearest_support", sw.get("nearest_support"), thresholds["level_touch_pct"]),
+            (f"{mode_name.upper()} nearest_resistance", sw.get("nearest_resistance"), thresholds["level_touch_pct"]),
+            (f"{mode_name.upper()} diagonal_support", tr.get("diagonal_support"), thresholds["diag_touch_pct"]),
+            (f"{mode_name.upper()} diagonal_resistance", tr.get("diagonal_resistance"), thresholds["diag_touch_pct"]),
+            (f"{mode_name.upper()} fib_618", fib.get("fib_618"), thresholds["fib_touch_pct"]),
+            (f"{mode_name.upper()} fib_705", fib.get("fib_705"), thresholds["fib_touch_pct"]),
+        ]:
+            d = _distance_pct(price, level)
+            if isinstance(d, (int, float)) and d <= th:
+                events.append(f"{label} 근접 ({d:.2f}%)")
+
+    _scan_mode(swing, "swing")
+    _scan_mode(position, "position")
+
+    if isinstance(funding, (int, float)) and abs(funding) >= thresholds["funding_abs_pct"]:
+        events.append(f"펀딩 극단치 ({funding:+.5f}%)")
+    if isinstance(volatility, (int, float)) and abs(volatility) >= thresholds["volatility_abs_pct"]:
+        events.append(f"변동성 이벤트 ({volatility:+.2f}%)")
+
+    return {
+        "regime": regime,
+        "has_event": len(events) > 0,
+        "event_count": len(events),
+        "thresholds": thresholds,
+        "event_items": events[:8],
+    }
 
 
 def job_1min_tick():
@@ -156,6 +364,32 @@ def job_routine_market_status():
 
             # Volatility
             indicators[symbol]["volatility"] = volatility_monitor.calculate_price_change(symbol)
+            swing_snapshot = _build_mode_technical_snapshot(symbol, TradingMode.SWING)
+            position_snapshot = _build_mode_technical_snapshot(symbol, TradingMode.POSITION)
+            latest_regime = _get_recent_market_regime(symbol)
+            indicators[symbol]["technical_snapshot"] = {
+                "swing": swing_snapshot,
+                "position": position_snapshot,
+                "events": _detect_technical_events(
+                    symbol=symbol,
+                    swing=swing_snapshot,
+                    position=position_snapshot,
+                    funding=indicators[symbol].get("funding_rate"),
+                    volatility=indicators[symbol].get("volatility"),
+                    regime=latest_regime,
+                ),
+            }
+            try:
+                db.insert_market_status_event({
+                    "symbol": symbol,
+                    "regime": latest_regime,
+                    "price": indicators[symbol].get("price"),
+                    "funding_rate": indicators[symbol].get("funding_rate"),
+                    "volatility": indicators[symbol].get("volatility"),
+                    "technical_snapshot": indicators[symbol]["technical_snapshot"],
+                })
+            except Exception as e:
+                logger.warning(f"market_status_events insert skipped for {symbol}: {e}")
                 
         # News Intel (Last 1 hour): Telegram + external crypto news synthesized by LLM
         telegram_intel = "최근 1시간 내 주요 뉴스 없음"

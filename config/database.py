@@ -358,6 +358,11 @@ class DatabaseClient:
         response = query.limit(1).execute()
         return response.data[0] if response.data else None
 
+    @reconnect_on_error
+    def insert_market_status_event(self, data: Dict) -> Dict:
+        """Insert hh:20 market status snapshot + event triggers for tuning."""
+        return self.client.table("market_status_events").insert(data).execute()
+
     # ─────────────── Feedback ───────────────
 
     @reconnect_on_error

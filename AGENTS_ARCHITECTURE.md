@@ -1,6 +1,6 @@
 # Finance Telegram Bot Architecture (Code-Accurate)
 
-Last updated: 2026-03-06
+Last updated: 2026-03-06 (Current Milestone: V14.1)
 Scope: based on current implementation in `scheduler.py`, `executors/`, `agents/`, `collectors/`, `evaluators/`, `processors/`, `config/`, `bot/`.
 
 ## 1. Purpose
@@ -167,6 +167,9 @@ These modules exist, but current `Orchestrator` graph does not call them as inde
 | `rag_extraction` | `processors/light_rag.py`, `processors/telegram_batcher.py` | Entity/relationship extraction + Telegram batch summarization | Groq: `MODEL_RAG_EXTRACTION=openai/gpt-oss-20b` | LightRAG ingest/query pipeline, Telegram chunk synthesis |
 | `self_correction` | `evaluators/feedback_generator.py` | Wrong-call feedback and lessons learned | Gemini judge route: `MODEL_SELF_CORRECTION=gemini-3.1-pro-preview` | Evaluation results + original reasoning/execution notes |
 | `macro` | `executors/post_mortem.py` | Post-trade case-study style lesson generation | Cerebras route (mapped to `MODEL_META_REGIME=gpt-oss-120b`) | Trade context + outcome analysis for memory loop |
+| `news_cluster` | `scheduler.py` (job_routine_market_status) | Selecting and merging high-impact news | Groq: `MODEL_NEWS_CLUSTER=qwen/qwen3-32b` | Telegram + External news inputs, JSON-schema grouping |
+| `news_brief_final` | `scheduler.py` (job_routine_market_status) | Writing concise Korean market briefings | Cerebras: `MODEL_NEWS_FINAL=gpt-oss-120b` | Selected news items from cluster step |
+| `news_summarize` | `agents/market_monitor_agent.py` | Fallback market status summary generation | Groq route: `MODEL_NEWS_SUMMARIZE=llama3.1-8b` | Current market indicators (price/funding/etc.) |
 
 Notes:
 

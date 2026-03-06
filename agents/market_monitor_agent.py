@@ -1,12 +1,12 @@
-"""Market Monitor Agent — Hourly trigger evaluator.
+﻿"""Market Monitor Agent ??Hourly trigger evaluator.
 
-Role: monitor_hourly → OpenRouter (free tier)
+Role: monitor_hourly ??OpenRouter (free tier)
 
 Every hour:
 1. Load the current Daily Playbook from DB for each symbol+mode.
 2. Compare live indicators against Playbook entry/invalidation conditions.
 3. Output: NO_ACTION | WATCH | TRIGGER
-   - TRIGGER: all entry conditions met → hand off to orchestrator for order execution.
+   - TRIGGER: all entry conditions met ??hand off to orchestrator for order execution.
    - WATCH: partial match, monitoring needed.
    - NO_ACTION: no condition met.
 """
@@ -31,7 +31,7 @@ You will receive:
 1. DAILY PLAYBOOK: The strategy designed this morning (entry/exit/invalidation/risk conditions).
 2. LIVE INDICATORS: Current price, funding rate, OI divergence, MFI proxy, volatility.
 
-Output STRICT JSON — no extra text:
+Output STRICT JSON ??no extra text:
 {
   "status": "NO_ACTION" | "WATCH" | "TRIGGER",
   "symbol": "BTCUSDT",
@@ -140,7 +140,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         playbook = self._load_playbook(symbol, mode)
         if not playbook:
             return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                    "reasoning": "활성화된 플레이북이 없습니다."}
+                    "reasoning": "?쒖꽦?붾맂 ?뚮젅?대턿???놁뒿?덈떎."}
 
         # TTL check
         try:
@@ -149,14 +149,14 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             created_at = dateutil.parser.parse(playbook.get("created_at", ""))
             if datetime.now(timezone.utc) - created_at > timedelta(hours=24):
                 return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                        "reasoning": "플레이북 유효기간(>24h)이 만료되었습니다."}
+                        "reasoning": "?뚮젅?대턿 ?좏슚湲곌컙(>24h)??留뚮즺?섏뿀?듬땲??"}
         except Exception:
             pass
 
         live = self._get_live_indicators(symbol)
         pb_data = playbook.get("playbook", {})
         
-        # ── Deterministic Evaluation Logic ──
+        # ?? Deterministic Evaluation Logic ??
         matched = []
         unmatched = []
         invalidated = False
@@ -180,15 +180,15 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                         logger.debug(f"Invalidation parse error: {e}")
 
         if invalidated:
-            logger.info(f"Monitor [{symbol}/{mode}]: NO_ACTION — Playbook Invalidated: {inval_reason}")
+            logger.info(f"Monitor [{symbol}/{mode}]: NO_ACTION ??Playbook Invalidated: {inval_reason}")
             return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                    "reasoning": f"무효화됨: {inval_reason}"}
+                    "reasoning": f"臾댄슚?붾맖: {inval_reason}"}
                     
         # 2. Check Entry Conditions
         entry_conds = pb_data.get("entry_conditions", [])
         if not entry_conds:
             return {"status": "NO_ACTION", "symbol": symbol, "mode": mode,
-                    "reasoning": "분석 가능한 진입 조건이 정의되지 않았습니다."}
+                    "reasoning": "遺꾩꽍 媛?ν븳 吏꾩엯 議곌굔???뺤쓽?섏? ?딆븯?듬땲??"}
                     
         for ec in entry_conds:
             if isinstance(ec, dict):
@@ -226,9 +226,9 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             result_status = "WATCH"
             
         reasoning = (
-            "모든 결정론적 조건이 충족되었습니다." if result_status == "TRIGGER"
-            else f"{match_count}/{total_entry_count} 조건 만족 (Soft-Trigger)." if result_status == "SOFT_TRIGGER"
-            else f"{len(unmatched)}개 조건 대기 중."
+            "紐⑤뱺 寃곗젙濡좎쟻 議곌굔??異⑹”?섏뿀?듬땲??" if result_status == "TRIGGER"
+            else f"{match_count}/{total_entry_count} 議곌굔 留뚯” (Soft-Trigger)." if result_status == "SOFT_TRIGGER"
+            else f"{len(unmatched)}媛?議곌굔 ?湲?以?"
         )
         
         result = {
@@ -245,81 +245,86 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             "match_ratio": round(match_ratio, 2)
         }
         
-        logger.info(f"Monitor [{symbol}/{mode}]: {result_status} ({match_count}/{total_entry_count}) — {reasoning}")
+        logger.info(f"Monitor [{symbol}/{mode}]: {result_status} ({match_count}/{total_entry_count}) ??{reasoning}")
         return result
 
     def summarize_current_status(self, indicators: dict) -> str:
-        """Legacy: generate free-form market status summary (used by job_routine_market_status)."""
+        """Generate hourly Telegram market status with structured technical sections."""
         system_prompt = (
-            "You are a Market Status Monitor. Provide a concise, data-driven summary "
-            "of current market indicators for a professional trader. "
-            "Focus on Funding Rates, OI Divergence, MFI proxy, and breaking news. "
-            "Format in clean HTML tags (<b>, <i>, <code>) with bullet points and emojis. Do NOT use Markdown asterisks (**). Do NOT use <ul>, <ol>, or <li> tags. Use plain bullet characters like '-'. Under 150 words. "
-            "출력은 반드시 한국어로 작성하세요."
+            "You are a market monitor for swing traders.\n"
+            "Use ONLY provided data. Never invent prices or levels.\n"
+            "Output in Korean and Telegram-safe HTML only (<b>, <i>, <code>, '-' bullets).\n"
+            "Do not use markdown syntax.\n"
+            "Required section titles:\n"
+            "<b>🧭 구조/추세</b>\n"
+            "<b>📐 빗각·지지/저항</b>\n"
+            "<b>🧮 피보나치/변곡</b>\n"
+            "<b>⚠️ 파생 리스크</b>\n"
+            "<b>🧩 실행 레벨</b>\n"
+            "<b>🔎 이벤트 상세</b> (conditional)\n"
+            "For BTCUSDT and ETHUSDT, include concrete levels when present."
         )
         user_message = (
             f"Current Market Indicators (UTC: {datetime.now().isoformat()}):\n"
-            f"{json.dumps(indicators, indent=2)}\n\n"
-            "Please provide:\n"
-            "1. 🛡️ 빠른 시장 심리 (강세/약세/중립)\n"
-            "2. 🪙 주요 토큰 특이사항 (가격, 펀딩, OI 발산, MFI)\n"
-            "3. 📰 주요 뉴스 및 내러티브 (텔레그램 인텔 기반)\n"
+            f"{json.dumps(indicators, ensure_ascii=False, indent=2)}\n\n"
+            "Rules:\n"
+            "- technical_snapshot contains swing/position/events.\n"
+            "- Always include BOTH swing and position core lines per symbol.\n"
+            "- Mention CHoCH/MSB only if explicitly present.\n"
+            "- In 실행 레벨, include nearest support, nearest resistance, and invalidation trigger.\n"
+            "- Add <b>🔎 이벤트 상세</b> ONLY when events.has_event=true.\n"
+            "- Keep concise and practical."
         )
         try:
             response = ai_client.generate_response(
                 system_prompt=system_prompt,
                 user_message=user_message,
                 role=self.role,
-                temperature=0.4,
-                max_tokens=500,
+                temperature=0.3,
+                max_tokens=700,
             )
             if response and str(response).strip() and not self._is_suspiciously_truncated(response):
                 return response
 
-            logger.warning("MarketMonitorAgent.summarize returned empty or truncated response; retrying with alternate route.")
+            logger.warning("MarketMonitorAgent.summarize returned empty/partial response; retrying with alternate route.")
             retry_resp = ai_client.generate_response(
                 system_prompt=system_prompt,
                 user_message=user_message,
-                role="news_summarize",  # alternate provider route (Groq pool)
+                role="news_summarize",
                 temperature=0.2,
-                max_tokens=550,
+                max_tokens=750,
             )
             if retry_resp and str(retry_resp).strip() and not self._is_suspiciously_truncated(retry_resp):
                 return retry_resp
 
-            logger.warning("MarketMonitorAgent.summarize retry also failed/partial; using deterministic fallback summary.")
+            logger.warning("MarketMonitorAgent.summarize retry failed; using deterministic fallback summary.")
             return self._build_fallback_summary(indicators)
         except Exception as e:
             logger.error(f"MarketMonitorAgent.summarize error: {e}")
             return self._build_fallback_summary(indicators)
 
     def _is_suspiciously_truncated(self, text: str) -> bool:
-        """Heuristic guard: detect responses likely cut mid-sentence."""
+        """Heuristic guard for incomplete responses."""
         s = (text or "").strip()
         if not s:
             return True
 
-        # Ends with an unfinished connector/postposition or abrupt separator.
-        bad_suffixes = ("에서", "및", "그리고", "또는", ":", "-", "(", "[", "{", "/", ",")
+        bad_suffixes = ("에서", "및", "또는", "그리고", ":", "-", "(", "[", "{", "/", ",")
         if s.endswith(bad_suffixes):
             return True
 
-        # Unbalanced wrappers strongly suggest truncation.
         if s.count("(") > s.count(")") or s.count("[") > s.count("]") or s.count("{") > s.count("}"):
             return True
 
-        # If the final line is extremely short and looks abruptly cut, treat as partial.
         last_line = s.splitlines()[-1].strip()
-        if len(last_line) <= 8 and not last_line.endswith((".", "!", "?", "…")):
+        if len(last_line) <= 8 and not last_line.endswith((".", "!", "?", "…", "</b>", "</i>", "</code>")):
             return True
 
-        # Otherwise, avoid over-detecting normal Korean sentence endings.
         return False
 
     def _build_fallback_summary(self, indicators: dict) -> str:
         """LLM fallback summary so hourly status never becomes empty."""
-        lines = []
-        lines.append("<b>시장 상태 요약 (Fallback)</b>")
+        lines = ["<b>시장 상태 요약 (Fallback)</b>"]
 
         symbol_rows = []
         for key, value in (indicators or {}).items():
@@ -330,26 +335,104 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         if not symbol_rows:
             return "<b>시장 상태 요약 (Fallback)</b>\n- 수집된 지표가 없어 요약할 수 없습니다."
 
+        def _mode_views(row: dict):
+            tech = row.get("technical_snapshot", {}) if isinstance(row.get("technical_snapshot"), dict) else {}
+            if "swing" in tech or "position" in tech:
+                return tech.get("swing", {}) or {}, tech.get("position", {}) or {}, tech.get("events", {}) or {}
+            # backward compatibility
+            return tech, {}, {}
+
+        def _line_for_mode(snapshot: dict, label: str) -> str:
+            if not isinstance(snapshot, dict) or not snapshot:
+                return f"{label}: N/A"
+            tf = snapshot.get("primary_tf", "4h")
+            ms = ((snapshot.get("market_structure") or {}).get(tf) or {})
+            tr = snapshot.get(f"trendlines_{tf}", {}) or {}
+            sw = snapshot.get(f"swing_levels_{tf}", {}) or {}
+            fib = snapshot.get(f"fibonacci_{tf}", {}) or {}
+            trend = ms.get("trend", "N/A")
+            choch = ms.get("choch")
+            msb = ms.get("msb")
+            extra = []
+            if choch:
+                extra.append(f"CHoCH={choch}")
+            if msb:
+                extra.append(f"MSB={msb}")
+            return (
+                f"{label}({tf}) {trend}"
+                + (f" [{' | '.join(extra)}]" if extra else "")
+                + f" | S/R {sw.get('nearest_support', 'N/A')}/{sw.get('nearest_resistance', 'N/A')}"
+                + f" | Fib {fib.get('nearest_fib', 'N/A')}"
+                + f" | Diag {tr.get('diagonal_support', 'N/A')}/{tr.get('diagonal_resistance', 'N/A')}"
+            )
+
+        lines.append("<b>🧭 구조/추세</b>")
+        for symbol, row in symbol_rows:
+            swing, position, _ = _mode_views(row)
+            lines.append(f"- <b>{symbol}</b> { _line_for_mode(swing, 'SWING') }")
+            lines.append(f"  - { _line_for_mode(position, 'POSITION') }")
+
+        lines.append("<b>📐 빗각·지지/저항</b>")
+        for symbol, row in symbol_rows:
+            swing, _, _ = _mode_views(row)
+            tf = swing.get("primary_tf", "4h")
+            tr4h = swing.get(f"trendlines_{tf}", {}) or {}
+            sw4h = swing.get(f"swing_levels_{tf}", {}) or {}
+            lines.append(
+                f"- <b>{symbol}</b> 빗각 S/R: "
+                f"{tr4h.get('diagonal_support', 'N/A')} / {tr4h.get('diagonal_resistance', 'N/A')} | "
+                f"수평 S/R: {sw4h.get('nearest_support', 'N/A')} / {sw4h.get('nearest_resistance', 'N/A')}"
+            )
+
+        lines.append("<b>🧮 피보나치/변곡</b>")
+        for symbol, row in symbol_rows:
+            swing, _, _ = _mode_views(row)
+            tf = swing.get("primary_tf", "4h")
+            fib4h = swing.get(f"fibonacci_{tf}", {}) or {}
+            lines.append(
+                f"- <b>{symbol}</b> fib={fib4h.get('nearest_fib', 'N/A')} "
+                f"(0.5={fib4h.get('fib_500', 'N/A')}, 0.618={fib4h.get('fib_618', 'N/A')}, "
+                f"0.705={fib4h.get('fib_705', 'N/A')}, 0.786={fib4h.get('fib_786', 'N/A')})"
+            )
+
+        lines.append("<b>⚠️ 파생 리스크</b>")
         for symbol, row in symbol_rows:
             price = row.get("price")
             funding = row.get("funding_rate")
             vol = row.get("volatility")
-
             price_txt = f"${price:,.2f}" if isinstance(price, (int, float)) else "N/A"
             funding_txt = f"{funding:+.5f}" if isinstance(funding, (int, float)) else "N/A"
             vol_txt = f"{vol:+.2f}%" if isinstance(vol, (int, float)) else "N/A"
+            lines.append(f"- <b>{symbol}</b> 가격 {price_txt} | 펀딩 {funding_txt} | 변동성 {vol_txt}")
 
-            lines.append(f"- <b>{symbol}</b> 가격 {price_txt} | 펀딩 {funding_txt} | 24h 변동 {vol_txt}")
+        lines.append("<b>🧩 실행 레벨</b>")
+        for symbol, row in symbol_rows:
+            swing, _, _ = _mode_views(row)
+            tf = swing.get("primary_tf", "4h")
+            sw4h = swing.get(f"swing_levels_{tf}", {}) or {}
+            support = sw4h.get("nearest_support", "N/A")
+            resistance = sw4h.get("nearest_resistance", "N/A")
+            invalidation = support
+            lines.append(f"- <b>{symbol}</b> 지지 {support} | 저항 {resistance} | 무효화 트리거 {invalidation}")
+
+        lines.append("<b>🔎 이벤트 상세</b>")
+        any_event = False
+        for symbol, row in symbol_rows:
+            _, _, events = _mode_views(row)
+            if isinstance(events, dict) and events.get("has_event"):
+                any_event = True
+                items = events.get("event_items", []) or []
+                if items:
+                    lines.append(f"- <b>{symbol}</b> " + "; ".join(str(x) for x in items[:3]))
+        if not any_event:
+            lines.append("- 이번 사이클 이벤트 트리거 없음 (기본 요약만 유지)")
 
         intel = str((indicators or {}).get("TELEGRAM_INTEL", "") or "").strip()
         if intel and "주요 뉴스 없음" not in intel:
-            brief = intel[:300] + ("..." if len(intel) > 300 else "")
-            lines.append(f"- <b>뉴스 인텔</b>: {brief}")
-        else:
-            lines.append("- <b>뉴스 인텔</b>: 최근 1시간 내 주요 뉴스 없음")
+            brief = intel[:240] + ("..." if len(intel) > 240 else "")
+            lines.append(f"- <i>뉴스 인텔 요약: {brief}</i>")
 
         lines.append(f"- <i>생성 시각(UTC): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}</i>")
         return "\n".join(lines)
-
-
 market_monitor_agent = MarketMonitorAgent()
+

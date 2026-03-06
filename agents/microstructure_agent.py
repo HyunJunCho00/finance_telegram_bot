@@ -26,6 +26,7 @@ Confidence 공식:
 
 import re
 from loguru import logger
+from processors.math_engine import calculate_z_score
 
 
 class MicrostructureAgent:
@@ -40,7 +41,12 @@ class MicrostructureAgent:
     SPREAD_CRISIS = 15.0       # bps — breakdown / flash crash risk
     SLIPPAGE_HIGH = 0.10       # % — large order impact
 
-    def analyze(self, microstructure_context: str = "", mode: str = "SWING") -> dict:
+    def analyze(
+        self,
+        microstructure_context: str = "",
+        mode: str = "SWING",
+        micro_stats: dict = None,  # 7-day stats: {imbalance_mean, imbalance_std, spread_mean, spread_std}
+    ) -> dict:
         """Deterministic quantitative microstructure analysis.
 
         Returns the same JSON schema as the old LLM-based agent for drop-in compatibility.
@@ -50,6 +56,8 @@ class MicrostructureAgent:
             "confidence": 0.0,
             "imbalance": 0.0,
             "spread_bps": 0.0,
+            "imbalance_z": None,   # Z-Score vs 7-day baseline (None if stats unavailable)
+            "spread_z": None,
             "directional_bias": "NEUTRAL",
             "signal_quality": "LOW",      # LOW | MEDIUM | HIGH
             "rationale": "no microstructure data",
@@ -79,6 +87,21 @@ class MicrostructureAgent:
             result["imbalance"] = round(imbalance, 4)
             result["spread_bps"] = round(spread_bps, 3)
 
+            # ── Z-Score 계산 (동적 임계값용) ──────────────────────────────────
+            imb_z = None
+            spread_z = None
+            if micro_stats and isinstance(micro_stats, dict):
+                _imb_m   = micro_stats.get("imbalance_mean")
+                _imb_s   = micro_stats.get("imbalance_std")
+                _spd_m   = micro_stats.get("spread_mean")
+                _spd_s   = micro_stats.get("spread_std")
+                if _imb_m is not None and _imb_s and _imb_s > 0:
+                    imb_z = calculate_z_score(abs(imbalance), abs(_imb_m), _imb_s)
+                    result["imbalance_z"] = round(imb_z, 2)
+                if _spd_m is not None and _spd_s and _spd_s > 0:
+                    spread_z = calculate_z_score(spread_bps, _spd_m, _spd_s)
+                    result["spread_z"] = round(spread_z, 2)
+
             # ── Liquidity multiplier (spread-based) ───────────────────────────
             if spread_bps == 0 or spread_bps < self.SPREAD_TIGHT:
                 liq_mult = 1.2
@@ -95,21 +118,24 @@ class MicrostructureAgent:
 
             result["signal_quality"] = liq_label
 
-            # ── Spread crisis (independent of imbalance) ───────────────────────
-            if spread_bps > self.SPREAD_CRISIS:
+            # ── Spread crisis: 절대값 OR Z ≥ 3.0 (평소 대비 3배 이상 확대) ─────
+            spread_crisis = (spread_bps > self.SPREAD_CRISIS) or (spread_z is not None and spread_z >= 3.0)
+            if spread_crisis:
                 result["anomaly"] = "microstructure_breakdown"
-                result["confidence"] = min(spread_bps / 20.0, 1.0)
+                result["confidence"] = min(spread_bps / 20.0, 1.0) if spread_bps > 0 else 0.8
                 result["directional_bias"] = "NEUTRAL"
+                z_note = f" Z={spread_z:.1f}" if spread_z is not None else ""
                 result["rationale"] = (
-                    f"Spread {spread_bps:.1f}bps — liquidity crisis level. "
+                    f"Spread {spread_bps:.1f}bps{z_note} — 유동성 고갈 수준. "
                     f"Flash crash / large OTC block risk. Avoid market orders."
                 )
                 return result
 
-            # ── Imbalance signal ──────────────────────────────────────────────
+            # ── Imbalance 게이트: Z ≥ 2.5 OR 절대값 ≥ IMBALANCE_STRONG ────────
             abs_imb = abs(imbalance)
+            imb_gate = (imb_z is not None and imb_z >= 2.5) or (abs_imb >= self.IMBALANCE_STRONG)
 
-            if abs_imb >= self.IMBALANCE_STRONG:
+            if imb_gate:
                 # Spoofing check: extreme imbalance on wide spread = likely spoofed
                 if abs_imb >= self.IMBALANCE_EXTREME and spread_bps > self.SPREAD_WIDE:
                     result["anomaly"] = "potential_spoofing"

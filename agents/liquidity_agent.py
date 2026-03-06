@@ -35,6 +35,7 @@ Confidence 공식:
 import re
 import math
 from loguru import logger
+from processors.math_engine import calculate_z_score
 
 
 class LiquidityAgent:
@@ -56,7 +57,8 @@ class LiquidityAgent:
         liquidation_context: str = "",
         mode: str = "SWING",
         funding_sma: float = None,   # 7-day average funding rate
-        total_oi: float = None       # Total Open Interest
+        total_oi: float = None,      # Total Open Interest
+        liq_stats: dict = None       # 7-day hourly stats: {"mean": float, "std": float}
     ) -> dict:
         """Quantitative liquidity signal extraction.
 
@@ -69,6 +71,7 @@ class LiquidityAgent:
             "directional_bias": "NEUTRAL",
             "liq_dominant_usd": 0.0,
             "liq_side": "none",
+            "liq_z_score": None,     # Z-Score vs 7-day hourly baseline (None if stats unavailable)
             "oi_status": "UNKNOWN",
             "mfi_status": "UNKNOWN",
             "rationale": "no data",
@@ -102,7 +105,20 @@ class LiquidityAgent:
                 liq_major = self.LIQ_MAJOR
                 liq_extreme = self.LIQ_EXTREME
 
-            if total_usd > liq_minor:
+            # ── Z-Score 기반 동적 게이트 ────────────────────────────────────────
+            # liq_stats 제공 시: Z >= 2.0 (상위 2.3%) 이면 분석 진입
+            # 미제공 시: 기존 static liq_minor 기준으로 fallback
+            liq_z = None
+            if liq_stats and isinstance(liq_stats, dict):
+                _mean = liq_stats.get("mean")
+                _std  = liq_stats.get("std")
+                if _mean is not None and _std is not None and _std > 0:
+                    liq_z = calculate_z_score(total_usd, _mean, _std)
+                    result["liq_z_score"] = round(liq_z, 2)
+
+            gate_passed = (liq_z is not None and liq_z >= 2.0) or (liq_z is None and total_usd > liq_minor)
+
+            if gate_passed:
                 long_ratio = long_usd / max(total_usd, 1)
                 short_ratio = short_usd / max(total_usd, 1)
 
@@ -135,15 +151,29 @@ class LiquidityAgent:
 
                 result["liq_dominant_usd"] = round(dominant_usd, 0)
 
-                # Score: log scale capped at 1.0
-                liq_score = min(math.log10(max(1, dominant_usd / liq_major + 1)) / 1.0, 0.6)
-
-                if total_usd >= liq_extreme:
-                    result["anomaly"] = "liquidation_cascade_extreme"
-                elif total_usd >= liq_major:
-                    result["anomaly"] = "liquidation_cascade"
+                # ── Score: Z-Score 우선, fallback log-scale ─────────────────────
+                if liq_z is not None:
+                    # Z=2.0 → 0.0, Z=3.5 → 0.5, Z=5.0 → 0.6 (capped)
+                    liq_score = min(max((liq_z - 2.0) / 3.0, 0.0), 0.6)
+                    signals.append(f"Liq Z={liq_z:.2f} (≥2.5 → cascade, ≥3.5 → extreme)")
                 else:
-                    result["anomaly"] = "liquidation_minor"
+                    liq_score = min(math.log10(max(1, dominant_usd / liq_major + 1)) / 1.0, 0.6)
+
+                # ── Anomaly 분류: Z-Score 우선, fallback 절대값 ─────────────────
+                if liq_z is not None:
+                    if liq_z >= 3.5:
+                        result["anomaly"] = "liquidation_cascade_extreme"
+                    elif liq_z >= 2.5:
+                        result["anomaly"] = "liquidation_cascade"
+                    else:
+                        result["anomaly"] = "liquidation_minor"
+                else:
+                    if total_usd >= liq_extreme:
+                        result["anomaly"] = "liquidation_cascade_extreme"
+                    elif total_usd >= liq_major:
+                        result["anomaly"] = "liquidation_cascade"
+                    else:
+                        result["anomaly"] = "liquidation_minor"
 
         except Exception as e:
             logger.warning(f"LiquidityAgent liq parse error: {e}")

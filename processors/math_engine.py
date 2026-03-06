@@ -1548,3 +1548,15 @@ class MathEngine:
 
 
 math_engine = MathEngine()
+
+
+def calculate_z_score(current: float, mean: float, std: float, min_std: float = 1e-9) -> float:
+    """Z-Score: (current − mean) / std.  근접-제로 std를 안전하게 처리.
+
+    해석 기준:
+      |z| >= 3.5 → EXTREME  (상위/하위 0.02%)
+      |z| >= 2.5 → ANOMALY  (상위/하위 0.6%)
+      |z| >= 2.0 → ELEVATED (상위/하위 2.3%)
+      |z| >= 1.0 → NOTABLE  (상위/하위 15.9%)
+    """
+    return (current - mean) / max(abs(std), min_std)
