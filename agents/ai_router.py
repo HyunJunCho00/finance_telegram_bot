@@ -198,7 +198,7 @@ class AIClient:
             "rag_extraction": ("groq", settings.MODEL_RAG_EXTRACTION, settings.MAX_INPUT_CHARS_RAG_EXTRACTION),
             "news_summarize": ("groq", settings.MODEL_NEWS_SUMMARIZE, 10000),
             "news_cluster": ("groq", settings.MODEL_NEWS_CLUSTER, 12000),
-            "news_brief_final": ("cerebras", settings.MODEL_NEWS_FINAL, 12000),
+            "news_brief_final": ("groq", settings.MODEL_NEWS_FINAL, 12000),
             "post_mortem": ("groq", settings.MODEL_RAG_EXTRACTION, 15000),
             "feedback": ("groq", settings.MODEL_RAG_EXTRACTION, 15000),
             "monitor_hourly": ("cerebras", settings.MODEL_MONITOR_HOURLY, 8000),

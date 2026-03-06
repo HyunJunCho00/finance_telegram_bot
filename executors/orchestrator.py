@@ -301,9 +301,21 @@ def node_context_gathering(state: AnalysisState) -> dict:
         return db_updates
 
     def fetch_stats_context():
-        """Z-Score 계산용 역사적 통계 수집 (7일 청산, 마이크로스트럭처, 24h DVOL)."""
+        """Z-Score 계산용 역사적 통계 수집 (7일 청산, 마이크로스트럭처, 7일 DVOL).
+
+        기관급 기준:
+          - Liq  : 7일 hourly resample (168개). std < $5M이면 데이터 희박 → static fallback
+          - Micro: 7일 hourly snapshot (168개). 유효 샘플 >= 30 필요
+          - DVOL : 7일 hourly (168개). std < 2.0 이면 flat → static fallback
+                   (VIX 유사 지표: 7일 이하 lookback은 regime 변화 감지 불가)
+        """
         stats = {}
         currency = symbol[:-4] if symbol.endswith("USDT") else symbol
+
+        # 기관 최소 std 기준: 이 이하면 rolling 창이 너무 좁거나 데이터 희박
+        MIN_LIQ_STD_USD = 5_000_000   # $5M  — 이하이면 z-score 신뢰 불가
+        MIN_DVOL_STD    = 2.0          # 2pt  — 7일간 DVOL이 2pt도 안 움직이면 flat
+        MIN_PCR_STD     = 0.05         # 0.05 — PCR이 5bp도 안 움직이면 flat
 
         # ── 1. Liquidation 7-day hourly stats ─────────────────────────────
         try:
@@ -314,13 +326,21 @@ def node_context_gathering(state: AnalysisState) -> dict:
                     .resample("1h").sum()
                 )
                 hourly["total"] = hourly["long_liq_usd"] + hourly["short_liq_usd"]
-                stats["liq_mean"] = float(hourly["total"].mean())
-                stats["liq_std"]  = float(hourly["total"].std())
-                logger.debug(f"[Stats] liq mean=${stats['liq_mean']:,.0f} std=${stats['liq_std']:,.0f}")
+                liq_mean = float(hourly["total"].mean())
+                liq_std  = float(hourly["total"].std())
+                if liq_std >= MIN_LIQ_STD_USD:
+                    stats["liq_mean"] = liq_mean
+                    stats["liq_std"]  = liq_std
+                    logger.debug(f"[Stats] liq mean=${liq_mean:,.0f} std=${liq_std:,.0f}")
+                else:
+                    logger.warning(
+                        f"[Stats] liq_std ${liq_std:,.0f} < ${MIN_LIQ_STD_USD:,.0f} "
+                        f"— 데이터 희박, static fallback 사용"
+                    )
         except Exception as e:
             logger.warning(f"[Stats] liq error: {e}")
 
-        # ── 2. Microstructure 7-day stats (최대 168개 hourly snapshot) ────
+        # ── 2. Microstructure 7-day stats (최소 30개 hourly snapshot) ─────
         try:
             rows = (
                 db.client.table("microstructure_data")
@@ -330,35 +350,60 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 .limit(168)
                 .execute()
             )
-            if rows.data and len(rows.data) >= 10:
+            if rows.data and len(rows.data) >= 30:  # 30개 미만이면 std 불안정
                 imbs    = [abs(float(r.get("orderbook_imbalance") or 0)) for r in rows.data]
                 spreads = [float(r.get("spread_bps") or 0) for r in rows.data]
                 stats["imbalance_mean"] = float(np.mean(imbs))
                 stats["imbalance_std"]  = float(np.std(imbs))
                 stats["spread_mean"]    = float(np.mean(spreads))
                 stats["spread_std"]     = float(np.std(spreads))
+            elif rows.data:
+                logger.warning(
+                    f"[Stats] micro samples={len(rows.data)} < 30 — std 불안정, static fallback"
+                )
         except Exception as e:
             logger.warning(f"[Stats] micro error: {e}")
 
-        # ── 3. DVOL/PCR 24h stats ─────────────────────────────────────────
+        # ── 3. DVOL/PCR 7-day hourly stats (기관 표준: 7~30일 lookback) ───
+        # 24h lookback은 장중 노이즈만 포착 → regime 변화 감지 불가
         try:
             rows = (
                 db.client.table("deribit_data")
                 .select("dvol,pcr_oi")
                 .eq("currency", currency)
                 .order("timestamp", desc=True)
-                .limit(24)
+                .limit(168)   # 7일 × 24h (기관 표준 최단 lookback)
                 .execute()
             )
-            if rows.data and len(rows.data) >= 5:
-                dvols = [float(r["dvol"])    for r in rows.data if r.get("dvol")]
-                pcrs  = [float(r["pcr_oi"])  for r in rows.data if r.get("pcr_oi")]
+            if rows.data and len(rows.data) >= 24:  # 최소 1일치 hourly 필요
+                dvols = [float(r["dvol"])   for r in rows.data if r.get("dvol")]
+                pcrs  = [float(r["pcr_oi"]) for r in rows.data if r.get("pcr_oi")]
                 if dvols:
-                    stats["dvol_mean"] = float(np.mean(dvols))
-                    stats["dvol_std"]  = float(np.std(dvols))
+                    dvol_mean = float(np.mean(dvols))
+                    dvol_std  = float(np.std(dvols))
+                    if dvol_std >= MIN_DVOL_STD:
+                        stats["dvol_mean"] = dvol_mean
+                        stats["dvol_std"]  = dvol_std
+                    else:
+                        logger.warning(
+                            f"[Stats] dvol_std={dvol_std:.2f} < {MIN_DVOL_STD} "
+                            f"— DVOL flat, static fallback"
+                        )
                 if pcrs:
-                    stats["pcr_mean"] = float(np.mean(pcrs))
-                    stats["pcr_std"]  = float(np.std(pcrs))
+                    pcr_mean = float(np.mean(pcrs))
+                    pcr_std  = float(np.std(pcrs))
+                    if pcr_std >= MIN_PCR_STD:
+                        stats["pcr_mean"] = pcr_mean
+                        stats["pcr_std"]  = pcr_std
+                    else:
+                        logger.warning(
+                            f"[Stats] pcr_std={pcr_std:.4f} < {MIN_PCR_STD} "
+                            f"— PCR flat, static fallback"
+                        )
+            elif rows.data:
+                logger.warning(
+                    f"[Stats] deribit samples={len(rows.data)} < 24 — static fallback"
+                )
         except Exception as e:
             logger.warning(f"[Stats] dvol error: {e}")
 

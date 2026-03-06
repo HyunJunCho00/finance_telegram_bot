@@ -159,7 +159,7 @@ class Settings(BaseSettings):
     MODEL_RAG_EXTRACTION: str = "openai/gpt-oss-20b"
     MODEL_NEWS_SUMMARIZE: str = "llama3.1-8b"
     MODEL_NEWS_CLUSTER: str = "qwen/qwen3-32b"
-    MODEL_NEWS_FINAL: str = "gpt-oss-120b"
+    MODEL_NEWS_FINAL: str = "openai/gpt-oss-120b"
     MODEL_NEWS_FINAL_FALLBACK: str = "openai/gpt-oss-20b"
 
     # 7. monitor_hourly OpenRouter (free)
