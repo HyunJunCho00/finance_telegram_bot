@@ -197,6 +197,8 @@ class AIClient:
             "risk_eval_fallback": ("groq", settings.MODEL_RISK_EVAL_FALLBACK, 10000),
             "rag_extraction": ("groq", settings.MODEL_RAG_EXTRACTION, settings.MAX_INPUT_CHARS_RAG_EXTRACTION),
             "news_summarize": ("groq", settings.MODEL_NEWS_SUMMARIZE, 10000),
+            "news_cluster": ("groq", settings.MODEL_NEWS_CLUSTER, 12000),
+            "news_brief_final": ("cerebras", settings.MODEL_NEWS_FINAL, 12000),
             "post_mortem": ("groq", settings.MODEL_RAG_EXTRACTION, 15000),
             "feedback": ("groq", settings.MODEL_RAG_EXTRACTION, 15000),
             "monitor_hourly": ("cerebras", settings.MODEL_MONITOR_HOURLY, 8000),
@@ -274,7 +276,7 @@ class AIClient:
             )
         if backend == "cerebras":
             return self._handle_cerebras_backend(
-                model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64
+                model_id, role, system_prompt, msg, max_tokens, temperature, chart_image_b64
             )
         if backend == "groq":
             return self._handle_groq_backend(
@@ -386,6 +388,7 @@ class AIClient:
     def _handle_cerebras_backend(
         self,
         model_id: str,
+        role: str,
         system_prompt: str,
         msg: str,
         max_tokens: int,
@@ -406,9 +409,14 @@ class AIClient:
         if result:
             return result
         logger.warning(f"Cerebras failed for {model_id}, falling back to Groq")
+        fallback_model = (
+            settings.MODEL_NEWS_FINAL_FALLBACK
+            if role == "news_brief_final"
+            else settings.MODEL_RISK_EVAL_FALLBACK
+        )
         return self._generate_openai_compat(
             self.groq_client,
-            settings.MODEL_RISK_EVAL_FALLBACK,
+            fallback_model,
             system_prompt,
             msg,
             max_tokens,

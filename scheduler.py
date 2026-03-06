@@ -23,6 +23,7 @@ from loguru import logger
 import sys
 import threading
 import json
+import base64
 from datetime import datetime, timezone
 
 
@@ -160,6 +161,7 @@ def job_routine_market_status():
         telegram_intel = "최근 1시간 내 주요 뉴스 없음"
         try:
             from agents.ai_router import ai_client
+            import time as _time
 
             tg_messages = db.get_recent_telegram_messages(hours=1) or []
             tg_items = []
@@ -167,7 +169,7 @@ def job_routine_market_status():
                 tg_items.append({
                     "source_type": "telegram",
                     "source": msg.get("channel", "telegram"),
-                    "text": str(msg.get("text", ""))[:260],
+                    "text": str(msg.get("text", "")),
                     "timestamp": msg.get("timestamp") or msg.get("created_at", ""),
                 })
 
@@ -186,8 +188,8 @@ def job_routine_market_status():
                 ext_items.append({
                     "source_type": "external",
                     "source": a.get("source", "unknown"),
-                    "title": str(a.get("title", ""))[:180],
-                    "description": str(a.get("description", ""))[:220],
+                    "title": str(a.get("title", "")),
+                    "description": str(a.get("description", "")),
                     "url": link,
                 })
                 if len(ext_items) >= 12:
@@ -202,22 +204,116 @@ def job_routine_market_status():
                     "external_news": ext_items,
                     "utc_now": datetime.now(timezone.utc).isoformat(),
                 }
-                prompt = (
-                    "Summarize the market situation from BOTH Telegram and external news.\n"
-                    "Output in Korean, concise, max 180 words.\n"
-                    "For every claim, include source tags in this style:\n"
+                cluster_prompt = (
+                    "Select high-impact crypto news from the input and merge duplicates.\n"
+                    "Return STRICT JSON only with this schema:\n"
+                    "{\n"
+                    "  \"selected\": [\n"
+                    "    {\n"
+                    "      \"headline\": \"short title\",\n"
+                    "      \"claim\": \"single factual claim\",\n"
+                    "      \"sources\": [\"[source - url_or_telegram]\"],\n"
+                    "      \"impact\": 1-5,\n"
+                    "      \"why\": \"one short reason\"\n"
+                    "    }\n"
+                    "  ]\n"
+                    "}\n"
+                    "Rules:\n"
+                    "- Keep at most 6 items.\n"
+                    "- Merge duplicate events and union their sources.\n"
+                    "- Use only provided evidence. No fabrication."
+                )
+                cluster_raw = ai_client.generate_response(
+                    system_prompt="You are a strict JSON market-news selector.",
+                    user_message=f"{cluster_prompt}\n\nINPUT_JSON:\n{json.dumps(payload, ensure_ascii=False)}",
+                    temperature=0.1,
+                    max_tokens=1300,
+                    role="news_cluster",
+                ) or ""
+
+                def _extract_json_object(raw: str) -> dict:
+                    if not raw:
+                        return {}
+                    raw = raw.strip()
+                    try:
+                        obj = json.loads(raw)
+                        return obj if isinstance(obj, dict) else {}
+                    except Exception:
+                        pass
+                    start = raw.find("{")
+                    if start < 0:
+                        return {}
+                    depth = 0
+                    in_string = False
+                    escape = False
+                    for i in range(start, len(raw)):
+                        ch = raw[i]
+                        if escape:
+                            escape = False
+                            continue
+                        if ch == "\\":
+                            escape = True
+                            continue
+                        if ch == '"':
+                            in_string = not in_string
+                            continue
+                        if in_string:
+                            continue
+                        if ch == "{":
+                            depth += 1
+                        elif ch == "}":
+                            depth -= 1
+                            if depth == 0:
+                                block = raw[start:i + 1]
+                                try:
+                                    obj = json.loads(block)
+                                    return obj if isinstance(obj, dict) else {}
+                                except Exception:
+                                    return {}
+                    return {}
+
+                cluster_obj = _extract_json_object(cluster_raw)
+                selected_items = cluster_obj.get("selected", []) if isinstance(cluster_obj, dict) else []
+                if not isinstance(selected_items, list):
+                    selected_items = []
+                if not selected_items:
+                    selected_items = (ext_items[:4] + tg_items[:2])[:6]
+
+                _time.sleep(1.2)  # avoid burst-call spikes between stage 1 and stage 2
+
+                final_payload = {
+                    "selected_news": selected_items[:6],
+                    "utc_now": datetime.now(timezone.utc).isoformat(),
+                }
+                final_prompt = (
+                    "Write a concise Korean market briefing based ONLY on selected_news.\n"
+                    "Output plain text only, under 320 words.\n"
+                    "For each claim include at least one source tag.\n"
+                    "Source format example:\n"
                     "- [Bloomberg - https://example.com/...]\n"
-                    "- [Whale_Alert - telegram]\n"
-                    "If conflicting signals exist, mention the conflict explicitly.\n"
-                    "Do not invent sources or URLs. Use only provided input."
+                    "- [Lookonchain - telegram]\n"
+                    "If signals conflict, mention the conflict clearly.\n"
+                    "The final sentence MUST end with a full stop."
                 )
                 telegram_intel = ai_client.generate_response(
-                    system_prompt="You are a crypto news synthesis analyst. Return plain text only.",
-                    user_message=f"{prompt}\n\nINPUT_JSON:\n{json.dumps(payload, ensure_ascii=False)}",
+                    system_prompt="You are a crypto market briefing writer. No markdown fences.",
+                    user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(final_payload, ensure_ascii=False)}",
                     temperature=0.2,
                     max_tokens=900,
-                    role="news_summarize",
-                ) or "최근 1시간 내 주요 뉴스 없음"
+                    role="news_brief_final",
+                ) or ""
+
+                bad_ending = ("에서", "및", "또는", "-", ":", "(", "[", "{", "/", ",")
+                if not telegram_intel.strip() or telegram_intel.strip().endswith(bad_ending):
+                    logger.warning("news_brief_final returned empty/partial text, retrying once.")
+                    _time.sleep(1.0)
+                    telegram_intel = ai_client.generate_response(
+                        system_prompt="You are a crypto market briefing writer. No markdown fences.",
+                        user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(final_payload, ensure_ascii=False)}",
+                        temperature=0.1,
+                        max_tokens=900,
+                        role="news_brief_final",
+                    ) or "최근 1시간 내 주요 뉴스 없음"
             else:
                 telegram_intel = "최근 1시간 내 주요 뉴스 없음"
         except Exception as e:
@@ -233,17 +329,58 @@ def job_routine_market_status():
             # Message 1: News Briefing (only if news exists)
             if telegram_intel and "주요 뉴스 없음" not in telegram_intel:
                 news_header = "<b>📰 최근 1시간 뉴스 브리핑 (Synthesized)</b>"
-                asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"{news_header}\n\n{telegram_intel}"))
+                try:
+                    asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"{news_header}\n\n{telegram_intel}"))
+                except Exception as e:
+                    logger.warning(f"Routine news briefing send failed: {e}")
             
             # Message 2: Market Status Summary (Indicators)
             market_header = "<b>📊 주요 시장 지표 업데이트</b>"
             summary = market_monitor_agent.summarize_current_status(indicators)
             logger.success(f"Market Summary Generated:\n{summary}")
-            asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"{market_header}\n\n{summary}"))
+            try:
+                asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"{market_header}\n\n{summary}"))
+            except Exception as e:
+                logger.warning(f"Routine market status send failed: {e}")
 
 
     except Exception as e:
         logger.error(f"Routine market status job error: {e}")
+
+
+def job_hourly_swing_charts():
+    """Hourly Swing chart push for BTC/ETH to Telegram."""
+    try:
+        from bot.telegram_bot import trading_bot
+        if not trading_bot:
+            logger.warning("Hourly swing chart skipped: trading_bot unavailable")
+            return
+
+        from mcp_server.tools import mcp_tools
+        import asyncio
+
+        target_symbols = [s for s in settings.trading_symbols if s in ("BTCUSDT", "ETHUSDT")]
+        if not target_symbols:
+            target_symbols = settings.trading_symbols[:2]
+
+        for symbol in target_symbols:
+            try:
+                result = mcp_tools.get_chart_image(symbol, lane="swing")
+                if not isinstance(result, dict) or "chart_base64" not in result:
+                    logger.warning(f"Hourly swing chart failed for {symbol}: {result.get('error') if isinstance(result, dict) else 'unknown error'}")
+                    continue
+
+                chart_bytes = base64.b64decode(result["chart_base64"])
+                caption = (
+                    f"📈 <b>{symbol} SWING 차트 (정기 1시간)</b>\n"
+                    f"Lane: <code>swing</code>\n"
+                    f"Timeframe: <code>{result.get('timeframe', '4h')}</code>"
+                )
+                asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption))
+            except Exception as e:
+                logger.warning(f"Hourly swing chart send failed for {symbol}: {e}")
+    except Exception as e:
+        logger.error(f"Hourly swing charts job error: {e}")
 
 
 def job_24hour_evaluation():
@@ -504,6 +641,14 @@ def main():
         job_routine_market_status,
         CronTrigger(minute=20),
         id='job_market_status',
+        max_instances=1,
+    )
+
+    # Hourly Swing charts (BTC/ETH)
+    scheduler_config.scheduler.add_job(
+        job_hourly_swing_charts,
+        CronTrigger(minute=22),
+        id='job_hourly_swing_charts',
         max_instances=1,
     )
 

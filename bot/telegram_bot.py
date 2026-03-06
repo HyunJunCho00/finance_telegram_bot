@@ -244,14 +244,25 @@ class TradingBot:
         from telegram import Bot
         bot = Bot(token=self.bot_token)
         safe_text = self._sanitize_html_for_telegram(text)
-        await bot.send_message(chat_id=chat_id, text=safe_text, parse_mode='HTML')
+        try:
+            await bot.send_message(chat_id=chat_id, text=safe_text, parse_mode='HTML')
+        except Exception as e:
+            # LLM output may contain unsupported HTML; retry as plain text instead of dropping the update.
+            logger.warning(f"Telegram HTML send failed, retrying plain text: {e}")
+            plain_text = re.sub(r"<[^>]+>", "", safe_text)
+            await bot.send_message(chat_id=chat_id, text=plain_text)
 
     async def send_photo(self, chat_id: str, photo_bytes: bytes, caption: str = ""):
         """Send a photo via the bot API (stateless)."""
         from telegram import Bot
         bot = Bot(token=self.bot_token)
         safe_caption = self._sanitize_html_for_telegram(caption)
-        await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=safe_caption, parse_mode='HTML')
+        try:
+            await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=safe_caption, parse_mode='HTML')
+        except Exception as e:
+            logger.warning(f"Telegram photo HTML caption failed, retrying plain text caption: {e}")
+            plain_caption = re.sub(r"<[^>]+>", "", safe_caption)
+            await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=plain_caption)
 
     @staticmethod
     def _sanitize_html_for_telegram(text: str) -> str:

@@ -273,10 +273,83 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 temperature=0.4,
                 max_tokens=500,
             )
-            return response or "현재 시장 지표 요약을 생성할 수 없습니다. (LLM 반환값 없음)"
+            if response and str(response).strip() and not self._is_suspiciously_truncated(response):
+                return response
+
+            logger.warning("MarketMonitorAgent.summarize returned empty or truncated response; retrying with alternate route.")
+            retry_resp = ai_client.generate_response(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                role="news_summarize",  # alternate provider route (Groq pool)
+                temperature=0.2,
+                max_tokens=550,
+            )
+            if retry_resp and str(retry_resp).strip() and not self._is_suspiciously_truncated(retry_resp):
+                return retry_resp
+
+            logger.warning("MarketMonitorAgent.summarize retry also failed/partial; using deterministic fallback summary.")
+            return self._build_fallback_summary(indicators)
         except Exception as e:
             logger.error(f"MarketMonitorAgent.summarize error: {e}")
-            return "시장 요약을 생성하지 못했습니다."
+            return self._build_fallback_summary(indicators)
+
+    def _is_suspiciously_truncated(self, text: str) -> bool:
+        """Heuristic guard: detect responses likely cut mid-sentence."""
+        s = (text or "").strip()
+        if not s:
+            return True
+
+        # Ends with an unfinished connector/postposition or abrupt separator.
+        bad_suffixes = ("에서", "및", "그리고", "또는", ":", "-", "(", "[", "{", "/", ",")
+        if s.endswith(bad_suffixes):
+            return True
+
+        # Unbalanced wrappers strongly suggest truncation.
+        if s.count("(") > s.count(")") or s.count("[") > s.count("]") or s.count("{") > s.count("}"):
+            return True
+
+        # If the final line is extremely short and looks abruptly cut, treat as partial.
+        last_line = s.splitlines()[-1].strip()
+        if len(last_line) <= 8 and not last_line.endswith((".", "!", "?", "…")):
+            return True
+
+        # Otherwise, avoid over-detecting normal Korean sentence endings.
+        return False
+
+    def _build_fallback_summary(self, indicators: dict) -> str:
+        """LLM fallback summary so hourly status never becomes empty."""
+        lines = []
+        lines.append("<b>시장 상태 요약 (Fallback)</b>")
+
+        symbol_rows = []
+        for key, value in (indicators or {}).items():
+            if key == "TELEGRAM_INTEL" or not isinstance(value, dict):
+                continue
+            symbol_rows.append((key, value))
+
+        if not symbol_rows:
+            return "<b>시장 상태 요약 (Fallback)</b>\n- 수집된 지표가 없어 요약할 수 없습니다."
+
+        for symbol, row in symbol_rows:
+            price = row.get("price")
+            funding = row.get("funding_rate")
+            vol = row.get("volatility")
+
+            price_txt = f"${price:,.2f}" if isinstance(price, (int, float)) else "N/A"
+            funding_txt = f"{funding:+.5f}" if isinstance(funding, (int, float)) else "N/A"
+            vol_txt = f"{vol:+.2f}%" if isinstance(vol, (int, float)) else "N/A"
+
+            lines.append(f"- <b>{symbol}</b> 가격 {price_txt} | 펀딩 {funding_txt} | 24h 변동 {vol_txt}")
+
+        intel = str((indicators or {}).get("TELEGRAM_INTEL", "") or "").strip()
+        if intel and "주요 뉴스 없음" not in intel:
+            brief = intel[:300] + ("..." if len(intel) > 300 else "")
+            lines.append(f"- <b>뉴스 인텔</b>: {brief}")
+        else:
+            lines.append("- <b>뉴스 인텔</b>: 최근 1시간 내 주요 뉴스 없음")
+
+        lines.append(f"- <i>생성 시각(UTC): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}</i>")
+        return "\n".join(lines)
 
 
 market_monitor_agent = MarketMonitorAgent()
