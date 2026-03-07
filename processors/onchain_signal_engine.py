@@ -48,7 +48,7 @@ class OnChainSignalEngine:
             return None
         return mean(vals)
 
-    def _score_valuation(self, mvrv: Optional[float], price_vs_realized_pct: Optional[float]) -> tuple[float, str]:
+    def _score_valuation(self, mvrv: Optional[float]) -> tuple[float, str]:
         score = 0.0
         state = "neutral"
 
@@ -68,16 +68,6 @@ class OnChainSignalEngine:
             else:
                 score -= 38
                 state = "overheated"
-
-        if price_vs_realized_pct is not None:
-            if price_vs_realized_pct < -10:
-                score += 18
-            elif price_vs_realized_pct < 5:
-                score += 8
-            elif price_vs_realized_pct > 80:
-                score -= 18
-            elif price_vs_realized_pct > 35:
-                score -= 10
 
         return max(-50.0, min(50.0, score)), state
 
@@ -113,18 +103,18 @@ class OnChainSignalEngine:
             return -10.0, "softening"
         return -22.0, "weakening"
 
-    def _score_eth_structure(self, eip1559_ratio_7d_30d: Optional[float], asset: str) -> tuple[float, str]:
-        if asset != "eth":
+    def _score_structure(self, hash_rate_ratio_7d_30d: Optional[float], asset: str) -> tuple[float, str]:
+        if asset != "btc":
             return 0.0, "n/a"
-        if eip1559_ratio_7d_30d is None:
+        if hash_rate_ratio_7d_30d is None:
             return 0.0, "unknown"
-        if eip1559_ratio_7d_30d >= 1.10:
+        if hash_rate_ratio_7d_30d >= 1.08:
             return 12.0, "supportive"
-        if eip1559_ratio_7d_30d >= 1.00:
+        if hash_rate_ratio_7d_30d >= 1.01:
             return 5.0, "neutral_positive"
-        if eip1559_ratio_7d_30d >= 0.90:
+        if hash_rate_ratio_7d_30d >= 0.94:
             return 0.0, "neutral"
-        if eip1559_ratio_7d_30d >= 0.80:
+        if hash_rate_ratio_7d_30d >= 0.87:
             return -5.0, "soft"
         return -12.0, "weak"
 
@@ -158,15 +148,21 @@ class OnChainSignalEngine:
         as_of_date = str(latest.get("time") or datetime.now(timezone.utc).date().isoformat())[:10]
 
         mvrv = self._series_value(rows, metric_aliases.get("mvrv", ""))
-        realized_cap_usd = self._series_value(rows, metric_aliases.get("realized_cap_usd", ""))
+        market_cap_usd = self._series_value(rows, metric_aliases.get("market_cap_usd", ""))
+        coinmetrics_price_usd = self._series_value(rows, metric_aliases.get("price_usd", ""))
         current_supply = self._series_value(rows, metric_aliases.get("current_supply", ""))
         exchange_supply = self._series_value(rows, metric_aliases.get("exchange_supply", ""))
         tx_count = self._series_value(rows, metric_aliases.get("tx_count", ""))
-        new_addresses = self._series_value(rows, metric_aliases.get("new_addresses", ""))
-        tx_eip1559_count = self._series_value(rows, metric_aliases.get("tx_eip1559_count", ""))
+        tx_transfer_count = self._series_value(rows, metric_aliases.get("tx_transfer_count", ""))
+        active_addresses = self._series_value(rows, metric_aliases.get("active_addresses", ""))
+        exchange_inflow_ntv = self._series_value(rows, metric_aliases.get("exchange_inflow_ntv", ""))
+        exchange_outflow_ntv = self._series_value(rows, metric_aliases.get("exchange_outflow_ntv", ""))
+        exchange_inflow_usd = self._series_value(rows, metric_aliases.get("exchange_inflow_usd", ""))
+        exchange_outflow_usd = self._series_value(rows, metric_aliases.get("exchange_outflow_usd", ""))
+        issuance_usd = self._series_value(rows, metric_aliases.get("issuance_usd", ""))
+        hash_rate = self._series_value(rows, metric_aliases.get("hash_rate", ""))
 
-        realized_price = self.ratio(realized_cap_usd, current_supply)
-        price_vs_realized_pct = self.pct_change(spot_price, realized_price)
+        effective_spot_price = spot_price if spot_price is not None else coinmetrics_price_usd
 
         exchange_supply_7d_delta = self.pct_change(
             self._series_value(rows, metric_aliases.get("exchange_supply", "")),
@@ -181,20 +177,32 @@ class OnChainSignalEngine:
         tx_30d_avg = self._rolling_mean(rows, metric_aliases.get("tx_count", ""), 30)
         tx_ratio = self.ratio(tx_7d_avg, tx_30d_avg)
 
-        new_7d_avg = self._rolling_mean(rows, metric_aliases.get("new_addresses", ""), 7)
-        new_30d_avg = self._rolling_mean(rows, metric_aliases.get("new_addresses", ""), 30)
-        new_ratio = self.ratio(new_7d_avg, new_30d_avg)
+        transfer_7d_avg = self._rolling_mean(rows, metric_aliases.get("tx_transfer_count", ""), 7)
+        transfer_30d_avg = self._rolling_mean(rows, metric_aliases.get("tx_transfer_count", ""), 30)
+        transfer_ratio = self.ratio(transfer_7d_avg, transfer_30d_avg)
 
-        eip_7d_avg = self._rolling_mean(rows, metric_aliases.get("tx_eip1559_count", ""), 7)
-        eip_30d_avg = self._rolling_mean(rows, metric_aliases.get("tx_eip1559_count", ""), 30)
-        eip_ratio = self.ratio(eip_7d_avg, eip_30d_avg)
+        active_7d_avg = self._rolling_mean(rows, metric_aliases.get("active_addresses", ""), 7)
+        active_30d_avg = self._rolling_mean(rows, metric_aliases.get("active_addresses", ""), 30)
+        active_ratio = self.ratio(active_7d_avg, active_30d_avg)
 
-        valuation_score, valuation_state = self._score_valuation(mvrv, price_vs_realized_pct)
+        hash_rate_7d_avg = self._rolling_mean(rows, metric_aliases.get("hash_rate", ""), 7)
+        hash_rate_30d_avg = self._rolling_mean(rows, metric_aliases.get("hash_rate", ""), 30)
+        hash_rate_ratio = self.ratio(hash_rate_7d_avg, hash_rate_30d_avg)
+
+        netflow_ntv = None
+        if exchange_inflow_ntv is not None and exchange_outflow_ntv is not None:
+            netflow_ntv = exchange_inflow_ntv - exchange_outflow_ntv
+
+        netflow_usd = None
+        if exchange_inflow_usd is not None and exchange_outflow_usd is not None:
+            netflow_usd = exchange_inflow_usd - exchange_outflow_usd
+
+        valuation_score, valuation_state = self._score_valuation(mvrv)
         flow_score, flow_state = self._score_flow(exchange_supply_30d_delta)
-        activity_score, activity_state = self._score_activity(tx_ratio, new_ratio)
-        eth_score, eth_state = self._score_eth_structure(eip_ratio, asset)
+        activity_score, activity_state = self._score_activity(tx_ratio, active_ratio)
+        structure_score, structure_state = self._score_structure(hash_rate_ratio, asset)
 
-        bias_score = (0.45 * valuation_score) + (0.30 * flow_score) + (0.15 * activity_score) + (0.10 * eth_score)
+        bias_score = (0.45 * valuation_score) + (0.30 * flow_score) + (0.15 * activity_score) + (0.10 * structure_score)
         bias_score = max(-100.0, min(100.0, bias_score))
 
         if bias_score >= 35:
@@ -207,7 +215,7 @@ class OnChainSignalEngine:
         chase_long_blocked = valuation_state in {"elevated", "overheated"} or flow_state in {"distribution", "heavy_distribution"}
         allow_long = not (bias_score <= -55 or (valuation_state == "overheated" and flow_state in {"distribution", "heavy_distribution"}))
         allow_short = True
-        if asset == "eth" and risk_bias == "RISK_ON":
+        if asset == "btc" and risk_bias == "RISK_ON" and structure_state == "supportive":
             allow_short = False
 
         long_mult = 1.0
@@ -226,46 +234,71 @@ class OnChainSignalEngine:
 
         available_metrics = sum(
             1
-            for value in (mvrv, realized_cap_usd, current_supply, exchange_supply, tx_count, new_addresses, tx_eip1559_count)
+            for value in (
+                mvrv,
+                market_cap_usd,
+                effective_spot_price,
+                current_supply,
+                exchange_supply,
+                tx_count,
+                tx_transfer_count,
+                active_addresses,
+                exchange_inflow_ntv,
+                exchange_outflow_ntv,
+                issuance_usd,
+                hash_rate,
+            )
             if value is not None
         )
-        data_quality = self._determine_quality(as_of_date, available_metrics, 7)
+        data_quality = self._determine_quality(as_of_date, available_metrics, 12)
 
         raw_metrics = {
-            "spot_price_usd": spot_price,
+            "spot_price_usd": effective_spot_price,
+            "coinmetrics_price_usd": coinmetrics_price_usd,
             "mvrv": mvrv,
-            "realized_cap_usd": realized_cap_usd,
+            "market_cap_usd": market_cap_usd,
             "current_supply": current_supply,
             "exchange_supply": exchange_supply,
             "tx_count": tx_count,
-            "new_addresses": new_addresses,
-            "tx_eip1559_count": tx_eip1559_count,
+            "tx_transfer_count": tx_transfer_count,
+            "active_addresses": active_addresses,
+            "exchange_inflow_ntv": exchange_inflow_ntv,
+            "exchange_outflow_ntv": exchange_outflow_ntv,
+            "exchange_inflow_usd": exchange_inflow_usd,
+            "exchange_outflow_usd": exchange_outflow_usd,
+            "issuance_usd": issuance_usd,
+            "hash_rate": hash_rate,
             "metric_aliases": metric_aliases,
         }
         derived_features = {
-            "realized_price_usd": realized_price,
-            "price_vs_realized_pct": price_vs_realized_pct,
             "exchange_supply_7d_delta_pct": exchange_supply_7d_delta,
             "exchange_supply_30d_delta_pct": exchange_supply_30d_delta,
             "tx_count_7d_avg": tx_7d_avg,
             "tx_count_30d_avg": tx_30d_avg,
             "tx_count_ratio_7d_30d": tx_ratio,
-            "new_addresses_7d_avg": new_7d_avg,
-            "new_addresses_30d_avg": new_30d_avg,
-            "new_addresses_ratio_7d_30d": new_ratio,
-            "tx_eip1559_ratio_7d_30d": eip_ratio,
+            "tx_transfer_count_7d_avg": transfer_7d_avg,
+            "tx_transfer_count_30d_avg": transfer_30d_avg,
+            "tx_transfer_count_ratio_7d_30d": transfer_ratio,
+            "active_addresses_7d_avg": active_7d_avg,
+            "active_addresses_30d_avg": active_30d_avg,
+            "active_addresses_ratio_7d_30d": active_ratio,
+            "exchange_netflow_ntv": netflow_ntv,
+            "exchange_netflow_usd": netflow_usd,
+            "hash_rate_7d_avg": hash_rate_7d_avg,
+            "hash_rate_30d_avg": hash_rate_30d_avg,
+            "hash_rate_ratio_7d_30d": hash_rate_ratio,
             "component_scores": {
                 "valuation": valuation_score,
                 "flow": flow_score,
                 "activity": activity_score,
-                "eth_structure": eth_score,
+                "structure": structure_score,
             },
         }
         regime_flags = {
             "valuation_state": valuation_state,
             "flow_state": flow_state,
             "activity_state": activity_state,
-            "eth_state": eth_state,
+            "structure_state": structure_state,
             "allow_long": allow_long,
             "allow_short": allow_short,
             "long_size_multiplier": round(long_mult, 3),
@@ -302,14 +335,14 @@ class OnChainSignalEngine:
         parts = [
             f"On-chain ({as_of_date}, {stale_text}): bias={risk_bias} score={bias_score}.",
             f"MVRV={raw.get('mvrv')} valuation={flags.get('valuation_state')}.",
-            f"Price vs realized={derived.get('price_vs_realized_pct')}%.",
             f"Exchange supply 30d delta={derived.get('exchange_supply_30d_delta_pct')}% flow={flags.get('flow_state')}.",
             f"Tx ratio 7d/30d={derived.get('tx_count_ratio_7d_30d')} activity={flags.get('activity_state')}.",
+            f"Active addr ratio 7d/30d={derived.get('active_addresses_ratio_7d_30d')}.",
         ]
 
-        if snapshot.get("asset") == "eth":
+        if snapshot.get("asset") == "btc":
             parts.append(
-                f"EIP1559 ratio 7d/30d={derived.get('tx_eip1559_ratio_7d_30d')} eth_state={flags.get('eth_state')}."
+                f"Hash rate ratio 7d/30d={derived.get('hash_rate_ratio_7d_30d')} structure={flags.get('structure_state')}."
             )
 
         if flags:

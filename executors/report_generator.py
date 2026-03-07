@@ -100,7 +100,7 @@ class ReportGenerator:
                     f"Valuation: <code>{self._escape_html(flags.get('valuation_state', 'unknown'))}</code>"
                 ),
                 (
-                    f"Price vs Realized: <code>{self._fmt_num(derived.get('price_vs_realized_pct'), 2, '%')}</code> | "
+                    f"Active Addr 7d/30d: <code>{self._fmt_num(derived.get('active_addresses_ratio_7d_30d'), 3)}</code> | "
                     f"Exchange Supply 30d: <code>{self._fmt_num(derived.get('exchange_supply_30d_delta_pct'), 2, '%')}</code>"
                 ),
                 (
@@ -119,10 +119,10 @@ class ReportGenerator:
                 ),
             ])
 
-            if snapshot.get("asset") == "eth":
+            if snapshot.get("asset") == "btc":
                 lines.append(
-                    f"ETH Struct: <code>{self._fmt_num(derived.get('tx_eip1559_ratio_7d_30d'), 3)}</code> | "
-                    f"State: <code>{self._escape_html(flags.get('eth_state', 'unknown'))}</code>"
+                    f"BTC HashRate 7d/30d: <code>{self._fmt_num(derived.get('hash_rate_ratio_7d_30d'), 3)}</code> | "
+                    f"State: <code>{self._escape_html(flags.get('structure_state', 'unknown'))}</code>"
                 )
         else:
             lines.append("<i>No stored on-chain snapshot.</i>")

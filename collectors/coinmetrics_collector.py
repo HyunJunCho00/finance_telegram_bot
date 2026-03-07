@@ -22,12 +22,24 @@ class CoinMetricsCollector:
 
     METRIC_CANDIDATES = {
         "mvrv": ["CapMVRVCur"],
-        "realized_cap_usd": ["CapRealUSD"],
+        "market_cap_usd": ["CapMrktCurUSD"],
+        "price_usd": ["PriceUSD"],
         "current_supply": ["SplyCur"],
-        "exchange_supply": ["SplyExNtv", "SplyExPct"],
+        "exchange_supply": ["SplyExNtv"],
         "tx_count": ["TxCnt"],
-        "new_addresses": ["AdrNew", "AdrActCnt"],
-        "tx_eip1559_count": ["TxEIP1559Cnt"],
+        "tx_transfer_count": ["TxTfrCnt"],
+        "active_addresses": ["AdrActCnt"],
+        "exchange_inflow_ntv": ["FlowInExNtv"],
+        "exchange_outflow_ntv": ["FlowOutExNtv"],
+        "exchange_inflow_usd": ["FlowInExUSD"],
+        "exchange_outflow_usd": ["FlowOutExUSD"],
+        "issuance_usd": ["IssTotUSD"],
+    }
+
+    ASSET_SPECIFIC_METRIC_CANDIDATES = {
+        "btc": {
+            "hash_rate": ["HashRate"],
+        },
     }
 
     def __init__(self):
@@ -60,9 +72,9 @@ class CoinMetricsCollector:
             logger.warning(f"Coin Metrics spot price lookup failed for {symbol}: {e}")
         return None
 
-    def _resolve_metric_aliases(self, rows: List[Dict]) -> Dict[str, str]:
+    def _resolve_metric_aliases(self, rows: List[Dict], metric_candidates: Dict[str, List[str]]) -> Dict[str, str]:
         aliases: Dict[str, str] = {}
-        for concept, candidates in self.METRIC_CANDIDATES.items():
+        for concept, candidates in metric_candidates.items():
             for metric_id in candidates:
                 if any(row.get(metric_id) not in (None, "", "null") for row in rows):
                     aliases[concept] = metric_id
@@ -70,6 +82,12 @@ class CoinMetricsCollector:
             if concept not in aliases and candidates:
                 aliases[concept] = candidates[0]
         return aliases
+
+    def _metric_candidates_for_asset(self, asset: str) -> Dict[str, List[str]]:
+        candidates = {concept: list(items) for concept, items in self.METRIC_CANDIDATES.items()}
+        for concept, items in self.ASSET_SPECIFIC_METRIC_CANDIDATES.get(asset, {}).items():
+            candidates[concept] = list(items)
+        return candidates
 
     def collect_symbol(self, symbol: str) -> Dict | None:
         if not settings.COINMETRICS_ENABLED:
@@ -81,13 +99,14 @@ class CoinMetricsCollector:
             logger.debug(f"Coin Metrics not configured for symbol={symbol}")
             return None
 
-        metric_set = sorted({metric for items in self.METRIC_CANDIDATES.values() for metric in items})
+        metric_candidates = self._metric_candidates_for_asset(asset)
+        metric_set = sorted({metric for items in metric_candidates.values() for metric in items})
         rows = self._fetch_timeseries(asset, metric_set)
         if not rows:
             logger.warning(f"Coin Metrics returned no rows for {symbol} ({asset})")
             return None
 
-        metric_aliases = self._resolve_metric_aliases(rows)
+        metric_aliases = self._resolve_metric_aliases(rows, metric_candidates)
         spot_price = self._get_spot_price(symbol)
         snapshot = onchain_signal_engine.build_snapshot(
             symbol=symbol,
