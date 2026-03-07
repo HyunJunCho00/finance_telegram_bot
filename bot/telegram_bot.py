@@ -504,7 +504,10 @@ class TradingBot:
                         fd = json.loads(fd)
 
                     decision = fd.get('decision', 'N/A') if fd else 'N/A'
-                    confidence = fd.get('confidence', 0) if fd else 0
+                    confidence = (
+                        fd.get('confidence', fd.get('win_probability_pct', 0))
+                        if fd else 0
+                    )
                     ts = report.get('timestamp', 'N/A')[:16].replace('T', ' ')
 
                     lines.append(
@@ -557,7 +560,7 @@ class TradingBot:
 
             if result:
                 decision = result.get('decision', 'N/A')
-                confidence = result.get('confidence', 0)
+                confidence = result.get('confidence', result.get('win_probability_pct', 0))
                 await update.message.reply_text(
                     f"Analysis complete for {symbol}\n"
                     f"POSITION: {decision} ({confidence}%)\n"
@@ -622,7 +625,7 @@ class TradingBot:
                         f"Latest {symbol} Report\n"
                         f"Time: {report.get('timestamp', 'N/A')[:19]}\n"
                         f"Decision: {fd.get('decision', 'N/A')}\n"
-                        f"Confidence: {fd.get('confidence', 0)}%\n"
+                        f"Confidence: {fd.get('confidence', fd.get('win_probability_pct', 0))}%\n"
                         f"Entry: {fd.get('entry_price', 'N/A')}\n"
                         f"SL: {fd.get('stop_loss', 'N/A')}\n"
                         f"TP: {fd.get('take_profit', 'N/A')}\n"

@@ -49,6 +49,24 @@ class ChartGenerator:
         self.height = settings.CHART_IMAGE_HEIGHT
         self.dpi = settings.CHART_IMAGE_DPI
 
+    @staticmethod
+    def _lane_lookback_months(mode: TradingMode) -> int:
+        settings = get_settings()
+        if mode == TradingMode.POSITION:
+            return int(settings.POSITION_HISTORY_MONTHS)
+        return int(settings.SWING_HISTORY_MONTHS)
+
+    @staticmethod
+    def _tail_candles_for_rule(months: int, resample_rule: str) -> int:
+        rule = str(resample_rule).upper()
+        if rule.startswith("4H"):
+            return max(30, int(round(months * 365.25 / 12.0 * 6.0)))
+        if rule.startswith("1D"):
+            return max(20, int(round(months * 365.25 / 12.0)))
+        if rule.startswith("1W"):
+            return max(12, int(round(months * 52.1775 / 12.0)))
+        return 200
+
     def generate_chart(self, df: pd.DataFrame, analysis: Dict, symbol: str,
                        mode: TradingMode = TradingMode.SWING,
                        timeframe: Optional[str] = None,
@@ -137,14 +155,15 @@ class ChartGenerator:
         return config
 
     def _get_lane_panel_configs(self, mode: TradingMode) -> List[Dict]:
+        lookback_months = self._lane_lookback_months(mode)
         if mode == TradingMode.POSITION:
             return [
                 {
                     'resample_rule': '1W-MON',
-                    'tail_candles': 140,
+                    'tail_candles': self._tail_candles_for_rule(lookback_months, '1W-MON'),
                     'min_candles': 30,
-                    'title_suffix': 'TOP 1W STRUCTURE',
-                    'panel_label': 'Top: 1W Structure',
+                    'title_suffix': f'TOP 1W STRUCTURE ({lookback_months}M)',
+                    'panel_label': f'Top: 1W Structure ({lookback_months}M)',
                     'fib_tf': '1w',
                     'structure_tfs': ['1w'],
                     'swing_tf': None,
@@ -168,10 +187,10 @@ class ChartGenerator:
                 },
                 {
                     'resample_rule': '1D',
-                    'tail_candles': 220,
+                    'tail_candles': self._tail_candles_for_rule(lookback_months, '1D'),
                     'min_candles': 40,
-                    'title_suffix': 'BOTTOM 1D EXECUTION',
-                    'panel_label': 'Bottom: 1D Execution',
+                    'title_suffix': f'BOTTOM 1D EXECUTION ({lookback_months}M)',
+                    'panel_label': f'Bottom: 1D Execution ({lookback_months}M)',
                     'fib_tf': '1d',
                     'structure_tfs': ['1d'],
                     'swing_tf': '1d',
@@ -198,10 +217,10 @@ class ChartGenerator:
         return [
             {
                 'resample_rule': '1D',
-                'tail_candles': 220,
+                'tail_candles': self._tail_candles_for_rule(lookback_months, '1D'),
                 'min_candles': 40,
-                'title_suffix': 'TOP 1D STRUCTURE',
-                'panel_label': 'Top: 1D Structure',
+                'title_suffix': f'TOP 1D STRUCTURE ({lookback_months}M)',
+                'panel_label': f'Top: 1D Structure ({lookback_months}M)',
                 'fib_tf': '1d',
                 'structure_tfs': ['1d'],
                 'swing_tf': None,
@@ -225,10 +244,10 @@ class ChartGenerator:
             },
             {
                 'resample_rule': '4h',
-                'tail_candles': 160,
+                'tail_candles': self._tail_candles_for_rule(lookback_months, '4h'),
                 'min_candles': 40,
-                'title_suffix': 'BOTTOM 4H EXECUTION',
-                'panel_label': 'Bottom: 4H Execution',
+                'title_suffix': f'BOTTOM 4H EXECUTION ({lookback_months}M)',
+                'panel_label': f'Bottom: 4H Execution ({lookback_months}M)',
                 'fib_tf': '4h',
                 'structure_tfs': ['4h'],
                 'swing_tf': '4h',
@@ -281,12 +300,14 @@ class ChartGenerator:
             return None
         if len(panel_images) == 1:
             return panel_images[0]
+        lookback_months = self._lane_lookback_months(mode)
         return self._stack_images_vertical(
             panel_images,
             title=(
                 f"{symbol} {mode.value.upper()} | "
                 f"Top: {'1D Structure' if mode == TradingMode.SWING else '1W Structure'} / "
-                f"Bottom: {'4H Execution' if mode == TradingMode.SWING else '1D Execution'}"
+                f"Bottom: {'4H Execution' if mode == TradingMode.SWING else '1D Execution'} | "
+                f"Lookback: {lookback_months}M"
             ),
         )
 

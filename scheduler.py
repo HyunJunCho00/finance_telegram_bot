@@ -770,7 +770,9 @@ def job_hourly_swing_charts():
                 caption = (
                     f"📈 <b>{symbol} SWING 차트 (정기 1시간)</b>\n"
                     f"Lane: <code>swing</code>\n"
-                    f"Timeframe: <code>{result.get('timeframe', '4h')}</code>"
+                    f"Panels: <code>1D / 4H</code>\n"
+                    f"Timeframe: <code>{result.get('timeframe', '4h')}</code>\n"
+                    f"Lookback: <code>12M</code>"
                 )
                 asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption))
             except Exception as e:
@@ -1043,7 +1045,7 @@ def main():
         max_instances=1,
     )
 
-    # ?? Daily Precision (00:00 UTC) ??BTC/ETH 횞 SWING/POSITION Playbook generation ??
+    # ✨✨ Daily Precision (00:00 UTC) [BTC/ETH] SWING/POSITION Playbook generation ✨✨
     scheduler_config.scheduler.add_job(
         job_daily_precision,
         CronTrigger(hour=0, minute=0),
@@ -1051,7 +1053,7 @@ def main():
         max_instances=1,
     )
 
-    # ?? Hourly Monitor ??NO_ACTION / WATCH / TRIGGER against Daily Playbook ??
+    # ✨✨ Hourly Monitor [NO_ACTION / WATCH / TRIGGER] against Daily Playbook ✨✨
     scheduler_config.scheduler.add_job(
         job_hourly_monitor,
         CronTrigger(minute=15),
@@ -1134,9 +1136,9 @@ def main():
     for name, fn in _initial_collectors:
         try:
             fn()
-            logger.info(f"  ??{name} collected")
+            logger.info(f"  ✅ {name} collected")
         except Exception as e:
-            logger.warning(f"  ?좑툘 {name} collection failed (non-fatal): {e}")
+            logger.warning(f"  ⚠️ {name} collection failed (non-fatal): {e}")
 
     # Main thread: keep alive + graceful shutdown
     try:

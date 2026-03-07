@@ -5,6 +5,7 @@ from config.database import db
 from executors.post_mortem import retrieve_similar_memories
 from loguru import logger
 import json
+from utils.decision_parser import extract_decision_from_response
 
 
 class JudgeAgent:
@@ -54,6 +55,7 @@ Output your decision as JSON:
     "derivatives": "Funding, Global OI (OI_DIV status), MFI proxy, Volume Profile",
     "experts": "Blackboard expert summaries (Liq, Micro, Macro)",
     "narrative": "Perplexity narrative and RAG events",
+    "onchain": "On-chain valuation / flow / network activity interpretation",
     "final_logic": "Concluding synthesis"
   }},
   "win_probability_pct": 0-100,
@@ -83,8 +85,10 @@ Output your decision as JSON:
   }}
 }}
 
-CRITICAL: All reasoning, final_logic, counter_scenario, and key_factors MUST be written in Korean. 
+CRITICAL: All reasoning fields including onchain, final_logic, counter_scenario, and key_factors MUST be written in Korean. 
 The decision, hold_duration estimate, and JSON keys remain in English.
+Return exactly one JSON object only. Do not wrap it in Markdown code fences.
+Do not add any text before or after the JSON object.
 
 You have FULL AUTONOMY. HOLD is valid only when your edge is not statistically meaningful (weak EV, weak R/R, or weak win probability).
 CRITICAL V5 RULE: You will be given a list of ACTIVE_ORDERS (e.g. pending DCA chunks). If the market paradigm shifts against your active orders, you MUST output "decision": "CANCEL_AND_CLOSE". If you just want to add to an existing order, you can output LONG/SHORT again.
@@ -252,51 +256,18 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
 
         except Exception as e:
             logger.error(f"Judge agent error: {e}")
-            return self._default_decision()
+            return self._default_decision(f"Judge agent error: {e}")
 
     def _parse_decision(self, response: str) -> Dict:
-        """Parse JSON from LLM response. Uses bracket-depth counting to find
-        the correct outermost JSON object, even if the LLM includes nested
-        JSON examples inside string values like 'reasoning'."""
+        """Parse JSON-like LLM output with layered recovery before fallback."""
         try:
-            # Strategy: find first '{', then count bracket depth to find matching '}'
-            start_idx = response.find('{')
-            if start_idx == -1:
-                return self._default_decision()
-
-            depth = 0
-            in_string = False
-            escape_next = False
-            for i in range(start_idx, len(response)):
-                c = response[i]
-                if escape_next:
-                    escape_next = False
-                    continue
-                if c == '\\':
-                    escape_next = True
-                    continue
-                if c == '"' and not escape_next:
-                    in_string = not in_string
-                    continue
-                if in_string:
-                    continue
-                if c == '{':
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0:
-                        json_str = response[start_idx:i + 1]
-                        return self._normalize_decision(json.loads(json_str))
-
-            # Fallback: simple rfind (original behavior)
-            end_idx = response.rfind('}') + 1
-            if end_idx > start_idx:
-                return self._normalize_decision(json.loads(response[start_idx:end_idx]))
-
-            return self._default_decision()
+            parsed = extract_decision_from_response(response)
+            if parsed:
+                return self._normalize_decision(parsed)
+            return self._default_decision("Decision parsing error: could not recover a valid decision payload")
         except Exception as e:
             logger.error(f"Decision parsing error: {e}")
-            return self._default_decision()
+            return self._default_decision(f"Decision parsing error: {e}")
 
     def _normalize_playbook(self, playbook: Optional[Dict]) -> Dict:
         if not isinstance(playbook, dict):
@@ -312,6 +283,20 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
         if not isinstance(decision, dict):
             return self._default_decision()
 
+        normalized = self._decision_template()
+        for key, value in decision.items():
+            if key in ("reasoning", "monitoring_playbook", "daily_dual_plan"):
+                continue
+            normalized[key] = value
+
+        reasoning = decision.get("reasoning", {})
+        if isinstance(reasoning, dict):
+            merged_reasoning = normalized["reasoning"].copy()
+            merged_reasoning.update({k: v for k, v in reasoning.items() if v is not None})
+            normalized["reasoning"] = merged_reasoning
+        elif reasoning:
+            normalized["reasoning"]["final_logic"] = str(reasoning)
+
         monitoring = self._normalize_playbook(decision.get("monitoring_playbook"))
         dual = decision.get("daily_dual_plan", {})
         if not isinstance(dual, dict):
@@ -320,14 +305,18 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
         swing_plan = self._normalize_playbook(dual.get("swing_plan", monitoring))
         position_plan = self._normalize_playbook(dual.get("position_plan", monitoring))
 
-        decision["monitoring_playbook"] = monitoring
-        decision["daily_dual_plan"] = {
+        normalized["decision"] = str(normalized.get("decision", "HOLD")).upper()
+        if normalized["decision"] not in {"LONG", "SHORT", "HOLD", "CANCEL_AND_CLOSE"}:
+            normalized["decision"] = "HOLD"
+
+        normalized["monitoring_playbook"] = monitoring
+        normalized["daily_dual_plan"] = {
             "swing_plan": swing_plan,
             "position_plan": position_plan,
         }
-        return decision
+        return normalized
 
-    def _default_decision(self) -> Dict:
+    def _decision_template(self) -> Dict:
         return {
             "decision": "HOLD",
             "allocation_pct": 0,
@@ -343,28 +332,39 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
                 "derivatives": "N/A",
                 "experts": "N/A",
                 "narrative": "N/A",
-                "final_logic": "Error in decision-making process, defaulting to HOLD"
+                "onchain": "N/A",
+                "final_logic": "",
             },
             "win_probability_pct": 0,
+            "confidence": 0,
             "expected_profit_pct": 0.0,
             "expected_loss_pct": 0.0,
-            "ev_rationale": "System failure fallback.",
+            "ev_rationale": "N/A",
             "key_factors": [],
             "monitoring_playbook": {
                 "entry_conditions": [],
-                "invalidation_conditions": []
+                "invalidation_conditions": [],
             },
             "daily_dual_plan": {
                 "swing_plan": {
                     "entry_conditions": [],
-                    "invalidation_conditions": []
+                    "invalidation_conditions": [],
                 },
                 "position_plan": {
                     "entry_conditions": [],
-                    "invalidation_conditions": []
-                }
-            }
+                    "invalidation_conditions": [],
+                },
+            },
         }
+
+    def _default_decision(self, error_message: Optional[str] = None) -> Dict:
+        safe_error = (error_message or "Error in decision-making process, defaulting to HOLD").strip()
+        if len(safe_error) > 240:
+            safe_error = safe_error[:237] + "..."
+        decision = self._decision_template()
+        decision["reasoning"]["final_logic"] = safe_error
+        decision["ev_rationale"] = "System failure fallback."
+        return decision
 
 
 judge_agent = JudgeAgent()

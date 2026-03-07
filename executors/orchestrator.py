@@ -1040,6 +1040,7 @@ def node_judge_agent(state: AnalysisState) -> dict:
     dual_plan = decision.get("daily_dual_plan", {}) if isinstance(decision, dict) else {}
     if isinstance(decision, dict):
         decision["daily_dual_plan"] = dual_plan if isinstance(dual_plan, dict) else {}
+        decision["confidence"] = win_prob_pct
     return {
         "final_decision": decision,
         "daily_dual_plan": dual_plan if isinstance(dual_plan, dict) else {},
@@ -1732,7 +1733,14 @@ class Orchestrator:
                                 chart_res = mcp_tools.get_chart_image(symbol, lane=lane)
                                 if "chart_base64" in chart_res:
                                     chart_bytes = base64.b64decode(chart_res["chart_base64"])
-                                    asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption=f"📊 {symbol} {lane.upper()} Chart - {status}"))
+                                    panel_label = "1D / 4H" if lane == "swing" else "1W / 1D"
+                                    lookback_label = "12M" if lane == "swing" else "60M"
+                                    caption = (
+                                        f"📊 <b>{symbol} {lane.upper()} Chart - {status}</b>\n"
+                                        f"Panels: <code>{panel_label}</code>\n"
+                                        f"Lookback: <code>{lookback_label}</code>"
+                                    )
+                                    asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption=caption))
                     except Exception as e:
                         logger.warning(f"Failed to send hourly monitor chart for {symbol}: {e}")
             except Exception as e:

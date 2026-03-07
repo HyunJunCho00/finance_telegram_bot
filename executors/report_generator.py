@@ -49,6 +49,22 @@ class ReportGenerator:
         except Exception:
             return "N/A"
 
+    @staticmethod
+    def _chart_profile(mode: TradingMode) -> tuple[str, str]:
+        if mode == TradingMode.POSITION:
+            return ("1W/1D", "60M")
+        return ("1D/4H", "12M")
+
+    @staticmethod
+    def _extract_onchain_summary(onchain_context: str) -> str:
+        text = str(onchain_context or "").strip()
+        if not text or text == "On-chain Context: unavailable":
+            return ""
+        text = text.replace("On-chain Context:", "").strip()
+        if len(text) > 900:
+            text = text[:897] + "..."
+        return text
+
     def _build_onchain_lines(
         self,
         symbol: str,
@@ -159,7 +175,7 @@ class ReportGenerator:
         decision = self._load_json_field(report.get("final_decision"), {})
 
         direction = decision.get("decision", "N/A")
-        confidence = decision.get("confidence", 0)
+        confidence = decision.get("confidence", decision.get("win_probability_pct", 0))
 
         if direction == "LONG":
             header_icon, color_theme = "🚀", "🟢 강세 (LONG)"
@@ -196,22 +212,28 @@ class ReportGenerator:
     def format_detail_message(self, report: Dict, mode: TradingMode = TradingMode.SWING) -> str:
         decision = self._load_json_field(report.get("final_decision"), {})
         reasoning = decision.get("reasoning", "N/A")
-        onchain_snapshot = self._load_json_field(report.get("onchain_snapshot"), {})
         onchain_context = str(report.get("onchain_context", "") or "").strip()
 
         lines = [f"🔍 <b>DEEP ANALYSIS | {report['symbol']}</b>\n"]
 
         if isinstance(reasoning, dict):
+            reasoning_for_view = dict(reasoning)
+            if not reasoning_for_view.get("onchain") or reasoning_for_view.get("onchain") == "N/A":
+                fallback_onchain = self._extract_onchain_summary(onchain_context)
+                if fallback_onchain:
+                    reasoning_for_view["onchain"] = fallback_onchain
             mapping = {
                 "technical": "📊 기술적 분석 (Technical)",
+                "onchain": "🔗 심층 온체인 분석 (On-chain)",
                 "derivatives": "⛓️ 파생상품 심리 (Derivatives)",
                 "experts": "🤖 전문가 스웜 (Expert Swarm)",
                 "narrative": "🌐 시장 내러티브 (Narrative/News)",
                 "counter_scenario": "🚨 최악의 시나리오 (Risk)",
             }
+            mapping["onchain"] = "On-chain Summary"
             for key, title in mapping.items():
-                value = reasoning.get(key)
-                if value:
+                value = reasoning_for_view.get(key)
+                if value and value != "N/A":
                     safe_value = self._escape_html(value)
                     if len(safe_value) > 1500:
                         safe_value = safe_value[:1497] + "..."
@@ -219,17 +241,6 @@ class ReportGenerator:
                     lines.append(f"<b>{title}:</b>\n<i>{safe_value}</i>\n")
         else:
             lines.append(f"<i>{self._escape_html(reasoning)}</i>")
-
-        if onchain_snapshot or onchain_context:
-            lines.append("")
-            lines.extend(
-                self._build_onchain_lines(
-                    symbol=report.get("symbol", "UNKNOWN"),
-                    snapshot=onchain_snapshot,
-                    onchain_context=onchain_context,
-                    include_header=True,
-                )
-            )
 
         final_msg = "\n".join(lines)
         return final_msg[:4000]
@@ -269,10 +280,20 @@ class ReportGenerator:
                         reply_markup=reply_markup,
                     )
                 else:
+                    panel_label, lookback_label = self._chart_profile(mode)
                     await bot.send_photo(
                         chat_id=self.chat_id,
                         photo=photo,
                         caption=f"📊 {report['symbol']} Analysis",
+                        parse_mode="HTML",
+                    )
+                    await bot.send_message(
+                        chat_id=self.chat_id,
+                        text=(
+                            f"<b>{report['symbol']} {mode.value.upper()} Chart Profile</b>\n"
+                            f"Panels: <code>{panel_label}</code>\n"
+                            f"Lookback: <code>{lookback_label}</code>"
+                        ),
                         parse_mode="HTML",
                     )
                     await bot.send_message(

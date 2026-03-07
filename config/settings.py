@@ -430,7 +430,7 @@ def get_settings() -> Settings:
     if os.getenv("USE_SECRET_MANAGER", "false").lower() == "true":
         project_id = os.getenv("PROJECT_ID", "")
 
-        # Auto-detect project ID from GCP metadata server if not set (VM ?섍꼍)
+        # Auto-detect project ID from GCP metadata server if not set (VM 환경)
         if not project_id:
             try:
                 import urllib.request
