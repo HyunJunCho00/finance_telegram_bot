@@ -323,3 +323,145 @@ CREATE TABLE IF NOT EXISTS market_status_events (
 
 CREATE INDEX idx_market_status_events_symbol_time ON market_status_events(symbol, created_at DESC);
 CREATE INDEX idx_market_status_events_regime_time ON market_status_events(regime, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS evaluation_predictions (
+    id BIGSERIAL PRIMARY KEY,
+    source_type TEXT NOT NULL,
+    source_id BIGINT,
+    ai_report_id BIGINT REFERENCES ai_reports(id) ON DELETE SET NULL,
+    prediction_time TIMESTAMPTZ NOT NULL,
+    symbol TEXT NOT NULL,
+    mode TEXT,
+    decision TEXT NOT NULL,
+    prediction_label TEXT,
+    confidence DOUBLE PRECISION,
+    entry_price DOUBLE PRECISION,
+    take_profit DOUBLE PRECISION,
+    stop_loss DOUBLE PRECISION,
+    regime TEXT,
+    model_version TEXT,
+    prompt_version TEXT,
+    rag_version TEXT,
+    strategy_version TEXT,
+    consensus_rate DOUBLE PRECISION,
+    anomalies_detected JSONB NOT NULL DEFAULT '[]'::jsonb,
+    input_context JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(source_type, source_id, mode)
+);
+
+CREATE INDEX idx_evaluation_predictions_time ON evaluation_predictions(prediction_time DESC);
+CREATE INDEX idx_evaluation_predictions_symbol_mode_time ON evaluation_predictions(symbol, mode, prediction_time DESC);
+CREATE INDEX idx_evaluation_predictions_source ON evaluation_predictions(source_type, source_id);
+
+CREATE TABLE IF NOT EXISTS evaluation_outcomes (
+    id BIGSERIAL PRIMARY KEY,
+    prediction_id BIGINT NOT NULL REFERENCES evaluation_predictions(id) ON DELETE CASCADE,
+    horizon_minutes INTEGER NOT NULL,
+    evaluated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    target_time TIMESTAMPTZ,
+    entry_price DOUBLE PRECISION,
+    exit_price DOUBLE PRECISION,
+    actual_direction TEXT,
+    realized_return_pct DOUBLE PRECISION,
+    fee_adjusted_pnl_pct DOUBLE PRECISION,
+    benchmark_return_pct DOUBLE PRECISION,
+    excess_return_pct DOUBLE PRECISION,
+    correct BOOLEAN,
+    tp_hit BOOLEAN,
+    sl_hit BOOLEAN,
+    mfe_pct DOUBLE PRECISION,
+    mae_pct DOUBLE PRECISION,
+    sample_count INTEGER,
+    data_delay_minutes DOUBLE PRECISION,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(prediction_id, horizon_minutes)
+);
+
+CREATE INDEX idx_evaluation_outcomes_horizon ON evaluation_outcomes(horizon_minutes, evaluated_at DESC);
+CREATE INDEX idx_evaluation_outcomes_prediction ON evaluation_outcomes(prediction_id, horizon_minutes);
+
+CREATE TABLE IF NOT EXISTS evaluation_component_scores (
+    id BIGSERIAL PRIMARY KEY,
+    prediction_id BIGINT NOT NULL REFERENCES evaluation_predictions(id) ON DELETE CASCADE,
+    component_type TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    metric_value DOUBLE PRECISION,
+    metric_label TEXT,
+    scope_key TEXT NOT NULL DEFAULT '',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(prediction_id, component_type, metric_name, scope_key)
+);
+
+CREATE INDEX idx_evaluation_component_scores_prediction ON evaluation_component_scores(prediction_id, component_type);
+CREATE INDEX idx_evaluation_component_scores_component ON evaluation_component_scores(component_type, metric_name, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS evaluation_rollups_daily (
+    id BIGSERIAL PRIMARY KEY,
+    rollup_date DATE NOT NULL,
+    symbol TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'system',
+    horizon_minutes INTEGER NOT NULL DEFAULT 0,
+    metric_name TEXT NOT NULL,
+    metric_value DOUBLE PRECISION,
+    sample_size INTEGER NOT NULL DEFAULT 0,
+    bucket_key TEXT NOT NULL DEFAULT '',
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(rollup_date, symbol, mode, scope, horizon_minutes, metric_name, bucket_key)
+);
+
+CREATE INDEX idx_evaluation_rollups_daily_lookup
+ON evaluation_rollups_daily(rollup_date DESC, symbol, mode, scope, horizon_minutes);
+
+CREATE TABLE IF NOT EXISTS archive_manifests (
+    id BIGSERIAL PRIMARY KEY,
+    table_name TEXT NOT NULL,
+    partition_key TEXT NOT NULL,
+    gcs_path TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    schema_version TEXT NOT NULL DEFAULT 'v1',
+    time_column TEXT NOT NULL,
+    pk_column TEXT NOT NULL DEFAULT 'id',
+    symbol_column TEXT,
+    partition_start TIMESTAMPTZ,
+    partition_end TIMESTAMPTZ,
+    partition_start_date DATE,
+    partition_end_date DATE,
+    partition_symbol TEXT,
+    archive_started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    archive_completed_at TIMESTAMPTZ,
+    verified_at TIMESTAMPTZ,
+    cleanup_completed_at TIMESTAMPTZ,
+    retention_cutoff TIMESTAMPTZ,
+    retention_cutoff_date DATE,
+    row_count_db INTEGER NOT NULL DEFAULT 0,
+    row_count_parquet INTEGER NOT NULL DEFAULT 0,
+    min_pk BIGINT,
+    max_pk BIGINT,
+    min_time TIMESTAMPTZ,
+    max_time TIMESTAMPTZ,
+    min_date DATE,
+    max_date DATE,
+    file_size_bytes BIGINT,
+    md5_hash TEXT,
+    error_message TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(table_name, partition_key)
+);
+
+CREATE INDEX idx_archive_manifests_status
+ON archive_manifests(status, cleanup_completed_at, table_name);
+
+CREATE INDEX idx_archive_manifests_table_partition
+ON archive_manifests(table_name, partition_key);
+
+CREATE INDEX idx_archive_manifests_verified
+ON archive_manifests(verified_at DESC, cleanup_completed_at);

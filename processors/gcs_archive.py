@@ -27,5 +27,9 @@ class GCSArchiveExporter:
         """Archive expiring rows as Parquet (replaces old JSONL.gz method)."""
         return self._store.run_daily_archive()
 
+    def run_safe_cleanup(self, limit: int = 500) -> Dict:
+        """Delete only rows covered by verified archive manifests."""
+        return self._store.run_safe_cleanup(limit=limit)
+
 
 gcs_archive_exporter = GCSArchiveExporter()

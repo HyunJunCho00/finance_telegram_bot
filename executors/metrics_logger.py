@@ -25,7 +25,15 @@ class MetricsLogger:
         except Exception as e:
             logger.error(f"Failed to write to metrics log {filepath}: {e}")
 
-    def log_prediction(self, symbol: str, mode: str, final_decision: dict, blackboard: dict, anomalies: list):
+    def log_prediction(
+        self,
+        symbol: str,
+        mode: str,
+        final_decision: dict,
+        blackboard: dict,
+        anomalies: list,
+        report_id=None,
+    ):
         """
         Logs a prediction event (Judge's decision).
         """
@@ -62,7 +70,7 @@ class MetricsLogger:
                 "consensus_rate": consensus_rate,
                 "anomalies_detected": anomalies,
                 # Optional: tracking IDs
-                "report_id": f"pred_{int(datetime.now().timestamp())}_{symbol}"
+                "report_id": report_id if report_id is not None else f"pred_{int(datetime.now().timestamp())}_{symbol}"
             }
             
             self._append_jsonl(self.predictions_file, event)
@@ -70,7 +78,15 @@ class MetricsLogger:
         except Exception as e:
             logger.error(f"Metrics Logger Error (Prediction): {e}")
 
-    def log_resolution(self, symbol: str, direction: str, outcome: str, pnl_pct: float, mistake_summary: str = ""):
+    def log_resolution(
+        self,
+        symbol: str,
+        direction: str,
+        outcome: str,
+        pnl_pct: float,
+        mistake_summary: str = "",
+        report_id=None,
+    ):
         """
         Logs a resolution event when SL/TP is hit.
         """
@@ -81,6 +97,7 @@ class MetricsLogger:
                 "event_type": "RESOLUTION",
                 "symbol": symbol,
                 "predicted_direction": direction,
+                "report_id": report_id,
                 "outcome_label": outcome,
                 "is_correct": is_correct,
                 "pnl_pct": pnl_pct,

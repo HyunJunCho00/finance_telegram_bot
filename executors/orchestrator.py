@@ -48,6 +48,7 @@ from loguru import logger
 import numpy as np
 import pandas as pd
 import json
+from datetime import datetime, timezone
 
 # [FIX CRASH-2] Module-level cache to avoid 4x duplicate DB queries per cycle
 # Cleared at the start of each analysis in run_analysis()
@@ -1244,6 +1245,130 @@ def node_execute_trade(state: AnalysisState) -> dict:
     decision["execution_receipt"] = execution_result
     return {"final_decision": decision}
 
+
+def _safe_float(value) -> Optional[float]:
+    try:
+        if value in (None, "", "N/A"):
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _compute_consensus_rate(blackboard: dict, direction: str) -> Optional[float]:
+    if not isinstance(blackboard, dict):
+        return None
+    direction = str(direction or "").upper()
+    votes = []
+    for key in ("market", "onchain", "macro"):
+        payload = blackboard.get(key)
+        if isinstance(payload, dict):
+            votes.append(str(payload.get("decision", "HOLD")).upper())
+    if not votes:
+        return None
+    agreed = sum(1 for vote in votes if direction and direction in vote)
+    return round((agreed / len(votes)) * 100.0, 2)
+
+
+def _build_evaluation_prediction_payload(state: AnalysisState, report: Dict, mode: TradingMode) -> Dict:
+    decision = state.get("final_decision", {}) if isinstance(state.get("final_decision", {}), dict) else {}
+    blackboard = state.get("blackboard", {}) if isinstance(state.get("blackboard", {}), dict) else {}
+    report_id = report.get("report_id") or report.get("id")
+    prediction_time = report.get("created_at") or report.get("timestamp") or datetime.now(timezone.utc).isoformat()
+    anomalies = state.get("anomalies", [])
+    if not isinstance(anomalies, list):
+        anomalies = []
+
+    return {
+        "source_type": "ai_report",
+        "source_id": report_id,
+        "ai_report_id": report_id,
+        "prediction_time": prediction_time,
+        "symbol": state["symbol"],
+        "mode": mode.value,
+        "decision": str(decision.get("decision", "HOLD")).upper(),
+        "prediction_label": str(decision.get("decision", "HOLD")).upper(),
+        "confidence": _safe_float(decision.get("confidence")),
+        "entry_price": _safe_float(decision.get("entry_price")),
+        "take_profit": _safe_float(decision.get("take_profit")),
+        "stop_loss": _safe_float(decision.get("stop_loss")),
+        "regime": state.get("market_regime"),
+        "model_version": str(getattr(settings, "MODEL_JUDGE", "")),
+        "prompt_version": str(getattr(settings, "PROMPT_VERSION", "judge_default_v1")),
+        "rag_version": str(getattr(settings, "RAG_VERSION", "lightrag_v1")),
+        "strategy_version": str(getattr(settings, "STRATEGY_VERSION", "orchestrator_v8")),
+        "consensus_rate": _compute_consensus_rate(blackboard, decision.get("decision", "HOLD")),
+        "anomalies_detected": anomalies,
+        "input_context": {
+            "blackboard_agents": sorted(list(blackboard.keys()))[:12],
+            "rag_chars": len(str(state.get("rag_context", "") or "")),
+            "telegram_news_chars": len(str(state.get("telegram_news", "") or "")),
+            "narrative_chars": len(str(state.get("narrative_text", "") or "")),
+            "feedback_chars": len(str(state.get("feedback_text", "") or "")),
+            "onchain_context_chars": len(str(state.get("onchain_context", "") or "")),
+        },
+        "metadata": {
+            "models": {
+                "judge": getattr(settings, "MODEL_JUDGE", ""),
+                "meta_regime": getattr(settings, "MODEL_META_REGIME", ""),
+                "risk_eval": getattr(settings, "MODEL_RISK_EVAL", ""),
+                "rag_extraction": getattr(settings, "MODEL_RAG_EXTRACTION", ""),
+                "vlm_geometric": getattr(settings, "MODEL_VLM_GEOMETRIC", ""),
+            },
+            "market_regime": state.get("market_regime"),
+            "risk_budget_pct": (state.get("regime_context", {}) or {}).get("risk_budget_pct"),
+            "report_created_at": report.get("created_at"),
+        },
+    }
+
+
+def _build_component_score_rows(prediction_id: int, state: AnalysisState) -> list[dict]:
+    decision = state.get("final_decision", {}) if isinstance(state.get("final_decision", {}), dict) else {}
+    blackboard = state.get("blackboard", {}) if isinstance(state.get("blackboard", {}), dict) else {}
+
+    def _score(component_type: str, metric_name: str, metric_value, metric_label: str):
+        value = _safe_float(metric_value)
+        if value is None:
+            return None
+        return {
+            "prediction_id": prediction_id,
+            "component_type": component_type,
+            "metric_name": metric_name,
+            "metric_value": value,
+            "metric_label": metric_label,
+            "scope_key": "",
+            "metadata": {},
+        }
+
+    win_prob_pct = _safe_float(decision.get("win_probability_pct"))
+    expected_profit_pct = _safe_float(decision.get("expected_profit_pct"))
+    expected_loss_pct = _safe_float(decision.get("expected_loss_pct"))
+    rr_ratio = None
+    ev_pct = None
+    if expected_profit_pct is not None and expected_loss_pct not in (None, 0):
+        rr_ratio = expected_profit_pct / expected_loss_pct
+    if win_prob_pct is not None and expected_profit_pct is not None and expected_loss_pct is not None:
+        win_prob = win_prob_pct / 100.0
+        ev_pct = (win_prob * expected_profit_pct) - ((1.0 - win_prob) * expected_loss_pct)
+
+    rows = [
+        _score("system", "consensus_rate_pct", _compute_consensus_rate(blackboard, decision.get("decision", "HOLD")), "Consensus Rate (%)"),
+        _score("system", "anomaly_count", len(state.get("anomalies", []) or []), "Anomaly Count"),
+        _score("system", "blackboard_agent_count", len(blackboard), "Blackboard Agent Count"),
+        _score("llm", "confidence_pct", decision.get("confidence"), "Decision Confidence (%)"),
+        _score("llm", "win_probability_pct", win_prob_pct, "Win Probability (%)"),
+        _score("llm", "expected_profit_pct", expected_profit_pct, "Expected Profit (%)"),
+        _score("llm", "expected_loss_pct", expected_loss_pct, "Expected Loss (%)"),
+        _score("llm", "expected_value_pct", ev_pct, "Expected Value (%)"),
+        _score("llm", "rr_ratio", rr_ratio, "Risk Reward Ratio"),
+        _score("rag", "rag_context_chars", len(str(state.get("rag_context", "") or "")), "RAG Context Length"),
+        _score("rag", "telegram_news_chars", len(str(state.get("telegram_news", "") or "")), "Telegram News Length"),
+        _score("rag", "narrative_chars", len(str(state.get("narrative_text", "") or "")), "Narrative Length"),
+        _score("rag", "feedback_chars", len(str(state.get("feedback_text", "") or "")), "Feedback Context Length"),
+        _score("rag", "onchain_context_chars", len(str(state.get("onchain_context", "") or "")), "On-chain Context Length"),
+    ]
+    return [row for row in rows if row]
+
 def node_generate_report(state: AnalysisState) -> dict:
     """Generate and send report to Telegram."""
     from executors.metrics_logger import metrics_logger
@@ -1299,6 +1424,17 @@ def node_generate_report(state: AnalysisState) -> dict:
     }, current_price=last_close)
 
     if report:
+        try:
+            prediction_row = db.upsert_evaluation_prediction(
+                _build_evaluation_prediction_payload(state, report, mode)
+            )
+            if prediction_row and prediction_row.get("id") is not None:
+                component_rows = _build_component_score_rows(int(prediction_row["id"]), state)
+                if component_rows:
+                    db.batch_upsert_evaluation_component_scores(component_rows)
+        except Exception as e:
+            logger.error(f"Failed to persist evaluation prediction for {symbol}: {e}")
+
         chart_bytes = state.get("chart_bytes")
         if chart_bytes:
             logger.info(f"Passing {len(chart_bytes)} bytes of chart data to notify.")
@@ -1312,7 +1448,8 @@ def node_generate_report(state: AnalysisState) -> dict:
             mode=mode.value,
             final_decision=state.get("final_decision", {}),
             blackboard=state.get("blackboard", {}),
-            anomalies=state.get("anomalies", [])
+            anomalies=state.get("anomalies", []),
+            report_id=report.get("report_id"),
         )
 
     decision = state.get("final_decision", {}).get("decision", "N/A")

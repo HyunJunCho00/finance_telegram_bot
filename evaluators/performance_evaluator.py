@@ -1,6 +1,7 @@
 from typing import Dict, Optional, List
 from datetime import datetime, timedelta, timezone
 from config.database import db
+from config.settings import settings
 from loguru import logger
 import json
 import math
@@ -9,6 +10,9 @@ import math
 class PerformanceEvaluator:
     def __init__(self):
         self.evaluation_hours = 24
+        self.evaluation_horizon_minutes = self.evaluation_hours * 60
+        self.hold_flat_threshold_pct = float(getattr(settings, "EVAL_HOLD_FLAT_THRESHOLD_PCT", 1.0))
+        self.round_trip_fee_pct = float(getattr(settings, "EVAL_ROUND_TRIP_FEE_PCT", 0.10))
 
     def get_prediction_from_24h_ago(self) -> Optional[Dict]:
         try:
@@ -35,7 +39,7 @@ class PerformanceEvaluator:
         after_created_at: Optional[str] = None,
         limit: int = 20,
     ) -> List[Dict]:
-        """Fetch reports older than evaluation window, in chronological order."""
+        """Fetch reports older than the fixed evaluation horizon, in chronological order."""
         try:
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=self.evaluation_hours)
             query = (
@@ -53,8 +57,11 @@ class PerformanceEvaluator:
             logger.error(f"Error fetching due predictions: {e}")
             return []
 
-    def _get_first_price_after(self, symbol: str, ts: datetime) -> Optional[float]:
-        """Price closest after prediction time (entry proxy)."""
+    @staticmethod
+    def _parse_ts(value: str) -> datetime:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).astimezone(timezone.utc)
+
+    def _get_first_market_row_at_or_after(self, symbol: str, ts: datetime) -> Optional[Dict]:
         try:
             response = db.client.table("market_data")\
                 .select("close,timestamp")\
@@ -64,68 +71,29 @@ class PerformanceEvaluator:
                 .limit(1)\
                 .execute()
             if response.data:
-                return float(response.data[0]["close"])
+                row = response.data[0]
+                return {
+                    "close": float(row["close"]),
+                    "timestamp": self._parse_ts(row["timestamp"]),
+                }
             return None
         except Exception as e:
-            logger.error(f"Error fetching first price after timestamp: {e}")
+            logger.error(f"Error fetching market row after timestamp: {e}")
             return None
 
-    def _get_latest_price(self, symbol: str) -> Optional[float]:
+    def _get_close_series_between(self, symbol: str, start_time: datetime, end_time: datetime) -> List[Dict]:
         try:
-            response = db.client.table("market_data")\
-                .select("close,timestamp")\
-                .eq("symbol", symbol)\
-                .order("timestamp", desc=True)\
-                .limit(1)\
-                .execute()
-            if response.data:
-                return float(response.data[0]["close"])
-            return None
-        except Exception as e:
-            logger.error(f"Error fetching latest price: {e}")
-            return None
-
-    def _get_latest_market_timestamp(self, symbol: str) -> Optional[datetime]:
-        try:
-            response = db.client.table("market_data")\
-                .select("timestamp")\
-                .eq("symbol", symbol)\
-                .order("timestamp", desc=True)\
-                .limit(1)\
-                .execute()
-            if not response.data:
-                return None
-            return datetime.fromisoformat(response.data[0]["timestamp"].replace("Z", "+00:00"))
-        except Exception as e:
-            logger.error(f"Error fetching latest market timestamp: {e}")
-            return None
-
-    def get_actual_price_change(self, symbol: str, prediction_time: datetime) -> Optional[float]:
-        try:
-            old_price = self._get_first_price_after(symbol, prediction_time)
-            new_price = self._get_latest_price(symbol)
-            if old_price is None or new_price is None or old_price == 0:
-                return None
-
-            change_pct = ((new_price - old_price) / old_price) * 100
-            return change_pct
-
-        except Exception as e:
-            logger.error(f"Error calculating price change: {e}")
-            return None
-
-    def _get_close_series_since(self, symbol: str, prediction_time: datetime) -> List[float]:
-        try:
-            response = db.client.table("market_data")\
-                .select("close,timestamp")\
-                .eq("symbol", symbol)\
-                .gte("timestamp", prediction_time.isoformat())\
-                .order("timestamp")\
-                .limit(2000)\
-                .execute()
-            if not response.data:
+            df = db.get_market_data_since(symbol, since=start_time, limit=2000)
+            if df is None or df.empty:
                 return []
-            return [float(r["close"]) for r in response.data if r.get("close") is not None]
+            filtered = df[df["timestamp"] <= end_time].copy()
+            if filtered.empty:
+                return []
+            return [
+                {"timestamp": row["timestamp"].to_pydatetime(), "close": float(row["close"])}
+                for _, row in filtered.iterrows()
+                if row.get("close") is not None
+            ]
         except Exception as e:
             logger.error(f"Error fetching close series: {e}")
             return []
@@ -180,72 +148,223 @@ class PerformanceEvaluator:
             "calmar_like": round(calmar_like, 4) if calmar_like is not None else None,
         }
 
-    def _get_data_delay_minutes(self, symbol: str) -> Optional[float]:
-        latest_ts = self._get_latest_market_timestamp(symbol)
-        if latest_ts is None:
+    @staticmethod
+    def _path_metrics(entry_price: float, path_rows: List[Dict], predicted_direction: str) -> Dict:
+        if entry_price == 0 or not path_rows:
+            return {"mfe_pct": None, "mae_pct": None}
+
+        realized_path = []
+        for row in path_rows:
+            price = float(row["close"])
+            if predicted_direction == "SHORT":
+                realized_path.append(((entry_price - price) / entry_price) * 100.0)
+            elif predicted_direction == "LONG":
+                realized_path.append(((price - entry_price) / entry_price) * 100.0)
+            else:
+                realized_path.append(0.0)
+
+        return {
+            "mfe_pct": round(max(realized_path), 4) if realized_path else None,
+            "mae_pct": round(min(realized_path), 4) if realized_path else None,
+        }
+
+    @staticmethod
+    def _benchmark_return(entry_price: float, exit_price: float) -> Optional[float]:
+        if not isinstance(entry_price, (int, float)) or not isinstance(exit_price, (int, float)) or entry_price == 0:
             return None
-        delay = (datetime.now(timezone.utc) - latest_ts).total_seconds() / 60
-        return round(max(delay, 0.0), 2)
+        return ((exit_price - entry_price) / entry_price) * 100.0
 
-    def evaluate_prediction(self, old_report: Dict) -> Dict:
+    def _realized_return(self, predicted_direction: str, benchmark_return_pct: float) -> float:
+        if predicted_direction == "LONG":
+            return benchmark_return_pct
+        if predicted_direction == "SHORT":
+            return -benchmark_return_pct
+        return 0.0
+
+    def _is_direction_correct(self, predicted_direction: str, benchmark_return_pct: float) -> bool:
+        if predicted_direction == "LONG":
+            return benchmark_return_pct > 0
+        if predicted_direction == "SHORT":
+            return benchmark_return_pct < 0
+        return abs(benchmark_return_pct) < self.hold_flat_threshold_pct
+
+    def _actual_direction(self, benchmark_return_pct: float) -> str:
+        if benchmark_return_pct > 0:
+            return "LONG"
+        if benchmark_return_pct < 0:
+            return "SHORT"
+        return "HOLD"
+
+    def _get_trade_note(self, symbol: str, prediction_time: datetime) -> str:
+        trade_note = "N/A"
         try:
-            symbol = old_report['symbol']
-            prediction_time = datetime.fromisoformat(old_report['created_at'].replace('Z', '+00:00'))
+            exec_res = db.client.table("trade_executions")\
+                .select("note")\
+                .eq("symbol", symbol)\
+                .gte("created_at", (prediction_time - timedelta(minutes=5)).isoformat())\
+                .lte("created_at", (prediction_time + timedelta(minutes=5)).isoformat())\
+                .order("created_at", desc=True)\
+                .limit(1)\
+                .execute()
+            if exec_res.data:
+                trade_note = exec_res.data[0].get("note", "N/A")
+        except Exception as e:
+            logger.warning(f"Could not fetch trade note for evaluation: {e}")
+        return trade_note
 
-            final_decision = old_report['final_decision']
+    def _ensure_prediction_row(
+        self,
+        old_report: Dict,
+        final_decision: Dict,
+        prediction_time: datetime,
+    ) -> Optional[Dict]:
+        report_id = old_report.get("id")
+        if not report_id:
+            return None
+
+        existing = db.get_evaluation_prediction_by_source("ai_report", int(report_id))
+        if existing:
+            return existing
+
+        payload = {
+            "source_type": "ai_report",
+            "source_id": int(report_id),
+            "ai_report_id": int(report_id),
+            "prediction_time": prediction_time.isoformat(),
+            "symbol": old_report.get("symbol"),
+            "mode": str(old_report.get("mode", "unknown") or "unknown"),
+            "decision": str(final_decision.get("decision", "HOLD")).upper(),
+            "prediction_label": str(final_decision.get("decision", "HOLD")).upper(),
+            "confidence": final_decision.get("confidence"),
+            "entry_price": final_decision.get("entry_price"),
+            "take_profit": final_decision.get("take_profit"),
+            "stop_loss": final_decision.get("stop_loss"),
+            "model_version": str(getattr(settings, "MODEL_JUDGE", "")),
+            "prompt_version": str(getattr(settings, "PROMPT_VERSION", "judge_default_v1")),
+            "rag_version": str(getattr(settings, "RAG_VERSION", "lightrag_v1")),
+            "strategy_version": str(getattr(settings, "STRATEGY_VERSION", "orchestrator_v8")),
+            "metadata": {
+                "backfilled": True,
+                "report_created_at": old_report.get("created_at"),
+            },
+        }
+        try:
+            return db.upsert_evaluation_prediction(payload)
+        except Exception as e:
+            logger.error(f"Failed to backfill evaluation prediction for report {report_id}: {e}")
+            return None
+
+    def evaluate_prediction(self, old_report: Dict, horizon_minutes: Optional[int] = None) -> Dict:
+        try:
+            symbol = old_report["symbol"]
+            prediction_time = self._parse_ts(old_report["created_at"])
+            target_time = prediction_time + timedelta(minutes=horizon_minutes or self.evaluation_horizon_minutes)
+
+            final_decision = old_report["final_decision"]
             if isinstance(final_decision, str):
                 final_decision = json.loads(final_decision)
-            predicted_direction = final_decision.get('decision', 'HOLD')
+            predicted_direction = str(final_decision.get("decision", "HOLD")).upper()
 
-            actual_change = self.get_actual_price_change(symbol, prediction_time)
+            entry_row = self._get_first_market_row_at_or_after(symbol, prediction_time)
+            exit_row = self._get_first_market_row_at_or_after(symbol, target_time)
+            if not entry_row or not exit_row:
+                return {"error": "Could not calculate fixed-horizon price change"}
 
-            if actual_change is None:
-                return {"error": "Could not calculate actual price change"}
+            entry_price = float(entry_row["close"])
+            exit_price = float(exit_row["close"])
+            benchmark_return_pct = self._benchmark_return(entry_price, exit_price)
+            if benchmark_return_pct is None:
+                return {"error": "Could not calculate benchmark return"}
 
-            actual_direction = 'LONG' if actual_change > 0 else 'SHORT' if actual_change < 0 else 'HOLD'
+            actual_direction = self._actual_direction(benchmark_return_pct)
+            realized_return_pct = self._realized_return(predicted_direction, benchmark_return_pct)
+            fee_pct = self.round_trip_fee_pct if predicted_direction in ("LONG", "SHORT") else 0.0
+            fee_adjusted_pnl_pct = realized_return_pct - fee_pct
+            excess_return_pct = fee_adjusted_pnl_pct - benchmark_return_pct
+            direction_correct = self._is_direction_correct(predicted_direction, benchmark_return_pct)
 
-            direction_correct = (
-                (predicted_direction == 'LONG' and actual_direction == 'LONG') or
-                (predicted_direction == 'SHORT' and actual_direction == 'SHORT') or
-                (predicted_direction == 'HOLD' and abs(actual_change) < 1.0)
-            )
-
-            close_series = self._get_close_series_since(symbol, prediction_time)
+            path_rows = self._get_close_series_between(symbol, prediction_time, exit_row["timestamp"])
+            close_series = [entry_price] + [float(row["close"]) for row in path_rows]
             risk_metrics = self._compute_risk_metrics(close_series)
+            path_metrics = self._path_metrics(entry_price, path_rows, predicted_direction)
 
-            # [VLM ENHANCEMENT] Fetch related trade execution notes for deeper self-correction
-            trade_note = "N/A"
-            try:
-                exec_res = db.client.table("trade_executions")\
-                    .select("note")\
-                    .eq("symbol", symbol)\
-                    .gte("created_at", (prediction_time - timedelta(minutes=5)).isoformat())\
-                    .lte("created_at", (prediction_time + timedelta(minutes=5)).isoformat())\
-                    .order("created_at", desc=True)\
-                    .limit(1)\
-                    .execute()
-                if exec_res.data:
-                    trade_note = exec_res.data[0].get("note", "N/A")
-            except Exception as e:
-                logger.warning(f"Could not fetch trade note for evaluation: {e}")
+            tp = final_decision.get("take_profit")
+            sl = final_decision.get("stop_loss")
+            tp_hit = None
+            sl_hit = None
+            if path_rows and predicted_direction in ("LONG", "SHORT"):
+                prices = [float(row["close"]) for row in path_rows]
+                if predicted_direction == "LONG":
+                    tp_hit = bool(isinstance(tp, (int, float)) and any(price >= float(tp) for price in prices))
+                    sl_hit = bool(isinstance(sl, (int, float)) and any(price <= float(sl) for price in prices))
+                else:
+                    tp_hit = bool(isinstance(tp, (int, float)) and any(price <= float(tp) for price in prices))
+                    sl_hit = bool(isinstance(sl, (int, float)) and any(price >= float(sl) for price in prices))
+
+            prediction_row = self._ensure_prediction_row(old_report, final_decision, prediction_time)
+            prediction_id = prediction_row.get("id") if isinstance(prediction_row, dict) else None
+            data_delay_minutes = round(max((exit_row["timestamp"] - target_time).total_seconds() / 60.0, 0.0), 2)
+            trade_note = self._get_trade_note(symbol, prediction_time)
 
             evaluation = {
                 "report_id": old_report.get("id"),
                 "report_created_at": old_report.get("created_at"),
+                "prediction_id": prediction_id,
                 "symbol": symbol,
                 "prediction_time": prediction_time.isoformat(),
+                "target_time": target_time.isoformat(),
+                "horizon_minutes": horizon_minutes or self.evaluation_horizon_minutes,
                 "predicted_direction": predicted_direction,
                 "actual_direction": actual_direction,
-                "actual_change_pct": actual_change,
+                "actual_change_pct": round(benchmark_return_pct, 4),
+                "realized_return_pct": round(realized_return_pct, 4),
+                "fee_adjusted_pnl_pct": round(fee_adjusted_pnl_pct, 4),
+                "benchmark_return_pct": round(benchmark_return_pct, 4),
+                "excess_return_pct": round(excess_return_pct, 4),
                 "direction_correct": direction_correct,
-                "predicted_entry": final_decision.get('entry_price', 0),
-                "confidence": final_decision.get('confidence', 0),
-                "reasoning": final_decision.get('reasoning', ''),
-                "note": trade_note,  # Pass execution context (slippage, strategy) to feedback generator
+                "predicted_entry": final_decision.get("entry_price", 0),
+                "evaluated_entry_price": round(entry_price, 4),
+                "evaluated_exit_price": round(exit_price, 4),
+                "confidence": final_decision.get("confidence", 0),
+                "reasoning": final_decision.get("reasoning", ""),
+                "note": trade_note,
                 "sample_count": len(close_series),
-                "data_delay_minutes": self._get_data_delay_minutes(symbol),
+                "data_delay_minutes": data_delay_minutes,
+                "tp_hit": tp_hit,
+                "sl_hit": sl_hit,
+                **path_metrics,
                 **risk_metrics,
             }
+
+            if prediction_id is not None:
+                try:
+                    db.upsert_evaluation_outcome({
+                        "prediction_id": int(prediction_id),
+                        "horizon_minutes": int(horizon_minutes or self.evaluation_horizon_minutes),
+                        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+                        "target_time": target_time.isoformat(),
+                        "entry_price": round(entry_price, 4),
+                        "exit_price": round(exit_price, 4),
+                        "actual_direction": actual_direction,
+                        "realized_return_pct": round(realized_return_pct, 4),
+                        "fee_adjusted_pnl_pct": round(fee_adjusted_pnl_pct, 4),
+                        "benchmark_return_pct": round(benchmark_return_pct, 4),
+                        "excess_return_pct": round(excess_return_pct, 4),
+                        "correct": direction_correct,
+                        "tp_hit": tp_hit,
+                        "sl_hit": sl_hit,
+                        "mfe_pct": path_metrics.get("mfe_pct"),
+                        "mae_pct": path_metrics.get("mae_pct"),
+                        "sample_count": len(close_series),
+                        "data_delay_minutes": data_delay_minutes,
+                        "metadata": {
+                            "source_type": "ai_report",
+                            "report_created_at": old_report.get("created_at"),
+                            "predicted_direction": predicted_direction,
+                        },
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to persist evaluation outcome for report {old_report.get('id')}: {e}")
 
             return evaluation
 

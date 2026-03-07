@@ -110,7 +110,8 @@ class EvaluatorDaemon:
                         direction=direction,
                         outcome=outcome,
                         pnl_pct=round(pnl_pct, 2),
-                        mistake_summary=mistake_summary
+                        mistake_summary=mistake_summary,
+                        report_id=report.get("id"),
                     )
                 except Exception as e:
                     logger.error(f"Failed to log resolution metric: {e}")

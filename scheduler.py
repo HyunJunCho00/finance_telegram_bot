@@ -11,6 +11,7 @@ from collectors.crypto_news_collector import collector as news_collector
 from collectors.coinmetrics_collector import coinmetrics_collector
 from executors.orchestrator import orchestrator
 from evaluators.feedback_generator import feedback_generator
+from evaluators.evaluation_rollup import evaluation_rollup_service
 from processors.light_rag import light_rag
 from processors.gcs_archive import gcs_archive_exporter
 from processors.math_engine import math_engine
@@ -792,6 +793,15 @@ def job_24hour_evaluation():
     except Exception as e:
         logger.error(f"24-hour evaluation job error: {e}")
 
+
+def job_daily_evaluation_rollup():
+    try:
+        logger.info("Running daily evaluation rollup job")
+        result = evaluation_rollup_service.run_daily_rollup(lookback_days=3)
+        logger.info(f"Daily evaluation rollup result: {result}")
+    except Exception as e:
+        logger.error(f"Daily evaluation rollup job error: {e}")
+
 def job_1hour_evaluation():
     """V6: Self-Healing RAG evaluation of completed trades."""
     try:
@@ -838,27 +848,30 @@ def job_pressure_signal_evaluation():
         logger.error(f"Realtime pressure evaluation job error: {e}")
 
 
-def job_daily_cleanup():
-    """Cleanup old data + archive to GCS Parquet."""
+def job_daily_archive_to_gcs():
+    """Archive expiring rows to GCS Parquet and verify manifests."""
     try:
-        logger.info("Running daily data cleanup")
-
-        # 1) Archive expiring rows to GCS Parquet
+        logger.info("Running daily GCS archive job")
         archive_result = gcs_archive_exporter.run_daily_archive()
         logger.info(f"GCS Parquet archive: {archive_result}")
+    except Exception as e:
+        logger.error(f"Daily GCS archive job error: {e}")
 
-        # 2) Cleanup hot operational DB
-        result = db.cleanup_old_data()
-        logger.info(f"DB cleanup result: {result}")
 
-        # 3) Cleanup LightRAG in-memory data
+def job_daily_safe_cleanup():
+    """Delete only rows covered by verified archive manifests."""
+    try:
+        logger.info("Running daily safe cleanup job")
+        result = gcs_archive_exporter.run_safe_cleanup(limit=1000)
+        logger.info(f"Safe cleanup result: {result}")
+
         graph_days = settings.RETENTION_GRAPH_DAYS
         if graph_days > 0:
             light_rag.cleanup_old(days=graph_days)
         stats = light_rag.get_stats()
         logger.info(f"LightRAG stats: {stats}")
     except Exception as e:
-        logger.error(f"Daily cleanup error: {e}")
+        logger.error(f"Daily safe cleanup job error: {e}")
 
 
 
@@ -1088,6 +1101,13 @@ def main():
         id='job_24hour_evaluation',
         max_instances=1
     )
+
+    scheduler_config.scheduler.add_job(
+        job_daily_evaluation_rollup,
+        CronTrigger(hour=0, minute=40),
+        id='job_daily_evaluation_rollup',
+        max_instances=1
+    )
     
     # 1-Hour RAG Episodic Memory Evaluation (V6)
     scheduler_config.scheduler.add_job(
@@ -1097,11 +1117,19 @@ def main():
         max_instances=1
     )
 
-    # Daily cleanup at 01:00 UTC = 10:00 KST
+    # Daily archive at 01:00 UTC = 10:00 KST
     scheduler_config.scheduler.add_job(
-        job_daily_cleanup,
+        job_daily_archive_to_gcs,
         CronTrigger(hour=1, minute=0),
-        id='job_daily_cleanup',
+        id='job_daily_archive_to_gcs',
+        max_instances=1
+    )
+
+    # Safe cleanup after archive verification
+    scheduler_config.scheduler.add_job(
+        job_daily_safe_cleanup,
+        CronTrigger(hour=1, minute=20),
+        id='job_daily_safe_cleanup',
         max_instances=1
     )
 
@@ -1111,7 +1139,8 @@ def main():
     logger.info("Scheduler started.")
     logger.info(
         "Cadence(UTC): daily_precision=00:00 | telegram_batch=hh:05 | crypto_news=hh:10 | "
-        "hourly_monitor=hh:15 | market_status=hh:20 | hourly_eval=hh:45"
+        "hourly_monitor=hh:15 | market_status=hh:20 | daily_rollup=00:40 | "
+        "hourly_eval=hh:45 | gcs_archive=01:00 | safe_cleanup=01:20"
     )
 
     # [FIX Cold Start] Run initial data collection immediately so first analysis has data

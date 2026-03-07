@@ -410,6 +410,238 @@ class DatabaseClient:
         response = query.limit(1).execute()
         return response.data[0] if response.data else None
 
+    # Evaluation Storage
+
+    @staticmethod
+    def _to_iso(value) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value)
+
+    @reconnect_on_error
+    def upsert_evaluation_prediction(self, data: Dict) -> Optional[Dict]:
+        response = self.client.table("evaluation_predictions").upsert(
+            data,
+            on_conflict="source_type,source_id,mode"
+        ).execute()
+        return response.data[0] if response.data else None
+
+    def get_evaluation_prediction_by_source(
+        self,
+        source_type: str,
+        source_id: int,
+        mode: Optional[str] = None,
+    ) -> Optional[Dict]:
+        query = self.client.table("evaluation_predictions")\
+            .select("*")\
+            .eq("source_type", source_type)\
+            .eq("source_id", source_id)
+        if mode is not None:
+            query = query.eq("mode", mode)
+        response = query.order("created_at", desc=True).limit(1).execute()
+        return response.data[0] if response.data else None
+
+    def get_evaluation_prediction(self, prediction_id: int) -> Optional[Dict]:
+        response = self.client.table("evaluation_predictions")\
+            .select("*")\
+            .eq("id", prediction_id)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
+    def get_evaluation_predictions(
+        self,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        symbol: Optional[str] = None,
+        mode: Optional[str] = None,
+        source_type: Optional[str] = None,
+        limit: int = 5000,
+    ) -> List[Dict]:
+        rows: List[Dict] = []
+        fetched = 0
+        page_size = 1000
+        start_iso = self._to_iso(start_time)
+        end_iso = self._to_iso(end_time)
+
+        while fetched < limit:
+            fetch_size = min(page_size, limit - fetched)
+            query = self.client.table("evaluation_predictions").select("*")
+            if symbol:
+                query = query.eq("symbol", symbol)
+            if mode:
+                query = query.eq("mode", mode)
+            if source_type:
+                query = query.eq("source_type", source_type)
+            if start_iso:
+                query = query.gte("prediction_time", start_iso)
+            if end_iso:
+                query = query.lt("prediction_time", end_iso)
+            response = query.order("prediction_time").range(fetched, fetched + fetch_size - 1).execute()
+            chunk = response.data if response.data else []
+            if not chunk:
+                break
+            rows.extend(chunk)
+            fetched += len(chunk)
+            if len(chunk) < fetch_size:
+                break
+        return rows
+
+    @reconnect_on_error
+    def upsert_evaluation_outcome(self, data: Dict) -> Optional[Dict]:
+        response = self.client.table("evaluation_outcomes").upsert(
+            data,
+            on_conflict="prediction_id,horizon_minutes"
+        ).execute()
+        return response.data[0] if response.data else None
+
+    def get_evaluation_outcome(self, prediction_id: int, horizon_minutes: int) -> Optional[Dict]:
+        response = self.client.table("evaluation_outcomes")\
+            .select("*")\
+            .eq("prediction_id", prediction_id)\
+            .eq("horizon_minutes", horizon_minutes)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
+    def get_evaluation_outcomes(
+        self,
+        prediction_ids: Optional[List[int]] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        limit: int = 10000,
+    ) -> List[Dict]:
+        start_iso = self._to_iso(start_time)
+        end_iso = self._to_iso(end_time)
+        rows: List[Dict] = []
+
+        if prediction_ids:
+            for idx in range(0, len(prediction_ids), 200):
+                chunk_ids = prediction_ids[idx:idx + 200]
+                query = self.client.table("evaluation_outcomes").select("*").in_("prediction_id", chunk_ids)
+                if start_iso:
+                    query = query.gte("evaluated_at", start_iso)
+                if end_iso:
+                    query = query.lt("evaluated_at", end_iso)
+                response = query.order("evaluated_at").limit(limit).execute()
+                if response.data:
+                    rows.extend(response.data)
+            return rows[:limit]
+
+        fetched = 0
+        page_size = 1000
+        while fetched < limit:
+            fetch_size = min(page_size, limit - fetched)
+            query = self.client.table("evaluation_outcomes").select("*")
+            if start_iso:
+                query = query.gte("evaluated_at", start_iso)
+            if end_iso:
+                query = query.lt("evaluated_at", end_iso)
+            response = query.order("evaluated_at").range(fetched, fetched + fetch_size - 1).execute()
+            chunk = response.data if response.data else []
+            if not chunk:
+                break
+            rows.extend(chunk)
+            fetched += len(chunk)
+            if len(chunk) < fetch_size:
+                break
+        return rows
+
+    @reconnect_on_error
+    def batch_upsert_evaluation_component_scores(self, data_list: List[Dict]) -> Dict:
+        if not data_list:
+            return {"data": []}
+        return self.client.table("evaluation_component_scores").upsert(
+            data_list,
+            on_conflict="prediction_id,component_type,metric_name,scope_key"
+        ).execute()
+
+    def get_evaluation_component_scores(self, prediction_ids: List[int]) -> List[Dict]:
+        rows: List[Dict] = []
+        if not prediction_ids:
+            return rows
+        for idx in range(0, len(prediction_ids), 200):
+            chunk_ids = prediction_ids[idx:idx + 200]
+            response = self.client.table("evaluation_component_scores")\
+                .select("*")\
+                .in_("prediction_id", chunk_ids)\
+                .order("created_at")\
+                .execute()
+            if response.data:
+                rows.extend(response.data)
+        return rows
+
+    @reconnect_on_error
+    def delete_evaluation_rollups_for_date(self, rollup_date: str) -> Dict:
+        return self.client.table("evaluation_rollups_daily")\
+            .delete()\
+            .eq("rollup_date", rollup_date)\
+            .execute()
+
+    @reconnect_on_error
+    def upsert_evaluation_rollups(self, rows: List[Dict]) -> Dict:
+        if not rows:
+            return {"data": []}
+        return self.client.table("evaluation_rollups_daily").upsert(
+            rows,
+            on_conflict="rollup_date,symbol,mode,scope,horizon_minutes,metric_name,bucket_key"
+        ).execute()
+
+    # Archive manifests
+
+    @reconnect_on_error
+    def upsert_archive_manifest(self, data: Dict) -> Optional[Dict]:
+        response = self.client.table("archive_manifests").upsert(
+            data,
+            on_conflict="table_name,partition_key"
+        ).execute()
+        return response.data[0] if response.data else None
+
+    def get_archive_manifest(self, table_name: str, partition_key: str) -> Optional[Dict]:
+        response = self.client.table("archive_manifests")\
+            .select("*")\
+            .eq("table_name", table_name)\
+            .eq("partition_key", partition_key)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
+    @reconnect_on_error
+    def update_archive_manifest(self, manifest_id: int, data: Dict) -> Optional[Dict]:
+        response = self.client.table("archive_manifests")\
+            .update(data)\
+            .eq("id", manifest_id)\
+            .execute()
+        return response.data[0] if response.data else None
+
+    def get_archive_manifests(
+        self,
+        statuses: Optional[List[str]] = None,
+        cleanup_pending_only: bool = False,
+        limit: int = 1000,
+    ) -> List[Dict]:
+        fetched = 0
+        rows: List[Dict] = []
+        page_size = 500
+        while fetched < limit:
+            fetch_size = min(page_size, limit - fetched)
+            query = self.client.table("archive_manifests").select("*")
+            if statuses:
+                query = query.in_("status", statuses)
+            if cleanup_pending_only:
+                query = query.is_("cleanup_completed_at", "null")
+            response = query.order("archive_started_at").range(fetched, fetched + fetch_size - 1).execute()
+            chunk = response.data if response.data else []
+            if not chunk:
+                break
+            rows.extend(chunk)
+            fetched += len(chunk)
+            if len(chunk) < fetch_size:
+                break
+        return rows
+
     @reconnect_on_error
     def insert_market_status_event(self, data: Dict) -> Dict:
         """Insert hh:20 market status snapshot + event triggers for tuning."""

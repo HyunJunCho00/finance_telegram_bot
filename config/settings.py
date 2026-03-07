@@ -239,6 +239,10 @@ class Settings(BaseSettings):
     RETENTION_TELEGRAM_DAYS: int = 90  # 원본 텍스트 (Neo4j/Milvus에도 저장됨)
     RETENTION_REPORTS_DAYS: int = 365  # AI 리포트 (영구히 가깝게)
     RETENTION_CVD_DAYS: int = 30
+    RETENTION_EXECUTIONS_DAYS: int = 365
+    RETENTION_EVALUATION_DAYS: int = 365
+    RETENTION_EVALUATION_COMPONENT_DAYS: int = 180
+    RETENTION_ROLLUPS_DAYS: int = 3650
     RETENTION_GRAPH_DAYS: int = 0  # 0 = 영구 보존 (Neo4j Aura free: 200K nodes)
     
     # ===== Source Credibility =====
