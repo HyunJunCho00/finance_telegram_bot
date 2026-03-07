@@ -761,20 +761,24 @@ def job_hourly_swing_charts():
 
         for symbol in target_symbols:
             try:
-                result = mcp_tools.get_chart_image(symbol, lane="swing")
-                if not isinstance(result, dict) or "chart_base64" not in result:
+                result = mcp_tools.get_chart_images(symbol, lane="swing")
+                if not isinstance(result, dict) or "charts" not in result:
                     logger.warning(f"Hourly swing chart failed for {symbol}: {result.get('error') if isinstance(result, dict) else 'unknown error'}")
                     continue
 
-                chart_bytes = base64.b64decode(result["chart_base64"])
-                caption = (
-                    f"📈 <b>{symbol} SWING 차트 (정기 1시간)</b>\n"
-                    f"Lane: <code>swing</code>\n"
-                    f"Panels: <code>1D / 4H</code>\n"
-                    f"Timeframe: <code>{result.get('timeframe', '4h')}</code>\n"
-                    f"Lookback: <code>12M</code>"
-                )
-                asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption))
+                charts = result.get("charts", [])
+                total = len(charts)
+                for idx, chart in enumerate(charts, start=1):
+                    chart_bytes = base64.b64decode(chart["chart_base64"])
+                    tf = str(chart.get("timeframe", "4h")).upper()
+                    caption = (
+                        f"📈 <b>{symbol} SWING 차트 (정기 1시간)</b>\n"
+                        f"Lane: <code>swing</code>\n"
+                        f"Timeframe: <code>{tf}</code>\n"
+                        f"Panel: <code>{idx}/{total}</code>\n"
+                        f"Lookback: <code>12M</code>"
+                    )
+                    asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption))
             except Exception as e:
                 logger.warning(f"Hourly swing chart send failed for {symbol}: {e}")
     except Exception as e:

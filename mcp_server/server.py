@@ -103,6 +103,13 @@ def get_chart_image(symbol: str, lane: str = "swing") -> dict:
 
 
 @mcp.tool()
+def get_chart_images(symbol: str, lane: str = "swing") -> dict:
+    """Generate split human-readable chart images for a lane."""
+    logger.info(f"MCP tool: get_chart_images {symbol} (lane={lane})")
+    return mcp_tools.get_chart_images(symbol, lane=lane)
+
+
+@mcp.tool()
 def get_indicator_summary(symbol: str) -> dict:
     """Get multi-timeframe technical indicator summary (compact format)."""
     logger.info(f"MCP tool: get_indicator_summary {symbol}")

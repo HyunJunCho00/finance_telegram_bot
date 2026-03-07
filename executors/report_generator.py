@@ -8,6 +8,7 @@ import asyncio
 import threading
 from loguru import logger
 import json
+import base64
 from utils.retry import api_retry
 
 
@@ -54,6 +55,18 @@ class ReportGenerator:
         if mode == TradingMode.POSITION:
             return ("1W/1D", "60M")
         return ("1D/4H", "12M")
+
+    @staticmethod
+    def _load_human_chart_panels(symbol: str, mode: TradingMode) -> list[dict]:
+        try:
+            from mcp_server.tools import mcp_tools
+            result = mcp_tools.get_chart_images(symbol, lane=mode.value)
+            if not isinstance(result, dict) or "charts" not in result:
+                return []
+            return result.get("charts", [])
+        except Exception as e:
+            logger.warning(f"Human chart panel load failed for {symbol}: {e}")
+            return []
 
     @staticmethod
     def _extract_onchain_summary(onchain_context: str) -> str:
@@ -267,7 +280,50 @@ class ReportGenerator:
             keyboard = [[InlineKeyboardButton("🔍 View Deep Analysis", callback_data=f"detail_{report_id}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            if chart_bytes:
+            chart_panels = self._load_human_chart_panels(report["symbol"], mode)
+
+            if chart_panels:
+                total = len(chart_panels)
+                for idx, panel in enumerate(chart_panels, start=1):
+                    photo = BytesIO(base64.b64decode(panel["chart_base64"]))
+                    tf = str(panel.get("timeframe", "-")).upper()
+                    photo.name = f"{report['symbol']}_{tf}.png"
+                    await bot.send_photo(
+                        chat_id=self.chat_id,
+                        photo=photo,
+                        caption=(
+                            f"📊 <b>{report['symbol']} {mode.value.upper()} Chart</b>\n"
+                            f"Timeframe: <code>{tf}</code>\n"
+                            f"Panel: <code>{idx}/{total}</code>"
+                        ),
+                        parse_mode="HTML",
+                    )
+
+                if len(summary_text) <= 1024:
+                    await bot.send_message(
+                        chat_id=self.chat_id,
+                        text=summary_text,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup,
+                    )
+                else:
+                    panel_label, lookback_label = self._chart_profile(mode)
+                    await bot.send_message(
+                        chat_id=self.chat_id,
+                        text=(
+                            f"<b>{report['symbol']} {mode.value.upper()} Chart Profile</b>\n"
+                            f"Panels: <code>{panel_label}</code>\n"
+                            f"Lookback: <code>{lookback_label}</code>"
+                        ),
+                        parse_mode="HTML",
+                    )
+                    await bot.send_message(
+                        chat_id=self.chat_id,
+                        text=summary_text,
+                        parse_mode="HTML",
+                        reply_markup=reply_markup,
+                    )
+            elif chart_bytes:
                 photo = BytesIO(chart_bytes)
                 photo.name = f"{report['symbol']}_chart.png"
 

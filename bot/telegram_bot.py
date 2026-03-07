@@ -705,9 +705,26 @@ class TradingBot:
 
         try:
             from mcp_server.tools import mcp_tools
-            result = mcp_tools.get_chart_image(symbol, lane=lane)
+            result = mcp_tools.get_chart_images(symbol, lane=lane)
 
-            if "chart_base64" in result:
+            if "charts" in result:
+                charts = result.get("charts", [])
+                total = len(charts)
+                for idx, chart in enumerate(charts, start=1):
+                    chart_bytes = base64.b64decode(chart["chart_base64"])
+                    tf = str(chart.get("timeframe", "-")).upper()
+                    buf = BytesIO(chart_bytes)
+                    buf.name = f"{symbol}_{lane}_{tf}.png"
+
+                    caption = (
+                        f"<b>{symbol} {result.get('mode', '').upper()} CHART</b>\n"
+                        f"Lane: <code>{result.get('lane', lane)}</code>\n"
+                        f"Timeframe: <code>{tf}</code>\n"
+                        f"Panel: <code>{idx}/{total}</code>\n"
+                        f"Quality: <code>Premium HD</code>"
+                    )
+                    await update.message.reply_photo(photo=buf, caption=caption, parse_mode='HTML')
+            elif "chart_base64" in result:
                 chart_bytes = base64.b64decode(result["chart_base64"])
                 buf = BytesIO(chart_bytes)
                 buf.name = f"{symbol}_{lane}.png"

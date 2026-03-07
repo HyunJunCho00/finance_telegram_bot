@@ -13,6 +13,93 @@ from agents.market_monitor_agent import market_monitor_agent
 
 
 class MCPTools:
+    def _load_chart_context(self, symbol: str, mode: TradingMode) -> Optional[Dict]:
+        settings = get_settings()
+        limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.POSITION_CANDLE_LIMIT
+
+        df = db.get_latest_market_data(symbol, limit=limit)
+        if df.empty:
+            return None
+
+        df_4h, df_1d, df_1w = None, None, None
+        cvd_df, funding_df, liq_df = None, None, None
+
+        if gcs_parquet_store.enabled:
+            try:
+                m_back = settings.history_lookback_months_for_mode(mode)
+                if mode == TradingMode.SWING:
+                    df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
+                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
+                if mode == TradingMode.POSITION:
+                    df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
+
+                m_back_timeseries = m_back
+                db_limit = 45000
+                now_utc = pd.Timestamp.now(tz='UTC')
+
+                cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back_timeseries)
+                if not cvd_hist.empty:
+                    cvd_hist['timestamp'] = pd.to_datetime(cvd_hist['timestamp'], utc=True, errors='coerce')
+                    month_start = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                    cvd_hist = cvd_hist[cvd_hist['timestamp'] < month_start].copy()
+
+                since_cvd = cvd_hist['timestamp'].max() if not cvd_hist.empty else None
+                bridge_cvd = db.get_cvd_data(symbol, limit=db_limit, since=since_cvd) if since_cvd is not None else pd.DataFrame()
+                cvd_recent = db.get_cvd_data(symbol, limit=db_limit)
+                merged_cvd = merge_cvd_sources(cvd_hist, bridge_cvd, cvd_recent)
+
+                fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
+                price_timeline = build_price_timeline(df_1m=df, df_1d=df_1d, fallback_price=fallback_px)
+                cvd_df = normalize_cvd_to_usd(merged_cvd, price_timeline, fallback_price=fallback_px)
+
+                fnd_hist_dfs = []
+                for m in range(1, m_back + 1):
+                    month_str = (now_utc - pd.DateOffset(months=m)).strftime("%Y-%m")
+                    path = f"funding/{symbol}/{month_str}.parquet"
+                    df_part = gcs_parquet_store._download_parquet(path)
+                    if df_part is not None:
+                        fnd_hist_dfs.append(df_part)
+
+                fnd_hist = pd.concat(fnd_hist_dfs, ignore_index=True) if fnd_hist_dfs else pd.DataFrame()
+                if not fnd_hist.empty:
+                    fnd_hist.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
+                    fnd_hist = fnd_hist.loc[:, ~fnd_hist.columns.duplicated()].reset_index(drop=True)
+                    fnd_hist['timestamp'] = pd.to_datetime(fnd_hist['timestamp'], utc=True)
+
+                    fnd_recent = db.get_funding_history(symbol, limit=db_limit)
+                    if fnd_recent is not None and not fnd_recent.empty:
+                        fnd_recent.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
+                        fnd_recent = fnd_recent.loc[:, ~fnd_recent.columns.duplicated()].reset_index(drop=True)
+                        fnd_recent['timestamp'] = pd.to_datetime(fnd_recent['timestamp'], utc=True)
+
+                        funding_df = pd.concat([fnd_hist, fnd_recent], ignore_index=True).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                        funding_df = funding_df.reset_index(drop=True)
+                    else:
+                        funding_df = fnd_hist
+                else:
+                    funding_df = db.get_funding_history(symbol, limit=db_limit)
+                    if funding_df is not None and not funding_df.empty:
+                        funding_df.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
+                        funding_df['timestamp'] = pd.to_datetime(funding_df['timestamp'], utc=True)
+
+                liq_df = db.get_liquidation_data(symbol, limit=db_limit)
+            except Exception as e:
+                import traceback
+                logger.warning(f"GCS load for chart tool skipped: {e}\n{traceback.format_exc()}")
+
+        fixed_timeframe = "4h" if mode == TradingMode.SWING else "1d"
+        analysis = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w, timeframe=fixed_timeframe)
+        return {
+            "df": df,
+            "analysis": analysis,
+            "df_4h": df_4h,
+            "df_1d": df_1d,
+            "df_1w": df_1w,
+            "cvd_df": cvd_df,
+            "funding_df": funding_df,
+            "liq_df": liq_df,
+            "fixed_timeframe": fixed_timeframe,
+        }
 
     def get_market_analysis(self, symbol: str) -> Dict:
         """Get mode-specific market analysis. Raw data only."""
@@ -226,107 +313,23 @@ class MCPTools:
 
     def get_chart_image(self, symbol: str, lane: Optional[str] = None) -> Dict:
         try:
-            settings = get_settings()
             lane_norm = (lane or "swing").lower().strip()
             if lane_norm not in ("swing", "position"):
                 return {"error": "Invalid lane. Use 'swing' or 'position'."}
 
             mode = TradingMode.SWING if lane_norm == "swing" else TradingMode.POSITION
-            fixed_timeframe = "4h" if mode == TradingMode.SWING else "1d"
-            limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.POSITION_CANDLE_LIMIT
-
-            df = db.get_latest_market_data(symbol, limit=limit)
-            if df.empty:
+            ctx = self._load_chart_context(symbol, mode)
+            if not ctx:
                 return {"error": "No market data available"}
-
-            # Load higher timeframe data from GCS for deeper indicator history
-            df_4h, df_1d, df_1w = None, None, None
-            cvd_df, funding_df, liq_df = None, None, None
-            
-            if gcs_parquet_store.enabled:
-                try:
-                    m_back = settings.history_lookback_months_for_mode(mode)
-                    if mode == TradingMode.SWING:
-                        df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
-                    df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
-                    if mode == TradingMode.POSITION:
-                        df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
-
-                    m_back_timeseries = m_back  # Full lookback for consolidated process memory efficiency
-
-                    # Bridge GCS gap: 45,000 rows covers ~31 days of 1m data
-                    db_limit = 45000
-
-                    # 1) CVD history merge
-                    now_utc = pd.Timestamp.now(tz='UTC')
-                    cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back_timeseries)
-                    if not cvd_hist.empty:
-                        cvd_hist['timestamp'] = pd.to_datetime(cvd_hist['timestamp'], utc=True, errors='coerce')
-                        month_start = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-                        cvd_hist = cvd_hist[cvd_hist['timestamp'] < month_start].copy()
-
-                    since_cvd = cvd_hist['timestamp'].max() if not cvd_hist.empty else None
-                    bridge_cvd = db.get_cvd_data(symbol, limit=db_limit, since=since_cvd) if since_cvd is not None else pd.DataFrame()
-                    cvd_recent = db.get_cvd_data(symbol, limit=db_limit)
-                    merged_cvd = merge_cvd_sources(cvd_hist, bridge_cvd, cvd_recent)
-
-                    fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
-                    price_timeline = build_price_timeline(df_1m=df, df_1d=df_1d, fallback_price=fallback_px)
-                    cvd_df = normalize_cvd_to_usd(merged_cvd, price_timeline, fallback_price=fallback_px)
-                    
-                    # 2) Funding / OI history merge
-                    fnd_hist_dfs = []
-                    for m in range(1, m_back + 1):  # Full lookback (skip current month in archive)
-                        month_str = (now_utc - pd.DateOffset(months=m)).strftime("%Y-%m")
-                        path = f"funding/{symbol}/{month_str}.parquet"
-                        df_part = gcs_parquet_store._download_parquet(path)
-                        if df_part is not None:
-                            fnd_hist_dfs.append(df_part)
-                    
-                    fnd_hist = pd.concat(fnd_hist_dfs, ignore_index=True) if fnd_hist_dfs else pd.DataFrame()
-                    
-                    if not fnd_hist.empty:
-                        # [V14.5 Fix] Standardize OI to USD value
-                        fnd_hist.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
-                        # [V14.6] Dedup columns ??GCS parquet may already have 'open_interest',
-                        # causing duplicate columns after rename which breaks pd.concat
-                        fnd_hist = fnd_hist.loc[:, ~fnd_hist.columns.duplicated()].reset_index(drop=True)
-                        fnd_hist['timestamp'] = pd.to_datetime(fnd_hist['timestamp'], utc=True)
-
-                        fnd_recent = db.get_funding_history(symbol, limit=db_limit)
-                        if fnd_recent is not None and not fnd_recent.empty:
-                            fnd_recent.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
-                            fnd_recent = fnd_recent.loc[:, ~fnd_recent.columns.duplicated()].reset_index(drop=True)
-                            fnd_recent['timestamp'] = pd.to_datetime(fnd_recent['timestamp'], utc=True)
-
-                            funding_df = pd.concat([fnd_hist, fnd_recent], ignore_index=True)\
-                                           .drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-                            funding_df = funding_df.reset_index(drop=True)
-                        else:
-                            funding_df = fnd_hist
-                    else:
-                        funding_df = db.get_funding_history(symbol, limit=db_limit)
-                        if not funding_df.empty:
-                            funding_df.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
-                            funding_df['timestamp'] = pd.to_datetime(funding_df['timestamp'], utc=True)
-                    
-                    # 3. Liquidations (Increase limit to cover gaps)
-                    liq_df = db.get_liquidation_data(symbol, limit=db_limit)
-                except Exception as e:
-                    import traceback
-                    logger.warning(f"GCS load for chart tool skipped: {e}\n{traceback.format_exc()}")
-
-            # Get analysis and generate chart
-            analysis = math_engine.analyze_market(
-                df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w, timeframe=fixed_timeframe
+            chart_bytes = chart_generator.generate_chart(
+                ctx["df"], ctx["analysis"], symbol, mode,
+                df_4h=ctx["df_4h"],
+                df_1d=ctx["df_1d"], df_1w=ctx["df_1w"],
+                cvd_df=ctx["cvd_df"],
+                funding_df=ctx["funding_df"],
+                liquidation_df=ctx["liq_df"],
+                timeframe=ctx["fixed_timeframe"],
             )
-            chart_bytes = chart_generator.generate_chart(df, analysis, symbol, mode, 
-                                                          df_4h=df_4h,
-                                                          df_1d=df_1d, df_1w=df_1w,
-                                                          cvd_df=cvd_df, 
-                                                          funding_df=funding_df,
-                                                          liquidation_df=liq_df,
-                                                          timeframe=fixed_timeframe)
 
             if chart_bytes:
                 b64 = chart_generator.chart_to_base64(chart_bytes)
@@ -334,13 +337,58 @@ class MCPTools:
                     "symbol": symbol,
                     "mode": mode.value,
                     "lane": lane_norm,
-                    "timeframe": fixed_timeframe,
+                    "timeframe": ctx["fixed_timeframe"],
                     "chart_base64": b64,
                     "size_bytes": len(chart_bytes)
                 }
             return {"error": "Chart generation failed"}
         except Exception as e:
             logger.error(f"Chart image error: {e}")
+            return {"error": str(e)}
+
+    def get_chart_images(self, symbol: str, lane: Optional[str] = None) -> Dict:
+        try:
+            lane_norm = (lane or "swing").lower().strip()
+            if lane_norm not in ("swing", "position"):
+                return {"error": "Invalid lane. Use 'swing' or 'position'."}
+
+            mode = TradingMode.SWING if lane_norm == "swing" else TradingMode.POSITION
+            ctx = self._load_chart_context(symbol, mode)
+            if not ctx:
+                return {"error": "No market data available"}
+
+            timeframes = ["1d", "4h"] if mode == TradingMode.SWING else ["1w", "1d"]
+            charts = []
+            for timeframe in timeframes:
+                chart_bytes = chart_generator.generate_chart(
+                    ctx["df"], ctx["analysis"], symbol, mode,
+                    df_4h=ctx["df_4h"],
+                    df_1d=ctx["df_1d"], df_1w=ctx["df_1w"],
+                    cvd_df=ctx["cvd_df"],
+                    funding_df=ctx["funding_df"],
+                    liquidation_df=ctx["liq_df"],
+                    timeframe=timeframe,
+                    prefer_lane=False,
+                )
+                if not chart_bytes:
+                    continue
+                charts.append({
+                    "timeframe": timeframe,
+                    "chart_base64": chart_generator.chart_to_base64(chart_bytes),
+                    "size_bytes": len(chart_bytes),
+                })
+
+            if not charts:
+                return {"error": "Chart generation failed"}
+
+            return {
+                "symbol": symbol,
+                "mode": mode.value,
+                "lane": lane_norm,
+                "charts": charts,
+            }
+        except Exception as e:
+            logger.error(f"Chart images error: {e}")
             return {"error": str(e)}
 
     def get_indicator_summary(self, symbol: str) -> Dict:

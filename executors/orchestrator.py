@@ -86,6 +86,103 @@ def _clear_symbol_mode_caches(symbol: str, mode: TradingMode | str) -> None:
         cache.pop(cache_key, None)
         cache.pop(symbol, None)
 
+
+def _fmt_level(value) -> str:
+    if not isinstance(value, (int, float)) or pd.isna(value):
+        return "N/A"
+    return f"{float(value):,.2f}"
+
+
+def _fmt_directional_level(structure: dict, key: str, fallback_key: str) -> str:
+    if not isinstance(structure, dict):
+        return "N/A"
+    value = structure.get(key)
+    if not isinstance(value, (int, float)):
+        value = structure.get(fallback_key)
+    return _fmt_level(value)
+
+
+def _build_vlm_context_text(market_data: dict, mode: TradingMode) -> str:
+    primary_tf = "4H" if mode == TradingMode.SWING else "1D"
+    higher_tf = "1D" if mode == TradingMode.SWING else "1W"
+
+    analysis = market_data or {}
+    current_price = _fmt_level(analysis.get("current_price"))
+    market_structure = (analysis.get("market_structure", {}) or {}).get(higher_tf.lower(), {}) or {}
+    structure = analysis.get("structure", {}) or {}
+    fibonacci = (analysis.get("fibonacci", {}) or {}).get(higher_tf.lower(), {}) or {}
+    swing = (analysis.get("swing_levels", {}) or {}).get(higher_tf.lower(), {}) or {}
+    zones = analysis.get("confluence_zones", []) or []
+
+    diag_support = structure.get(f"support_{higher_tf.lower()}") or {}
+    diag_resistance = structure.get(f"resistance_{higher_tf.lower()}") or {}
+
+    filtered_zones = []
+    for zone in zones:
+        if not isinstance(zone, dict):
+            continue
+        zone_tfs = {str(tf).lower() for tf in zone.get("timeframes", [])}
+        if higher_tf.lower() in zone_tfs:
+            filtered_zones.append(zone)
+
+    lines = [
+        f"Primary TF: {primary_tf}",
+        f"Higher TF: {higher_tf}",
+        f"Current Price: {current_price}",
+        "Rule: Use the higher timeframe as a directional filter. If the chart image conflicts with it, lower confidence.",
+    ]
+
+    if market_structure:
+        lines.extend([
+            f"{higher_tf} Bias: {str(market_structure.get('structure', 'unknown')).upper()}",
+            f"{higher_tf} Last Swing High: {_fmt_level(market_structure.get('last_swing_high'))}",
+            f"{higher_tf} Last Swing Low: {_fmt_level(market_structure.get('last_swing_low'))}",
+        ])
+        choch = market_structure.get("choch") or {}
+        if isinstance(choch.get("price"), (int, float)):
+            lines.append(f"{higher_tf} CHoCH: {str(choch.get('type', 'unknown')).upper()} @ {_fmt_level(choch.get('price'))}")
+        msb = market_structure.get("msb") or {}
+        msb_price = msb.get("price")
+        if not isinstance(msb_price, (int, float)):
+            msb_price = msb.get("broken_level")
+        if isinstance(msb_price, (int, float)):
+            lines.append(f"{higher_tf} MSB: {str(msb.get('type', 'unknown')).upper()} @ {_fmt_level(msb_price)}")
+
+    lines.extend([
+        f"{higher_tf} Diagonal Support: {_fmt_directional_level(diag_support, 'support_price', 'price')}",
+        f"{higher_tf} Diagonal Resistance: {_fmt_directional_level(diag_resistance, 'resistance_price', 'price')}",
+    ])
+
+    if fibonacci:
+        lines.extend([
+            f"{higher_tf} Fib 50.0: {_fmt_level(fibonacci.get('fib_500'))}",
+            f"{higher_tf} Fib 61.8: {_fmt_level(fibonacci.get('fib_618'))}",
+            f"{higher_tf} Fib 70.5: {_fmt_level(fibonacci.get('fib_705'))}",
+            f"{higher_tf} Fib 78.6: {_fmt_level(fibonacci.get('fib_786'))}",
+        ])
+
+    swing_highs = [v for v in (swing.get("swing_highs", []) or []) if isinstance(v, (int, float))]
+    swing_lows = [v for v in (swing.get("swing_lows", []) or []) if isinstance(v, (int, float))]
+    if swing_highs or swing_lows:
+        lines.extend([
+            f"{higher_tf} Swing Highs: {', '.join(_fmt_level(v) for v in swing_highs[:2]) or 'N/A'}",
+            f"{higher_tf} Swing Lows: {', '.join(_fmt_level(v) for v in swing_lows[:2]) or 'N/A'}",
+            f"{higher_tf} Nearest Resistance: {_fmt_level(swing.get('nearest_resistance'))}",
+            f"{higher_tf} Nearest Support: {_fmt_level(swing.get('nearest_support'))}",
+        ])
+
+    if filtered_zones:
+        zone_lines = []
+        for zone in filtered_zones[:2]:
+            sources = [str(src) for src in (zone.get("sources", []) or [])[:2]]
+            zone_lines.append(
+                f"{_fmt_level(zone.get('price_low'))}~{_fmt_level(zone.get('price_high'))} "
+                f"(strength={zone.get('strength', 'N/A')}, sources={','.join(sources) or 'N/A'})"
+            )
+        lines.append(f"{higher_tf} Confluence: {'; '.join(zone_lines)}")
+
+    return "\n".join(lines)
+
 # ???? State definition (LangGraph TypedDict) ????
 
 class AnalysisState(TypedDict):
@@ -125,6 +222,7 @@ class AnalysisState(TypedDict):
     # Chart
     chart_image_b64: Optional[str]
     chart_bytes: Optional[bytes]
+    vlm_context_text: str
 
     # Final output
     market_regime: str
@@ -749,12 +847,16 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
     # Extract current price from cached market_data for prompt context
     market_data = _market_data_cache.get(cache_key, {})
     current_price = market_data.get('current_price', None)
+    primary_tf = "4H" if mode == TradingMode.SWING else "1D"
+    vlm_context_text = state.get("vlm_context_text", "")
 
     result = vlm_geometric_agent.analyze(
         chart, 
         mode=state.get("mode", "SWING").upper(),
         symbol=symbol,
-        current_price=current_price
+        current_price=current_price,
+        primary_timeframe=primary_tf,
+        higher_timeframe_context=vlm_context_text,
     )
     return {"blackboard": {"vlm_geometry": result}}
 
@@ -772,7 +874,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
     if df is None:
         df = db.get_latest_market_data(symbol, limit=candle_limit)  # fallback
     if df.empty:
-        return {"chart_image_b64": None, "chart_bytes": None}
+        return {"chart_image_b64": None, "chart_bytes": None, "vlm_context_text": ""}
 
     # Load higher TF data from GCS
     df_4h, df_1d, df_1w = None, None, None
@@ -793,6 +895,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
     market_data = _market_data_cache.get(cache_key)
     if market_data is None:
         market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
+    vlm_context_text = _build_vlm_context_text(market_data, mode)
 
     # CVD pipeline removed ??cvd_df always None; chart_generator handles None gracefully
     cvd_df = None
@@ -869,7 +972,8 @@ def node_generate_chart(state: AnalysisState) -> dict:
             funding_df=funding_df,
             df_4h=df_4h,
             df_1d=df_1d,
-            df_1w=df_1w
+            df_1w=df_1w,
+            prefer_lane=False,
         )
     except Exception as e:
         logger.error(f'Chart generation FAILED: {e}')
@@ -877,7 +981,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
 
     if not chart_bytes:
         logger.warning(f"Chart generation FAILED for {symbol} ({mode.value})")
-        return {"chart_image_b64": None, "chart_bytes": None}
+        return {"chart_image_b64": None, "chart_bytes": None, "vlm_context_text": vlm_context_text}
 
     chart_image_b64 = None
     if chart_bytes:
@@ -885,7 +989,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
         chart_image_b64 = chart_generator.chart_to_base64(chart_bytes_for_vlm)
         logger.info(f"Generated chart for {symbol}: {len(chart_bytes)} bytes. VLM B64 size: {len(chart_image_b64)}")
 
-    return {"chart_image_b64": chart_image_b64, "chart_bytes": chart_bytes}
+    return {"chart_image_b64": chart_image_b64, "chart_bytes": chart_bytes, "vlm_context_text": vlm_context_text}
 
 
 def node_judge_agent(state: AnalysisState) -> dict:
@@ -1479,6 +1583,7 @@ class Orchestrator:
             "regime_context": {},
             "chart_image_b64": None,
             "chart_bytes": None,
+            "vlm_context_text": "",
             "final_decision": {},
             "daily_dual_plan": {},
             "report": None,
@@ -1500,6 +1605,7 @@ class Orchestrator:
             "symbol": symbol, "mode": mode.value,
             "is_emergency": is_emergency, "execute_trades": execute_trades, "errors": [],
             "onchain_snapshot": {}, "onchain_context": "", "onchain_gate": {},
+            "vlm_context_text": "",
         }
 
         # Run each node sequentially — mirrors the LangGraph DAG order.
@@ -1730,17 +1836,21 @@ class Orchestrator:
                         import base64
                         for lane, status in [("swing", swing_status), ("position", pos_status)]:
                             if status in ["WATCH", "TRIGGER", "SOFT_TRIGGER"]:
-                                chart_res = mcp_tools.get_chart_image(symbol, lane=lane)
-                                if "chart_base64" in chart_res:
-                                    chart_bytes = base64.b64decode(chart_res["chart_base64"])
-                                    panel_label = "1D / 4H" if lane == "swing" else "1W / 1D"
+                                chart_res = mcp_tools.get_chart_images(symbol, lane=lane)
+                                if "charts" in chart_res:
+                                    charts = chart_res.get("charts", [])
+                                    total = len(charts)
                                     lookback_label = "12M" if lane == "swing" else "60M"
-                                    caption = (
-                                        f"📊 <b>{symbol} {lane.upper()} Chart - {status}</b>\n"
-                                        f"Panels: <code>{panel_label}</code>\n"
-                                        f"Lookback: <code>{lookback_label}</code>"
-                                    )
-                                    asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption=caption))
+                                    for idx, chart in enumerate(charts, start=1):
+                                        chart_bytes = base64.b64decode(chart["chart_base64"])
+                                        tf = str(chart.get("timeframe", "-")).upper()
+                                        caption = (
+                                            f"📊 <b>{symbol} {lane.upper()} Chart - {status}</b>\n"
+                                            f"Timeframe: <code>{tf}</code>\n"
+                                            f"Panel: <code>{idx}/{total}</code>\n"
+                                            f"Lookback: <code>{lookback_label}</code>"
+                                        )
+                                        asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption=caption))
                     except Exception as e:
                         logger.warning(f"Failed to send hourly monitor chart for {symbol}: {e}")
             except Exception as e:

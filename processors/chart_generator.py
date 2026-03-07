@@ -31,6 +31,7 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 from io import BytesIO
 import base64
+from PIL import Image, ImageDraw, ImageFont
 from typing import Dict, List, Optional, Tuple
 from config.settings import get_settings, TradingMode
 from loguru import logger
@@ -89,7 +90,8 @@ class ChartGenerator:
                        funding_df: Optional[pd.DataFrame] = None,
                        df_4h: Optional[pd.DataFrame] = None,
                        df_1d: Optional[pd.DataFrame] = None,
-                       df_1w: Optional[pd.DataFrame] = None) -> Optional[bytes]:
+                       df_1w: Optional[pd.DataFrame] = None,
+                       prefer_lane: bool = True) -> Optional[bytes]:
         """Generate structure chart for any mode or specific timeframe."""
         config = self._get_mode_config(mode, timeframe)
         # Filter analysis data for visual clarity (active elements only)
@@ -97,7 +99,7 @@ class ChartGenerator:
         analysis = self._filter_active_elements(current_price, analysis)
 
         timeframe_norm = (timeframe or "").lower().strip()
-        is_lane_chart = (
+        is_lane_chart = prefer_lane and (
             (mode == TradingMode.SWING and timeframe_norm in ("", "4h")) or
             (mode == TradingMode.POSITION and timeframe_norm in ("", "1d"))
         )
@@ -333,23 +335,31 @@ class ChartGenerator:
 
     def _stack_images_vertical(self, images: List[bytes], title: str) -> Optional[bytes]:
         try:
-            arrays = [plt.imread(BytesIO(img), format='png') for img in images]
-            ratios = [arr.shape[0] / max(arr.shape[1], 1) for arr in arrays]
-            fig_height = (self.width / self.dpi) * sum(ratios) + 0.8
-            fig, axes = plt.subplots(len(arrays), 1, figsize=(self.width / self.dpi, fig_height), dpi=self.dpi)
-            if not isinstance(axes, np.ndarray):
-                axes = np.array([axes])
+            pil_images = [Image.open(BytesIO(img)).convert('RGBA') for img in images]
+            max_width = max(img.width for img in pil_images)
+            title_height = 44
+            separator = 8
+            total_height = title_height + sum(img.height for img in pil_images) + separator * max(len(pil_images) - 1, 0)
 
-            fig.patch.set_facecolor('white')
-            fig.suptitle(title, fontsize=13, fontweight='bold', y=0.995)
-            for ax, arr in zip(axes, arrays):
-                ax.imshow(arr)
-                ax.axis('off')
+            canvas = Image.new('RGBA', (max_width, total_height), 'white')
+            draw = ImageDraw.Draw(canvas)
+            try:
+                title_font = ImageFont.truetype("DejaVuSans-Bold.ttf", 22)
+            except Exception:
+                title_font = ImageFont.load_default()
 
-            fig.subplots_adjust(top=0.965, hspace=0.04)
+            title_bbox = draw.textbbox((0, 0), title, font=title_font)
+            title_width = title_bbox[2] - title_bbox[0]
+            draw.text(((max_width - title_width) / 2, 12), title, fill='#111111', font=title_font)
+
+            y = title_height
+            for img in pil_images:
+                x = (max_width - img.width) // 2
+                canvas.alpha_composite(img, (x, y))
+                y += img.height + separator
+
             buf = BytesIO()
-            fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight', facecolor='white')
-            plt.close(fig)
+            canvas.convert('RGB').save(buf, format='PNG')
             buf.seek(0)
             return buf.getvalue()
         except Exception as e:
@@ -983,12 +993,7 @@ class ChartGenerator:
     def _draw_diagonal_line(self, ax, chart_df: pd.DataFrame,
                              line_info: Optional[Dict], value_key: str, color: str,
                              theme: str = 'dark_premium', text_color: str = '#D1D4DC'):
-        """Draw diagonal support/resistance trendline using exact timestamps.
-        
-        Using timestamps instead of row indices ensures that if there is an offline
-        data gap in the chart_df, the line will be drawn correctly across the gap
-        rather than being distorted by the missing rows.
-        """
+        """Draw diagonal support/resistance trendline as a straight screen-space segment."""
         if not line_info or 'point1' not in line_info or 'point2' not in line_info:
             return
         
@@ -1025,12 +1030,6 @@ class ChartGenerator:
             dt_end = (chart_end - ts1).total_seconds()
             y_end = y1 + slope_sec * dt_end
             
-            # We want to draw a line from (chart_start, y_start) to (chart_end, y_end)
-            # using matplotlib's standard plot, but mapped to the chart_df's integer x-axis.
-            # Since mplfinance removes gaps visually, a straight line in time might 
-            # look slightly kinked if plotted over a gap. But usually drawing straight
-            # across the visual space is preferred.
-            
             y_lo = float(chart_df['low'].min())
             y_hi = float(chart_df['high'].max())
             margin = (y_hi - y_lo) * 0.05
@@ -1038,23 +1037,8 @@ class ChartGenerator:
             if max(y_start, y_end) < y_lo - margin or min(y_start, y_end) > y_hi + margin:
                 return # Out of bounds
             
-            # To draw on the mpf axes natively, we calculate the Y value for every X position
-            # using the actual timestamp of that X position.
-            x_vals = np.arange(len(chart_df))
-            timestamps = chart_df.index
-            
-            # Ensure both are timezone aware for subtraction
-            if timestamps.tz is None:
-                timestamps = timestamps.tz_localize('UTC')
-            if ts1.tzinfo is None:
-                ts1 = ts1.tz_localize('UTC')
-            
-            # Calculate Y for every point based on exact timestamp
-            seconds_diff = (timestamps - ts1).total_seconds()
-            y_vals = y1 + slope_sec * seconds_diff
-            
-            # Clamp to prevent autoscaling issues
-            y_plot = np.clip(y_vals, y_lo - margin, y_hi + margin)
+            x_vals = np.array([0, len(chart_df) - 1], dtype=float)
+            y_plot = np.clip(np.array([y_start, y_end], dtype=float), y_lo - margin, y_hi + margin)
             
             kind = "SUP" if "support" in str(line_info.get('type', value_key)).lower() else "RES"
             tf = str(line_info.get('timeframe') or '').upper()
@@ -1124,7 +1108,32 @@ class ChartGenerator:
 
         tf_prefix = f"{str(tf_label).upper()} " if tf_label else ""
         n = len(chart_df)
-        for idx, high in enumerate(swing.get('swing_highs', [])):
+        current_price = float(chart_df['close'].iloc[-1])
+        chart_low = float(chart_df['low'].min())
+        chart_high = float(chart_df['high'].max())
+        dedupe_gap = max(current_price * 0.004, (chart_high - chart_low) * 0.015)
+
+        def _select_levels(levels: List[float]) -> List[float]:
+            visible = []
+            for level in levels or []:
+                if not isinstance(level, (int, float)):
+                    continue
+                level = float(level)
+                if level < chart_low or level > chart_high:
+                    continue
+                visible.append(level)
+
+            visible = sorted(visible, key=lambda level: abs(level - current_price))
+            selected: List[float] = []
+            for level in visible:
+                if any(abs(level - kept) <= dedupe_gap for kept in selected):
+                    continue
+                selected.append(level)
+                if len(selected) >= 2:
+                    break
+            return selected
+
+        for idx, high in enumerate(_select_levels(swing.get('swing_highs', []))):
             if isinstance(high, (int, float)):
                 # Draw main line
                 ax.axhline(high, color='#C0392B', linestyle='-', linewidth=0.8,
@@ -1137,7 +1146,7 @@ class ChartGenerator:
                             fontsize=7, fontweight='bold', va='bottom', alpha=1.0,
                             bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
 
-        for idx, low in enumerate(swing.get('swing_lows', [])):
+        for idx, low in enumerate(_select_levels(swing.get('swing_lows', []))):
             if isinstance(low, (int, float)):
                 # Draw main line
                 ax.axhline(low, color='#27AE60', linestyle='-', linewidth=0.8,
@@ -1655,8 +1664,9 @@ class ChartGenerator:
             panel_label = config.get('panel_label', '')
             
             # 1. Main Header: SYMBOL TF EXCHANGE (Data up to: TIMESTAMP)
+            first_ts_str = chart_df.index[0].strftime('%Y-%m-%d %H:%M')
             last_ts_str = chart_df.index[-1].strftime('%Y-%m-%d %H:%M')
-            header_text = f"{symbol} | {tf_str} | {panel_label} | Data up to {last_ts_str}"
+            header_text = f"{symbol} | {tf_str} | {panel_label} | Window {first_ts_str} -> {last_ts_str}"
             ax.text(0.01, 0.98, header_text, transform=ax.transAxes, 
                     fontsize=10, fontweight='bold', color=text_color, alpha=0.9,
                     ha='left', va='top')

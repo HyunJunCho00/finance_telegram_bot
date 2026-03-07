@@ -1,16 +1,22 @@
 import json
 from typing import Optional
-from .ai_router import ai_client
+
 from loguru import logger
+
+from .ai_router import ai_client
+
 
 class VLMGeometricAgent:
     """Visual chart specialist. Sole agent that reads the chart image.
-    Judge receives only this agent's structured text output — no raw chart
+    Judge receives only this agent's structured text output ??no raw chart
     """
 
     SYSTEM_PROMPT = """You are a master technical analyst and liquidity sniper with perfect spatial reasoning.
 You are the ONLY agent that sees the chart. Your structured output is what the Judge uses for all visual context.
-Be precise with price levels — vague descriptions are useless to a decision-making system.
+Be precise with price levels ??vague descriptions are useless to a decision-making system.
+
+You will receive ONE primary timeframe chart image plus a compact higher-timeframe text context.
+Treat the image as the execution chart. Treat the higher-timeframe text as the directional constraint.
 
 The chart contains: price action (candlesticks), technical overlays (FVGs, Order Blocks, Fibonacci),
 CVD (Cumulative Volume Delta), funding rate, and Open Interest.
@@ -40,22 +46,36 @@ Schema:
   },
   "pattern": "H&S | inv_H&S | double_top | double_bottom | bull_flag | bear_flag | ascending_triangle | wedge | none | other",
   "cvd_signal": "divergence_bullish | divergence_bearish | confirming | neutral",
-  "rationale": "Concrete explanation answering: 1. Is price inside/above/below the nearest OB? 2. Is the nearest FVG active? 3. Are Fib anchors logical?"
+  "rationale": "Concrete explanation answering: 1. Is price inside/above/below the nearest OB? 2. Is the nearest FVG active? 3. Are Fib anchors logical? 4. Does the primary chart align with the higher timeframe context?"
 }"""
 
-    def analyze(self, chart_image_b64: str, mode: str = "SWING", symbol: str = "UNKNOWN", current_price: Optional[float] = None) -> dict:
+    def analyze(
+        self,
+        chart_image_b64: str,
+        mode: str = "SWING",
+        symbol: str = "UNKNOWN",
+        current_price: Optional[float] = None,
+        primary_timeframe: Optional[str] = None,
+        higher_timeframe_context: str = "",
+    ) -> dict:
         if not chart_image_b64:
             return self._default()
 
+        primary_tf = primary_timeframe or ("4H" if str(mode).upper() == "SWING" else "1D")
         user_message = (
             f"Symbol: {symbol}\n"
             f"Current Price: {current_price if current_price else 'See Chart'}\n"
-            f"Trading Mode: {mode}\n\n"
-            "Analyze every panel. Answer these specific questions in your rationale:\n"
+            f"Trading Mode: {mode}\n"
+            f"Primary Chart Timeframe: {primary_tf}\n\n"
+            "Higher Timeframe Context:\n"
+            f"{higher_timeframe_context.strip() if higher_timeframe_context else 'None provided'}\n\n"
+            "Analyze the single chart image as the execution timeframe. Use the higher timeframe context as a constraint, not as an image.\n"
+            "Answer these specific questions in your rationale:\n"
             "1. Is current price INSIDE, ABOVE, or BELOW the nearest highlighted Order Block?\n"
             "2. Which visible Fair Value Gaps (FVG) are UNMITIGATED (price has not returned to fill them)?\n"
             "3. What are the exact anchor points (High/Low) for the drawn Fibonacci levels?\n"
             "4. Does CVD show a clear divergence at the recent swing extreme?\n"
+            "5. Does the primary chart align with or conflict with the higher timeframe context?\n"
             "\nReturn JSON only."
         )
         try:
@@ -96,5 +116,6 @@ Schema:
             "cvd_signal": "neutral",
             "rationale": "Analysis failed or no chart provided",
         }
+
 
 vlm_geometric_agent = VLMGeometricAgent()
