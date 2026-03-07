@@ -212,7 +212,7 @@ class GCSParquetStore:
             start = page * page_size
             end = start + page_size - 1
             query = db.client.table(spec.table_name).select("*").gte(spec.time_column, start_str).lt(spec.time_column, end_str)
-            if spec.symbol_column and symbol:
+            if spec.symbol_column:
                 query = query.eq(spec.symbol_column, symbol)
             response = query.order(spec.time_column, desc=False).range(start, end).execute()
             chunk = response.data if response.data else []
@@ -228,7 +228,7 @@ class GCSParquetStore:
         start_str = partition_date.isoformat()
         end_str = (partition_date + timedelta(days=1)).isoformat()
         query = db.client.table(spec.table_name).delete().gte(spec.time_column, start_str).lt(spec.time_column, end_str)
-        if spec.symbol_column and symbol:
+        if spec.symbol_column:
             query = query.eq(spec.symbol_column, symbol)
         return query.execute()
 
@@ -293,7 +293,7 @@ class GCSParquetStore:
             "partition_end": datetime.combine(partition_end, datetime.min.time(), tzinfo=timezone.utc).isoformat() if spec.time_kind != "date" else None,
             "partition_start_date": partition_date.isoformat() if spec.time_kind == "date" else None,
             "partition_end_date": partition_end.isoformat() if spec.time_kind == "date" else None,
-            "partition_symbol": symbol or None,
+            "partition_symbol": symbol if spec.symbol_column else None,
             "archive_started_at": datetime.now(timezone.utc).isoformat(),
             "archive_completed_at": None,
             "verified_at": None,

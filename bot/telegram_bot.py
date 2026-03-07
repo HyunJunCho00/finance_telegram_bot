@@ -247,12 +247,14 @@ class TradingBot:
         bot = Bot(token=self.bot_token)
         safe_text = self._sanitize_html_for_telegram(text)
         try:
-            await bot.send_message(chat_id=chat_id, text=safe_text, parse_mode='HTML')
+            for chunk in self._chunk_text_for_telegram(safe_text):
+                await bot.send_message(chat_id=chat_id, text=chunk, parse_mode='HTML')
         except Exception as e:
             # LLM output may contain unsupported HTML; retry as plain text instead of dropping the update.
             logger.warning(f"Telegram HTML send failed, retrying plain text: {e}")
             plain_text = re.sub(r"<[^>]+>", "", safe_text)
-            await bot.send_message(chat_id=chat_id, text=plain_text)
+            for chunk in self._chunk_text_for_telegram(plain_text):
+                await bot.send_message(chat_id=chat_id, text=chunk)
 
     async def send_photo(self, chat_id: str, photo_bytes: bytes, caption: str = ""):
         """Send a photo via the bot API (stateless)."""
@@ -282,6 +284,37 @@ class TradingBot:
         sanitized = re.sub(r"</li>", "", sanitized, flags=re.IGNORECASE)
         sanitized = re.sub(r"\n{3,}", "\n\n", sanitized)
         return sanitized.strip()
+
+    @staticmethod
+    def _chunk_text_for_telegram(text: str, limit: int = 3800) -> list[str]:
+        """Split long Telegram messages on line boundaries to stay below message limits."""
+        if not text:
+            return [text]
+        if len(text) <= limit:
+            return [text]
+
+        chunks = []
+        current = ""
+
+        for line in text.splitlines():
+            candidate = f"{current}\n{line}" if current else line
+            if len(candidate) <= limit:
+                current = candidate
+                continue
+
+            if current:
+                chunks.append(current)
+                current = ""
+
+            while len(line) > limit:
+                chunks.append(line[:limit])
+                line = line[limit:]
+            current = line
+
+        if current:
+            chunks.append(current)
+
+        return chunks or [text[:limit]]
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(

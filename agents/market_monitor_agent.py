@@ -275,6 +275,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
 
     def summarize_current_status(self, indicators: dict) -> str:
         """Generate hourly Telegram market status with structured technical sections."""
+        compact_indicators = self._build_summary_payload(indicators)
         system_prompt = (
             "You are a market monitor for swing traders.\n"
             "Use ONLY provided data. Never invent prices or levels.\n"
@@ -291,7 +292,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         )
         user_message = (
             f"Current Market Indicators (UTC: {datetime.now().isoformat()}):\n"
-            f"{json.dumps(indicators, ensure_ascii=False, indent=2)}\n\n"
+            f"{json.dumps(compact_indicators, ensure_ascii=False, indent=2)}\n\n"
             "Rules:\n"
             "- technical_snapshot contains swing/position/events.\n"
             "- Always include BOTH swing and position core lines per symbol.\n"
@@ -306,9 +307,9 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 user_message=user_message,
                 role=self.role,
                 temperature=0.3,
-                max_tokens=700,
+                max_tokens=1000,
             )
-            if response and str(response).strip() and not self._is_suspiciously_truncated(response):
+            if response and str(response).strip() and not self._is_incomplete_market_summary(response, compact_indicators):
                 return response
 
             logger.warning("MarketMonitorAgent.summarize returned empty/partial response; retrying with alternate route.")
@@ -317,9 +318,9 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 user_message=user_message,
                 role="news_summarize",
                 temperature=0.2,
-                max_tokens=750,
+                max_tokens=1100,
             )
-            if retry_resp and str(retry_resp).strip() and not self._is_suspiciously_truncated(retry_resp):
+            if retry_resp and str(retry_resp).strip() and not self._is_incomplete_market_summary(retry_resp, compact_indicators):
                 return retry_resp
 
             logger.warning("MarketMonitorAgent.summarize retry failed; using deterministic fallback summary.")
@@ -327,6 +328,77 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         except Exception as e:
             logger.error(f"MarketMonitorAgent.summarize error: {e}")
             return self._build_fallback_summary(indicators)
+
+    def _build_summary_payload(self, indicators: dict) -> dict:
+        """Keep only the fields needed for the LLM summary to avoid route input truncation."""
+        payload = {}
+
+        def _compact_mode_snapshot(snapshot: dict) -> dict:
+            if not isinstance(snapshot, dict) or not snapshot:
+                return {}
+
+            tf = snapshot.get("primary_tf", "4h")
+            ms = ((snapshot.get("market_structure") or {}).get(tf) or {})
+            tr = snapshot.get(f"trendlines_{tf}", {}) or {}
+            sw = snapshot.get(f"swing_levels_{tf}", {}) or {}
+            fib = snapshot.get(f"fibonacci_{tf}", {}) or {}
+            pressure = snapshot.get("realtime_pressure", {}) or {}
+
+            return {
+                "primary_tf": tf,
+                "trend": ms.get("trend"),
+                "choch": ms.get("choch"),
+                "msb": ms.get("msb"),
+                "realtime_pressure": {
+                    "summary": pressure.get("summary"),
+                    "details": (pressure.get("details") or [])[:2],
+                },
+                "levels": {
+                    "nearest_support": sw.get("nearest_support"),
+                    "nearest_resistance": sw.get("nearest_resistance"),
+                    "diagonal_support": tr.get("diagonal_support"),
+                    "diagonal_resistance": tr.get("diagonal_resistance"),
+                },
+                "fibonacci": {
+                    "nearest_fib": fib.get("nearest_fib"),
+                    "fib_500": fib.get("fib_500"),
+                    "fib_618": fib.get("fib_618"),
+                    "fib_705": fib.get("fib_705"),
+                    "fib_786": fib.get("fib_786"),
+                },
+            }
+
+        for symbol, row in (indicators or {}).items():
+            if symbol == "TELEGRAM_INTEL" or not isinstance(row, dict):
+                continue
+
+            tech = row.get("technical_snapshot", {}) if isinstance(row.get("technical_snapshot"), dict) else {}
+            events = tech.get("events", {}) if isinstance(tech.get("events"), dict) else {}
+            onchain = row.get("onchain_snapshot", {}) if isinstance(row.get("onchain_snapshot"), dict) else {}
+
+            payload[symbol] = {
+                "price": row.get("price"),
+                "funding_rate": row.get("funding_rate"),
+                "volatility": row.get("volatility"),
+                "swing": _compact_mode_snapshot(tech.get("swing", {}) or {}),
+                "position": _compact_mode_snapshot(tech.get("position", {}) or {}),
+                "events": {
+                    "has_event": events.get("has_event"),
+                    "event_count": events.get("event_count"),
+                    "event_items": (events.get("event_items") or [])[:8],
+                },
+                "onchain_snapshot": {
+                    "risk_bias": onchain.get("risk_bias"),
+                    "bias_score": onchain.get("bias_score"),
+                    "is_stale": onchain.get("is_stale"),
+                },
+            }
+
+        intel = str((indicators or {}).get("TELEGRAM_INTEL", "") or "").strip()
+        if intel:
+            payload["TELEGRAM_INTEL"] = intel[:400] + ("..." if len(intel) > 400 else "")
+
+        return payload
 
     def _is_suspiciously_truncated(self, text: str) -> bool:
         """Heuristic guard for incomplete responses."""
@@ -343,6 +415,42 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
 
         last_line = s.splitlines()[-1].strip()
         if len(last_line) <= 8 and not last_line.endswith((".", "!", "?", "…", "</b>", "</i>", "</code>")):
+            return True
+
+        return False
+
+    def _is_incomplete_market_summary(self, text: str, compact_indicators: dict) -> bool:
+        """Reject responses that are technically complete enough to ship to Telegram."""
+        s = (text or "").strip()
+        if self._is_suspiciously_truncated(s):
+            return True
+
+        lowered = s.lower()
+        for phrase in ("잘림", "확인 불가", "생략", "[truncated", "continued", "to be continued"):
+            if phrase in lowered:
+                return True
+
+        required_headers = (
+            "<b>🧭 구조/추세</b>",
+            "<b>📐 빗각·지지/저항</b>",
+            "<b>🧮 피보나치/변곡</b>",
+            "<b>⚠️ 파생 리스크</b>",
+            "<b>🧩 실행 레벨</b>",
+        )
+        if any(header not in s for header in required_headers):
+            return True
+
+        symbols = [key for key, value in (compact_indicators or {}).items() if key != "TELEGRAM_INTEL" and isinstance(value, dict)]
+        if any(symbol not in s for symbol in symbols):
+            return True
+
+        any_event = any(
+            isinstance(compact_indicators.get(symbol), dict)
+            and isinstance(compact_indicators[symbol].get("events"), dict)
+            and compact_indicators[symbol]["events"].get("has_event")
+            for symbol in symbols
+        )
+        if any_event and "<b>🔎 이벤트 상세</b>" not in s:
             return True
 
         return False
@@ -471,7 +579,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 any_event = True
                 items = events.get("event_items", []) or []
                 if items:
-                    lines.append(f"- <b>{symbol}</b> " + "; ".join(str(x) for x in items[:3]))
+                    lines.append(f"- <b>{symbol}</b> " + "; ".join(str(x) for x in items[:8]))
         if not any_event:
             lines.append("- 이번 사이클 이벤트 트리거 없음 (기본 요약만 유지)")
 
