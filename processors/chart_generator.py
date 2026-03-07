@@ -31,7 +31,7 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 from io import BytesIO
 import base64
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from config.settings import get_settings, TradingMode
 from loguru import logger
 from scipy.signal import argrelextrema
@@ -66,6 +66,20 @@ class ChartGenerator:
         if rule.startswith("1W"):
             return max(12, int(round(months * 52.1775 / 12.0)))
         return 200
+
+    @staticmethod
+    def _lane_visual_window(df: pd.DataFrame, months: int) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
+        """Return a shared calendar window so lane panels start from the same date."""
+        if df is None or df.empty or 'timestamp' not in df.columns:
+            return None, None
+
+        ts = pd.to_datetime(df['timestamp'], utc=True, errors='coerce').dropna()
+        if ts.empty:
+            return None, None
+
+        window_end = ts.max()
+        window_start = (window_end - pd.DateOffset(months=months)).normalize()
+        return window_start, window_end
 
     def generate_chart(self, df: pd.DataFrame, analysis: Dict, symbol: str,
                        mode: TradingMode = TradingMode.SWING,
@@ -281,8 +295,15 @@ class ChartGenerator:
                              df_1w: Optional[pd.DataFrame] = None) -> Optional[bytes]:
         panel_configs = self._get_lane_panel_configs(mode)
         panel_images: List[bytes] = []
+        lookback_months = self._lane_lookback_months(mode)
+        window_start, window_end = self._lane_visual_window(df, lookback_months)
 
         for panel_cfg in panel_configs:
+            panel_cfg = dict(panel_cfg)
+            if window_start is not None:
+                panel_cfg['visual_window_start'] = window_start
+            if window_end is not None:
+                panel_cfg['visual_window_end'] = window_end
             img = self._generate_structure_chart(
                 df, analysis, symbol, panel_cfg,
                 liquidation_df=liquidation_df,
@@ -300,7 +321,6 @@ class ChartGenerator:
             return None
         if len(panel_images) == 1:
             return panel_images[0]
-        lookback_months = self._lane_lookback_months(mode)
         return self._stack_images_vertical(
             panel_images,
             title=(
@@ -431,8 +451,33 @@ class ChartGenerator:
                 full_resampled = pd.concat([hist_df, full_resampled])
                 full_resampled = full_resampled[~full_resampled.index.duplicated(keep='last')].sort_index()
 
-            # Trim to the exact required tail length to avoid overloading matplotlib, plus a buffer for EMAs
-            full_resampled = full_resampled.tail(config['tail_candles'] + 220)
+            visual_window_start = config.get('visual_window_start')
+            visual_window_end = config.get('visual_window_end')
+            if visual_window_start is not None:
+                visual_window_start = pd.Timestamp(visual_window_start)
+                if visual_window_start.tzinfo is None:
+                    visual_window_start = visual_window_start.tz_localize('UTC')
+            if visual_window_end is not None:
+                visual_window_end = pd.Timestamp(visual_window_end)
+                if visual_window_end.tzinfo is None:
+                    visual_window_end = visual_window_end.tz_localize('UTC')
+
+            visual_window_df = None
+            if visual_window_end is not None:
+                full_resampled = full_resampled.loc[full_resampled.index <= visual_window_end]
+
+            if visual_window_start is not None or visual_window_end is not None:
+                visual_window_df = full_resampled.copy()
+                if visual_window_start is not None:
+                    visual_window_df = visual_window_df.loc[visual_window_df.index >= visual_window_start]
+                if visual_window_end is not None:
+                    visual_window_df = visual_window_df.loc[visual_window_df.index <= visual_window_end]
+
+                calc_tail = max(len(visual_window_df) + 220, config['min_candles'] + 220)
+                full_resampled = full_resampled.tail(calc_tail)
+            else:
+                # Trim to the exact required tail length to avoid overloading matplotlib, plus a buffer for EMAs
+                full_resampled = full_resampled.tail(config['tail_candles'] + 220)
 
             if len(full_resampled) < min(config['min_candles'], 5):
                 logger.warning(f"Not enough candles: {len(full_resampled)} < {config['min_candles']}")
@@ -451,8 +496,15 @@ class ChartGenerator:
             show_funding_panel = bool(getattr(settings, 'CHART_SHOW_FUNDING_PANEL', False))
             
             # 4. Slice for VISUAL window
-            chart_df = full_resampled.tail(config['tail_candles']).copy()
+            if visual_window_df is not None:
+                chart_df = full_resampled.loc[full_resampled.index.intersection(visual_window_df.index)].copy()
+            else:
+                chart_df = full_resampled.tail(config['tail_candles']).copy()
             chart_df.index.name = 'Date'
+
+            if len(chart_df) < min(config['min_candles'], 5):
+                logger.warning(f"Not enough candles in visual window: {len(chart_df)} < {config['min_candles']}")
+                return None
 
             # 4. Integrate CVD if provided
             apds = []
@@ -629,6 +681,7 @@ class ChartGenerator:
                 p_ratios.append(0.6)  # Funding Tape
                 
             logger.debug(f"Calling mpf.plot with {len(apds)} addplots, {num_panels} panels, ratios {p_ratios}")
+            warn_too_much_data = len(chart_df) + 1
 
             fig, axes = mpf.plot(
                 chart_df, type='candle', style=style, volume=True,
@@ -639,6 +692,7 @@ class ChartGenerator:
                 panel_ratios=tuple(p_ratios),
                 datetime_format='%Y-%m-%d',
                 xrotation=0,
+                warn_too_much_data=warn_too_much_data,
                 tight_layout=False,  # We'll use subplots_adjust for margins
                 returnfig=True
             )
