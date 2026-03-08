@@ -33,7 +33,9 @@ def init_db():
             expires_at        TEXT NOT NULL,
             leverage          REAL DEFAULT 1,
             tp_price          REAL DEFAULT 0,
-            sl_price          REAL DEFAULT 0
+            sl_price          REAL DEFAULT 0,
+            tp2_price         REAL DEFAULT 0,
+            tp1_exit_pct      REAL DEFAULT 50
         )
     ''')
 
@@ -42,6 +44,8 @@ def init_db():
         ("leverage", "REAL DEFAULT 1"),
         ("tp_price", "REAL DEFAULT 0"),
         ("sl_price", "REAL DEFAULT 0"),
+        ("tp2_price", "REAL DEFAULT 0"),
+        ("tp1_exit_pct", "REAL DEFAULT 50"),
     ]:
         try:
             conn.execute(f"ALTER TABLE active_orders ADD COLUMN {col} {col_def}")
@@ -77,9 +81,22 @@ def init_db():
             created_at    TEXT NOT NULL,
             updated_at    TEXT NOT NULL,
             tp_price      REAL DEFAULT 0.0,
-            sl_price      REAL DEFAULT 0.0
+            sl_price      REAL DEFAULT 0.0,
+            tp2_price     REAL DEFAULT 0.0,
+            tp1_done      INTEGER DEFAULT 0,
+            tp1_exit_pct  REAL DEFAULT 50.0
         )
     ''')
+
+    for col, col_def in [
+        ("tp2_price", "REAL DEFAULT 0.0"),
+        ("tp1_done", "INTEGER DEFAULT 0"),
+        ("tp1_exit_pct", "REAL DEFAULT 50.0"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE paper_positions ADD COLUMN {col} {col_def}")
+        except Exception:
+            pass
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS paper_wallets (
@@ -240,6 +257,8 @@ class LocalStateManager:
         leverage: float = 1.0,
         tp_price: float = 0.0,
         sl_price: float = 0.0,
+        tp2_price: float = 0.0,
+        tp1_exit_pct: float = 50.0,
     ) -> str:
         """Register a new execution intent.
 
@@ -277,19 +296,19 @@ class LocalStateManager:
                 INSERT INTO active_orders
                 (intent_id, symbol, direction, execution_style,
                  total_target_amount, remaining_amount, exchange,
-                 created_at, expires_at, leverage, tp_price, sl_price)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 created_at, expires_at, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 intent_id, symbol, direction, style,
                 amount, amount, exchange,
                 now.isoformat(), expires.isoformat(),
-                leverage, tp_price, sl_price,
+                leverage, tp_price, sl_price, tp2_price, tp1_exit_pct,
             ))
             self.conn.commit()
 
         logger.info(
             f"Intent registered: {intent_id[:8]} | {direction} {symbol} "
-            f"${amount:.2f} lev={leverage}x tp={tp_price} sl={sl_price} [{exchange}]"
+            f"${amount:.2f} lev={leverage}x tp1={tp_price} tp2={tp2_price} sl={sl_price} [{exchange}]"
         )
         return intent_id
 

@@ -79,6 +79,8 @@ class PaperExchangeEngine:
         raw_price: float,
         tp_price: float = 0.0,
         sl_price: float = 0.0,
+        tp2_price: float = 0.0,
+        tp1_exit_pct: float = 50.0,
     ) -> dict:
         """
         [FIX HIGH-8/9] leverage correctly passed from intent (not hard-coded 1x).
@@ -112,10 +114,10 @@ class PaperExchangeEngine:
             cursor.execute(
                 """INSERT INTO paper_positions
                    (position_id, exchange, symbol, side, size, entry_price,
-                    leverage, is_open, created_at, updated_at, tp_price, sl_price)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
+                    leverage, is_open, created_at, updated_at, tp_price, sl_price, tp2_price, tp1_done, tp1_exit_pct)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 0, ?)""",
                 (pos_id, exchange.lower(), symbol, direction,
-                 coin_size, filled_price, leverage, now, now, tp_price, sl_price),
+                 coin_size, filled_price, leverage, now, now, tp_price, sl_price, tp2_price, tp1_exit_pct),
             )
             # Deduct margin + entry fee
             cursor.execute(
@@ -127,7 +129,7 @@ class PaperExchangeEngine:
         logger.info(
             f"V8 Paper | [{exchange}] {direction} {symbol} @ {filled_price:.4f} "
             f"(slip={slippage_pct*100:.2f}% lev={leverage}x margin=${required_margin:.2f} fee=${entry_fee:.2f} "
-            f"tp={tp_price} sl={sl_price})"
+            f"tp1={tp_price} tp2={tp2_price} sl={sl_price})"
         )
         return {
             "success": True,
@@ -192,8 +194,35 @@ class PaperExchangeEngine:
                 continue
 
             side, tp, sl = pos["side"], pos["tp_price"], pos["sl_price"]
+            tp2 = pos["tp2_price"] if "tp2_price" in pos.keys() else 0.0
+            tp1_done = int(pos["tp1_done"]) if "tp1_done" in pos.keys() else 0
+            tp1_exit_pct = float(pos["tp1_exit_pct"]) if "tp1_exit_pct" in pos.keys() else 50.0
             entry, size, lev = pos["entry_price"], pos["size"], pos["leverage"]
             exchange = pos["exchange"]
+
+            if not tp1_done and tp > 0:
+                tp_hit = (side == "LONG" and price >= tp) or (side == "SHORT" and price <= tp)
+                if tp_hit:
+                    fraction = max(0.0, min(tp1_exit_pct / 100.0, 0.99))
+                    self.close_position_partial(pos["position_id"], price, fraction)
+                    with self._lock:
+                        now = datetime.now(timezone.utc).isoformat()
+                        next_tp = tp2 if tp2 and tp2 > 0 else 0.0
+                        self._conn.execute(
+                            "UPDATE paper_positions SET tp1_done = 1, tp_price = ?, sl_price = ?, updated_at = ? WHERE position_id = ?",
+                            (next_tp, entry, now, pos["position_id"]),
+                        )
+                        self._conn.commit()
+                    self._notify(
+                        f"🎯 <b>TP1 HIT</b>\n"
+                        f"Exchange: {exchange.upper()}\n"
+                        f"Symbol: {symbol}\n"
+                        f"Side: {side}\n"
+                        f"TP1 Price: {price:.2f}\n"
+                        f"Partial Exit: {tp1_exit_pct:.0f}%\n"
+                        f"SL moved to BE: {entry:.2f}"
+                    )
+                    continue
 
             hit_reason = None
             if side == "LONG":

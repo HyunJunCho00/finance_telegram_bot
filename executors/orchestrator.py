@@ -41,6 +41,7 @@ from agents.macro_options_agent import macro_options_agent
 from config.local_state import state_manager
 from executors.report_generator import report_generator
 from executors.trade_executor import trade_executor
+from executors.policy_engine import policy_engine
 from executors.post_mortem import write_post_mortem
 from executors.data_synthesizer import synthesize_training_data
 from utils.cooldown import is_on_cooldown, set_cooldown
@@ -191,6 +192,7 @@ class AnalysisState(TypedDict):
     mode: str  # "swing" or "position"
     is_emergency: bool
     execute_trades: bool
+    allow_perplexity: bool
 
     # Data collection results
     df_size: int
@@ -230,6 +232,7 @@ class AnalysisState(TypedDict):
     regime_context: dict
     final_decision: Dict
     daily_dual_plan: dict
+    policy_snapshot: dict
     report: Optional[Dict]
 
     # Z-Score 동적 임계값용 역사적 통계 (context_gathering에서 수집)
@@ -311,11 +314,16 @@ def node_context_gathering(state: AnalysisState) -> dict:
     mode = TradingMode(state["mode"])
     cache_key = _cache_key(symbol, mode)
     is_emergency = state.get("is_emergency", False)
+    allow_perplexity = bool(state.get("allow_perplexity", False))
     asset = "BTC" if "BTC" in symbol else "ETH"
     coin_name = "Bitcoin BTC" if "BTC" in symbol else "Ethereum ETH"
 
     def fetch_perplexity():
         perp_updates = {}
+        if not allow_perplexity:
+            logger.info(f"Perplexity disabled for {symbol} in this analysis path.")
+            perp_updates["narrative_text"] = "Market Narrative: Disabled for this analysis path"
+            return perp_updates
         try:
             narrative = perplexity_collector.search_market_narrative(symbol, is_emergency=is_emergency)
             narrative_text = perplexity_collector.format_for_agents(narrative)
@@ -1156,6 +1164,9 @@ def node_judge_agent(state: AnalysisState) -> dict:
 def node_risk_manager(state: AnalysisState) -> dict:
     """Run Risk Manager (CRO). VETO power over Judge's draft."""
     draft = state.get("final_decision", {})
+    symbol = state.get("symbol", "BTCUSDT")
+    mode = TradingMode(state.get("mode", "swing"))
+    cache_key = _cache_key(symbol, mode)
     
     # Needs macro and funding context for risk overlays
     funding = state.get("funding_context", "")
@@ -1165,11 +1176,38 @@ def node_risk_manager(state: AnalysisState) -> dict:
         draft,
         funding,
         deribit,
-        mode=TradingMode(state.get("mode", "swing")),
+        mode=mode,
         onchain_context=state.get("onchain_context", ""),
         onchain_gate=state.get("onchain_gate", {}),
     )
-    return {"final_decision": final_decision}
+
+    market_data = _market_data_cache.get(cache_key, {}) or {}
+    cvd_df = _cvd_cache.get(cache_key)
+    if cvd_df is None:
+        try:
+            cvd_df = db.get_cvd_data(symbol, limit=60)
+        except Exception:
+            cvd_df = None
+
+    liq_df = _liq_cache.get(cache_key)
+    if liq_df is None:
+        try:
+            liq_df = db.get_liquidation_data(symbol, limit=60)
+        except Exception:
+            liq_df = None
+
+    final_decision = policy_engine.enforce(
+        decision=final_decision,
+        market_data=market_data,
+        mode=mode,
+        raw_funding=state.get("raw_funding", {}),
+        cvd_df=cvd_df,
+        liq_df=liq_df,
+    )
+    return {
+        "final_decision": final_decision,
+        "policy_snapshot": final_decision.get("policy_checks", {}),
+    }
 
 def node_portfolio_leverage_guard(state: AnalysisState) -> dict:
     """Mathematically enforce 2.0x total account leverage limit."""
@@ -1318,6 +1356,9 @@ def _build_evaluation_prediction_payload(state: AnalysisState, report: Dict, mod
             "market_regime": state.get("market_regime"),
             "risk_budget_pct": (state.get("regime_context", {}) or {}).get("risk_budget_pct"),
             "report_created_at": report.get("created_at"),
+            "policy_status": (state.get("policy_snapshot", {}) or {}).get("status"),
+            "policy_rr": (state.get("policy_snapshot", {}) or {}).get("rr"),
+            "policy_stop_basis": (state.get("policy_snapshot", {}) or {}).get("stop_basis"),
         },
     }
 
@@ -1656,9 +1697,21 @@ class Orchestrator:
                 logger.error(f"LangGraph build error: {e}")
         return self._graph
 
-    def run_analysis(self, symbol: str, is_emergency: bool = False, execute_trades: bool = True) -> Dict:
+    def run_analysis(
+        self,
+        symbol: str,
+        is_emergency: bool = False,
+        execute_trades: bool = True,
+        allow_perplexity: bool = False,
+    ) -> Dict:
         mode = self.mode
-        return self.run_analysis_with_mode(symbol, mode, is_emergency=is_emergency, execute_trades=execute_trades)
+        return self.run_analysis_with_mode(
+            symbol,
+            mode,
+            is_emergency=is_emergency,
+            execute_trades=execute_trades,
+            allow_perplexity=allow_perplexity,
+        )
 
     def run_analysis_with_mode(
         self,
@@ -1666,6 +1719,7 @@ class Orchestrator:
         mode: TradingMode,
         is_emergency: bool = False,
         execute_trades: bool = True,
+        allow_perplexity: bool = False,
     ) -> Dict:
         lock_key = f"{symbol}:{mode.value}"
         lock = self._analysis_locks.setdefault(lock_key, threading.Lock())
@@ -1680,18 +1734,38 @@ class Orchestrator:
             _clear_symbol_mode_caches(symbol, mode)
 
             if self.graph:
-                return self._run_with_langgraph(symbol, mode, is_emergency, execute_trades=execute_trades)
-            return self._run_sequential(symbol, mode, is_emergency, execute_trades=execute_trades)
+                return self._run_with_langgraph(
+                    symbol,
+                    mode,
+                    is_emergency,
+                    execute_trades=execute_trades,
+                    allow_perplexity=allow_perplexity,
+                )
+            return self._run_sequential(
+                symbol,
+                mode,
+                is_emergency,
+                execute_trades=execute_trades,
+                allow_perplexity=allow_perplexity,
+            )
         finally:
             lock.release()
 
-    def _run_with_langgraph(self, symbol: str, mode: TradingMode, is_emergency: bool, execute_trades: bool = True) -> Dict:
+    def _run_with_langgraph(
+        self,
+        symbol: str,
+        mode: TradingMode,
+        is_emergency: bool,
+        execute_trades: bool = True,
+        allow_perplexity: bool = False,
+    ) -> Dict:
         """Run analysis using LangGraph StateGraph."""
         initial_state: AnalysisState = {
             "symbol": symbol,
             "mode": mode.value,
             "is_emergency": is_emergency,
             "execute_trades": execute_trades,
+            "allow_perplexity": allow_perplexity,
             "df_size": 0,
             "market_data_compact": "",
             "narrative_text": "",
@@ -1723,6 +1797,7 @@ class Orchestrator:
             "vlm_context_text": "",
             "final_decision": {},
             "daily_dual_plan": {},
+            "policy_snapshot": {},
             "report": None,
             "stats_context": {},
             "errors": [],
@@ -1736,13 +1811,23 @@ class Orchestrator:
             logger.error(f"LangGraph execution error: {e}\n{traceback.format_exc()}")
             return {"decision": "HOLD", "reasoning": f"LangGraph error: {e}", "confidence": 0}
 
-    def _run_sequential(self, symbol: str, mode: TradingMode, is_emergency: bool, execute_trades: bool = True) -> Dict:
+    def _run_sequential(
+        self,
+        symbol: str,
+        mode: TradingMode,
+        is_emergency: bool,
+        execute_trades: bool = True,
+        allow_perplexity: bool = False,
+    ) -> Dict:
         """Fallback: sequential execution (no LangGraph)."""
         state = {
             "symbol": symbol, "mode": mode.value,
-            "is_emergency": is_emergency, "execute_trades": execute_trades, "errors": [],
+            "is_emergency": is_emergency,
+            "execute_trades": execute_trades,
+            "allow_perplexity": allow_perplexity,
+            "errors": [],
             "onchain_snapshot": {}, "onchain_context": "", "onchain_gate": {},
-            "vlm_context_text": "",
+            "vlm_context_text": "", "policy_snapshot": {},
         }
 
         # Run each node sequentially — mirrors the LangGraph DAG order.
@@ -1822,14 +1907,26 @@ class Orchestrator:
         for symbol in self.symbols:
             for mode in modes:
                 try:
-                    self.run_analysis_with_mode(symbol, mode, is_emergency=False, execute_trades=True)
+                    self.run_analysis_with_mode(
+                        symbol,
+                        mode,
+                        is_emergency=False,
+                        execute_trades=True,
+                        allow_perplexity=False,
+                    )
                 except Exception as e:
                     logger.error(f"Analysis error for {symbol} ({mode.value}): {e}")
                     continue
 
     def run_emergency_analysis(self, symbol: str) -> None:
         logger.critical(f"Running EMERGENCY analysis for {symbol} (mode=swing)")
-        self.run_analysis_with_mode(symbol, TradingMode.SWING, is_emergency=True, execute_trades=True)
+        self.run_analysis_with_mode(
+            symbol,
+            TradingMode.SWING,
+            is_emergency=True,
+            execute_trades=True,
+            allow_perplexity=False,
+        )
 
 
     def run_daily_playbook(self) -> None:
@@ -1851,9 +1948,21 @@ class Orchestrator:
                 _clear_symbol_mode_caches(symbol, mode)
 
                 if self.graph:
-                    state = self._run_with_langgraph(symbol, mode, is_emergency=False, execute_trades=True)
+                    state = self._run_with_langgraph(
+                        symbol,
+                        mode,
+                        is_emergency=False,
+                        execute_trades=True,
+                        allow_perplexity=True,
+                    )
                 else:
-                    state = self._run_sequential(symbol, mode, is_emergency=False, execute_trades=True)
+                    state = self._run_sequential(
+                        symbol,
+                        mode,
+                        is_emergency=False,
+                        execute_trades=True,
+                        allow_perplexity=True,
+                    )
 
                 # Generate & persist playbook (uses last completed state via global caches)
                 node_generate_playbook({
@@ -1926,7 +2035,8 @@ class Orchestrator:
                                 "unmatched_conditions": result.get("unmatched_conditions", []),
                                 "live_indicators": result.get("live_indicators", {}),
                                 "playbook_id": result.get("playbook_id"),
-                                "reasoning": result.get("reasoning", "")
+                                "reasoning": result.get("reasoning", ""),
+                                "policy_checks": result.get("policy_checks", {}),
                             }
                             db.client.table("monitor_logs").insert(log_entry).execute()
                             logger.info(f"[Monitor] Log saved to DB for {symbol}/{mode.value}")
@@ -1941,8 +2051,36 @@ class Orchestrator:
                                 logger.warning(f"[Monitor] {symbol} daily entry cap ({DAILY_MAX_ENTRIES}) reached, skipping.")
                                 continue
 
+                            veto_gate = market_monitor_agent.lightweight_veto_check(symbol, mode.value, result)
+                            result["llm_veto_gate"] = veto_gate
+                            if veto_gate.get("action") == "VETO":
+                                logger.warning(
+                                    f"[Monitor] {symbol}/{mode.value} vetoed by lightweight gate: "
+                                    f"{veto_gate.get('reason', '')}"
+                                )
+                                result["status"] = "WATCH"
+                                result["reasoning"] = (
+                                    f"{result.get('reasoning', '')} 저비용 LLM 보류: {veto_gate.get('reason', '')}"
+                                ).strip()
+                                lane_results[mode.value.upper()] = result
+                                continue
+                            if veto_gate.get("action") == "REDUCE":
+                                logger.info(
+                                    f"[Monitor] {symbol}/{mode.value} marked REDUCE by lightweight gate: "
+                                    f"{veto_gate.get('reason', '')}"
+                                )
+                                result["reasoning"] = (
+                                    f"{result.get('reasoning', '')} 저비용 LLM 감액 주의: {veto_gate.get('reason', '')}"
+                                ).strip()
+
                             logger.info(f"[Monitor] TRIGGER! Running analysis for {symbol}/{mode.value}")
-                            self.run_analysis_with_mode(symbol, mode, is_emergency=False, execute_trades=True)
+                            self.run_analysis_with_mode(
+                                symbol,
+                                mode,
+                                is_emergency=False,
+                                execute_trades=True,
+                                allow_perplexity=False,
+                            )
                             state_manager.set_system_config(_entry_count_key + symbol, str(entries_today + 1))
                         else:
                             # SOFT_TRIGGER: Just notify via Telegram (handled below in the loop)

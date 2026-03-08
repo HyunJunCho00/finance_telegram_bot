@@ -19,7 +19,9 @@ from typing import Dict, Optional
 from agents.ai_router import ai_client
 from config.database import db
 from config.settings import settings, TradingMode
+from executors.policy_engine import policy_engine
 from loguru import logger
+from processors.math_engine import math_engine
 from processors.onchain_signal_engine import onchain_signal_engine
 
 
@@ -135,6 +137,92 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         if op == ">=": return a_val >= b_val
         if op == "==": return a_val == b_val
         return False
+
+    def lightweight_veto_check(self, symbol: str, mode: str, trigger_result: Dict) -> Dict:
+        """Cheap LLM veto layer. Called only after deterministic policy-trigger conditions pass."""
+        status = str(trigger_result.get("status", "NO_ACTION")).upper()
+        if status != "TRIGGER":
+            return {"action": "SKIP", "reason": f"status={status}"}
+
+        payload = {
+            "symbol": symbol,
+            "mode": mode,
+            "status": status,
+            "reasoning": trigger_result.get("reasoning", ""),
+            "matched_conditions": trigger_result.get("matched_conditions", []),
+            "live_indicators": trigger_result.get("live_indicators", {}),
+            "policy_checks": trigger_result.get("policy_checks", {}),
+            "onchain_gate": trigger_result.get("onchain_gate", {}),
+        }
+        try:
+            snapshot = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
+            if snapshot:
+                payload["onchain_snapshot"] = {
+                    "risk_bias": snapshot.get("risk_bias"),
+                    "bias_score": snapshot.get("bias_score"),
+                    "is_stale": snapshot.get("is_stale"),
+                    "regime_flags": snapshot.get("regime_flags", {}),
+                }
+        except Exception:
+            pass
+        try:
+            news = db.get_recent_telegram_messages(hours=2) or []
+            payload["recent_telegram_news"] = [
+                {
+                    "channel": item.get("channel", ""),
+                    "text": str(item.get("text", ""))[:180],
+                    "timestamp": item.get("timestamp") or item.get("created_at", ""),
+                }
+                for item in news[:6]
+            ]
+        except Exception:
+            payload["recent_telegram_news"] = []
+
+        system_prompt = (
+            "You are a low-cost veto gate for a deterministic trading policy engine.\n"
+            "The deterministic engine already found a valid TRIGGER candidate.\n"
+            "Your job is NOT to generate trades. Only decide whether current context should PASS, VETO, or REDUCE.\n"
+            "Choose VETO only for clear contextual danger: strong contradictory news, stale/bad on-chain regime, obvious squeeze/fakeout risk, or conflicting trigger context.\n"
+            "Choose REDUCE when the setup is valid but context is mixed.\n"
+            "Return strict JSON only."
+        )
+        user_message = (
+            "Candidate trigger payload:\n"
+            f"{json.dumps(payload, ensure_ascii=False)}\n\n"
+            "Output schema:\n"
+            "{\n"
+            '  "action": "PASS" | "VETO" | "REDUCE",\n'
+            '  "reason": "one short Korean sentence",\n'
+            '  "risk_flags": ["short list"]\n'
+            "}\n"
+            "Rules:\n"
+            "- Do not invent prices.\n"
+            "- Prefer PASS unless there is a concrete veto reason.\n"
+            "- Use Korean for reason and risk_flags.\n"
+        )
+        try:
+            raw = ai_client.generate_response(
+                system_prompt=system_prompt,
+                user_message=user_message,
+                role="trigger_veto",
+                temperature=0.1,
+                max_tokens=300,
+            ) or ""
+            start = raw.find("{")
+            end = raw.rfind("}") + 1
+            if start >= 0 and end > start:
+                obj = json.loads(raw[start:end])
+                action = str(obj.get("action", "PASS")).upper()
+                if action not in ("PASS", "VETO", "REDUCE"):
+                    action = "PASS"
+                return {
+                    "action": action,
+                    "reason": str(obj.get("reason", "") or ""),
+                    "risk_flags": obj.get("risk_flags", []) if isinstance(obj.get("risk_flags", []), list) else [],
+                }
+        except Exception as e:
+            logger.warning(f"lightweight_veto_check failed ({symbol}/{mode}): {e}")
+        return {"action": "PASS", "reason": "저비용 검수 실패로 기본 통과", "risk_flags": []}
 
     def evaluate(self, symbol: str, mode: str) -> Dict:
         """Core evaluation: compare live indicators to playbook conditions deterministically."""
@@ -266,6 +354,57 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             result["onchain_gate"] = gate
         except Exception as e:
             logger.warning(f"On-chain gate check failed for {symbol}/{mode}: {e}")
+
+        if result.get("status") in ["TRIGGER", "SOFT_TRIGGER"]:
+            try:
+                direction = str(playbook.get("source_decision", "HOLD") or "HOLD").upper()
+                if direction in ("LONG", "SHORT"):
+                    monitor_mode = TradingMode(mode)
+                    candle_limit = settings.POSITION_CANDLE_LIMIT if monitor_mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
+                    df = db.get_latest_market_data(symbol, limit=candle_limit)
+                    if df is not None and not df.empty:
+                        market_data = math_engine.analyze_market(df, monitor_mode)
+                        current_price = float(df["close"].iloc[-1])
+                        synthetic = {
+                            "decision": direction,
+                            "entry_price": current_price,
+                            "leverage": 1,
+                            "target_exchange": "SPLIT" if monitor_mode == TradingMode.POSITION else "BINANCE",
+                            "reasoning": {"final_logic": "Hourly monitor policy re-check."},
+                        }
+                        raw_funding = {}
+                        try:
+                            res = db.client.table("funding_data").select("*").eq("symbol", symbol).order("timestamp", desc=True).limit(1).execute()
+                            raw_funding = res.data[0] if res.data else {}
+                        except Exception:
+                            raw_funding = {}
+                        cvd_df = None
+                        liq_df = None
+                        try:
+                            cvd_df = db.get_cvd_data(symbol, limit=60)
+                        except Exception:
+                            pass
+                        try:
+                            liq_df = db.get_liquidation_data(symbol, limit=60)
+                        except Exception:
+                            pass
+                        policy_decision = policy_engine.enforce(
+                            decision=synthetic,
+                            market_data=market_data,
+                            mode=monitor_mode,
+                            raw_funding=raw_funding,
+                            cvd_df=cvd_df,
+                            liq_df=liq_df,
+                        )
+                        result["policy_checks"] = policy_decision.get("policy_checks", {})
+                        if policy_decision.get("decision") != direction:
+                            result["status"] = "WATCH"
+                            result["reasoning"] = (
+                                f"{result['reasoning']} 정책 엔진 보류: "
+                                f"{' / '.join(result['policy_checks'].get('reasons', []))}"
+                            ).strip()
+            except Exception as e:
+                logger.warning(f"Policy re-check failed for {symbol}/{mode}: {e}")
         
         logger.info(
             f"Monitor [{symbol}/{mode}]: {result.get('status')} ({match_count}/{total_entry_count}) | "

@@ -197,6 +197,7 @@ class AIClient:
             "risk_eval_fallback": ("groq", settings.MODEL_RISK_EVAL_FALLBACK, 10000),
             "rag_extraction": ("groq", settings.MODEL_RAG_EXTRACTION, settings.MAX_INPUT_CHARS_RAG_EXTRACTION),
             "news_summarize": ("groq", settings.MODEL_NEWS_SUMMARIZE, 10000),
+            "trigger_veto": ("groq", settings.MODEL_TRIGGER_VETO, settings.MAX_INPUT_CHARS_TRIGGER_VETO),
             "news_cluster": ("groq", settings.MODEL_NEWS_CLUSTER, 12000),
             "news_brief_final": ("groq", settings.MODEL_NEWS_FINAL, 12000),
             "post_mortem": ("groq", settings.MODEL_RAG_EXTRACTION, 15000),

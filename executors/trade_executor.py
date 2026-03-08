@@ -62,8 +62,10 @@ class TradeExecutor:
             leverage = float(final_decision.get("leverage", 1) or 1)
             target_exchange = str(final_decision.get("target_exchange", "BINANCE")).lower()
             exec_style = str(final_decision.get("recommended_execution_style", "MOMENTUM_SNIPER"))
-            tp_price = float(final_decision.get("take_profit", 0) or 0)
+            tp_price = float(final_decision.get("tp1_price", final_decision.get("take_profit", 0)) or 0)
             sl_price = float(final_decision.get("stop_loss", 0) or 0)
+            tp2_price = float(final_decision.get("take_profit", 0) or 0)
+            tp1_exit_pct = float(final_decision.get("tp1_exit_pct", 50.0) or 50.0)
 
             if allocation_pct <= 0:
                 return {"success": False, "note": "Allocation is 0% (Vetoed or No Confidence)"}
@@ -112,6 +114,8 @@ class TradeExecutor:
                     leverage=split_lev,
                     tp_price=tp_price,
                     sl_price=sl_price,
+                    tp2_price=tp2_price,
+                    tp1_exit_pct=tp1_exit_pct,
                 )
                 intent_u = state_manager.add_intent(
                     symbol=symbol,
@@ -122,6 +126,8 @@ class TradeExecutor:
                     leverage=1,
                     tp_price=tp_price,
                     sl_price=sl_price,
+                    tp2_price=tp2_price,
+                    tp1_exit_pct=tp1_exit_pct,
                 )
                 if not intent_b or not intent_u:
                     return {"success": False, "note": f"Duplicate intent blocked for {symbol} (split route)"}
@@ -134,6 +140,8 @@ class TradeExecutor:
                         "notional": binance_notional,
                         "paper": settings.PAPER_TRADING_MODE,
                         "note": f"SPLIT Intent: {exec_style}",
+                        "tp1_price": tp_price,
+                        "tp2_price": tp2_price,
                     },
                     {
                         "order_id": intent_u,
@@ -142,6 +150,8 @@ class TradeExecutor:
                         "notional": upbit_notional,
                         "paper": settings.PAPER_TRADING_MODE,
                         "note": f"SPLIT Intent: {exec_style} (lev=1x)",
+                        "tp1_price": tp_price,
+                        "tp2_price": tp2_price,
                     },
                 ]
                 total_not_usd = binance_notional
@@ -169,6 +179,8 @@ class TradeExecutor:
                     leverage=lev_for_exchange,
                     tp_price=tp_price,
                     sl_price=sl_price,
+                    tp2_price=tp2_price,
+                    tp1_exit_pct=tp1_exit_pct,
                 )
                 if not intent_id:
                     return {"success": False, "note": f"Duplicate intent blocked for {symbol} [{target_exchange}]"}
@@ -181,6 +193,8 @@ class TradeExecutor:
                         "notional": target_notional,
                         "paper": settings.PAPER_TRADING_MODE,
                         "note": f"Registered Intent: {exec_style}",
+                        "tp1_price": tp_price,
+                        "tp2_price": tp2_price,
                     }
                 ]
                 total_not_usd = target_notional
@@ -228,6 +242,8 @@ class TradeExecutor:
         style: str = "SMART_DCA",
         tp_price: float = 0.0,
         sl_price: float = 0.0,
+        tp2_price: float = 0.0,
+        tp1_exit_pct: float = 50.0,
     ) -> Dict:
         try:
             side = side.upper()
@@ -235,7 +251,7 @@ class TradeExecutor:
 
             # Default-safe path: no real order API call
             if settings.PAPER_TRADING_MODE:
-                result = self._simulate_order(symbol, side, amount, leverage, exchange, style, tp_price, sl_price)
+                result = self._simulate_order(symbol, side, amount, leverage, exchange, style, tp_price, sl_price, tp2_price, tp1_exit_pct)
             else:
                 if exchange == 'binance':
                     result = self._execute_binance(symbol, side, amount, leverage)
@@ -243,7 +259,7 @@ class TradeExecutor:
                     result = self._execute_binance_spot(symbol, side, amount)
                 elif exchange == 'upbit':
                     if settings.UPBIT_PAPER_ONLY:
-                        result = self._simulate_order(symbol, side, amount, leverage, exchange, style, tp_price, sl_price)
+                        result = self._simulate_order(symbol, side, amount, leverage, exchange, style, tp_price, sl_price, tp2_price, tp1_exit_pct)
                     else:
                         result = self._execute_upbit(symbol, side, amount)
                 elif exchange == 'coinbase':
@@ -286,7 +302,7 @@ class TradeExecutor:
             logger.warning(f"Reference price fetch failed ({exchange}, {symbol}): {e}")
             return 0.0
 
-    def _simulate_order(self, symbol: str, side: str, amount: float, leverage: int, exchange: str, style: str, tp_price: float = 0.0, sl_price: float = 0.0) -> Dict:
+    def _simulate_order(self, symbol: str, side: str, amount: float, leverage: int, exchange: str, style: str, tp_price: float = 0.0, sl_price: float = 0.0, tp2_price: float = 0.0, tp1_exit_pct: float = 50.0) -> Dict:
         price = self._get_reference_price(symbol, exchange)
         if not price:
             return {"success": False, "error": "Could not get reference price"}
@@ -304,6 +320,8 @@ class TradeExecutor:
             raw_price=price,
             tp_price=tp_price,
             sl_price=sl_price,
+            tp2_price=tp2_price,
+            tp1_exit_pct=tp1_exit_pct,
         )
         
         if not sim_res.get('success'):
@@ -321,7 +339,9 @@ class TradeExecutor:
             "filled_price": sim_res['filled_price'],
             "notional": amount,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "note": f"V8 PAPER ENGINE | Style: {style} | Slippage: {sim_res.get('slippage_applied_pct', 0):.3f}% | Price: {sim_res.get('filled_price', 0):.2f}"
+            "note": f"V8 PAPER ENGINE | Style: {style} | Slippage: {sim_res.get('slippage_applied_pct', 0):.3f}% | Price: {sim_res.get('filled_price', 0):.2f}",
+            "tp1_price": tp_price,
+            "tp2_price": tp2_price,
         }
 
     def _execute_binance(self, symbol: str, side: str, amount: float, leverage: int) -> Dict:

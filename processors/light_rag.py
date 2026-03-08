@@ -1334,12 +1334,13 @@ CRITICAL RULES:
         # --- Attempt 2: Gemini Embedding (Relay - 768 -> 1024 Dims) ---
         try:
             from agents.ai_router import ai_client
+            from google.genai import types as genai_types
             gemini = ai_client._gemini_default
             # Use latest gemini-embedding-001 for 2026-03 standard
             res = gemini.models.embed_content(
                 model="gemini-embedding-001",
                 contents=[text[:4000]],
-                config=types.EmbedContentConfig(output_dimensionality=768)
+                config=genai_types.EmbedContentConfig(output_dimensionality=768)
             )
             if res.embeddings and len(res.embeddings) > 0:
                 gemini_vec = np.array(res.embeddings[0].values, dtype=np.float32)
@@ -2048,74 +2049,10 @@ CRITICAL RULES:
 
     def run_triangulation_worker(self, limit: int = 5):
         """Cross-Domain Triangulation: Verifies CORROBORATED claims via Web Search (Perplexity)."""
-        logger.info("Truth Engine: Starting Triangulation Worker...")
-        try:
-            from collectors.perplexity_collector import perplexity_collector
-        except ImportError:
-            logger.warning("Truth Engine: Perplexity collector not available for triangulation.")
-            return
-
-        candidates = []
-        if hasattr(self.graph, 'get_triangulation_candidates'):
-            candidates = self.graph.get_triangulation_candidates(limit=limit)
-
-        verified_count = 0
-        for cand in candidates:
-            # We only triangulate claims that have multiple sources (CORROBORATED)
-            if cand.get("status") != "CORROBORATED":
-                continue
-                
-            source = cand["source"]
-            target = cand["target"]
-            rel_type = cand["rel_type"]
-            desc = cand["description"]
-            
-            logger.info(f"Triangulating claim: ({source}) --[{rel_type}]--> ({target})")
-            
-            # [FIX] Define search parameters
-            entity = f"{source} and {target}"
-            context = f"Relationship: {rel_type} | Claim: {desc}"
-            
-            # Use Perplexity targeted search to verify
-            # [Optimized Search] Determine importance for Tavily Credit saving
-            priority_keywords = ["ETF", "SEC", "FED", "HACK", "LISTING", "APPROVAL", "COURT", "LAWSUIT", "HACK", "EXPLOIT"]
-            is_high_priority = any(k in (source + target + desc).upper() for k in priority_keywords)
-            
-            # Major coins also trigger advanced
-            major_coins = ["BTC", "ETH", "SOL", "BNB", "XRP"]
-            is_major_coin = any(c in (source + target).upper() for c in major_coins)
-            
-            search_depth = "advanced" if (is_high_priority or is_major_coin) else "basic"
-            
-            try:
-                result = perplexity_collector.search_targeted(
-                    entity=entity,
-                    entity_type="narrative",
-                    context=context,
-                    search_depth=search_depth
-                )
-                
-                # [ENHANCED] Use trust_score for verification
-                trust_score = result.get("trust_score", 0)
-                fact_count = len(result.get("key_facts", []))
-                
-                # If trust score is high (80+) and we have at least 1 fact
-                if result.get("status") == "ok" and trust_score >= 80 and fact_count > 0:
-                    logger.info(f"Truth Engine: Triangulation SUCCEEDED (Trust {trust_score}%) for ({source})-({target}). Moving to PROBABLE.")
-                    if hasattr(self.graph, "update_relationship_status"):
-                        self.graph.update_relationship_status(
-                            source=source, target=target, rel_type=rel_type,
-                            status="PROBABLE", weight_boost=2.0
-                        )
-                    verified_count += 1
-                elif trust_score >= 50:
-                    logger.info(f"Truth Engine: Triangulation WEAK (Trust {trust_score}%) for ({source})-({target}). Keeping as CORROBORATED.")
-                else:
-                    logger.info(f"Truth Engine: Triangulation FAILED (Trust {trust_score}%) for ({source})-({target}). Sources might be weak.")
-            except Exception as e:
-                logger.error(f"Truth Engine: Triangulation search error: {e}")
-                
-        logger.info(f"Truth Engine: Triangulation cycle complete. Verified: {verified_count}/{len(candidates)}")
+        logger.info(
+            "Truth Engine: web triangulation disabled to prevent external search costs. "
+            f"Skipping candidate verification (limit={limit})."
+        )
 
 
 # Singleton instance

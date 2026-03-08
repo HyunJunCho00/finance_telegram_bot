@@ -273,7 +273,24 @@ def _extract_reasoning_summary(text: str) -> str:
 
 def _extract_key_factors(text: str) -> list[str]:
     factors = []
-    for match in re.finditer(r"^[\-\*\u2022]\s+(.+)$", text, flags=re.MULTILINE):
+    list_field_patterns = [
+        r'"key_factors"\s*:\s*\[(.*?)\]',
+        r"'key_factors'\s*:\s*\[(.*?)\]",
+        r"\bkey_factors\b\s*[:=]\s*\[(.*?)\]",
+    ]
+    for pattern in list_field_patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if not match:
+            continue
+        raw_items = re.findall(r"""['"]([^'"]+)['"]""", match.group(1))
+        for item in raw_items:
+            value = item.strip()
+            if value and value not in factors:
+                factors.append(value[:120])
+            if len(factors) >= 5:
+                return factors
+
+    for match in re.finditer(r"^\s*[\-\*\u2022]\s+(.+)$", text, flags=re.MULTILINE):
         value = match.group(1).strip()
         if value and value not in factors:
             factors.append(value[:120])

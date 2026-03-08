@@ -168,6 +168,7 @@ class Settings(BaseSettings):
     MODEL_NEWS_CLUSTER: str = "qwen/qwen3-32b"
     MODEL_NEWS_FINAL: str = "openai/gpt-oss-120b"
     MODEL_NEWS_FINAL_FALLBACK: str = "openai/gpt-oss-20b"
+    MODEL_TRIGGER_VETO: str = "llama3.1-8b"
 
     # 7. monitor_hourly OpenRouter (free)
     MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
@@ -179,6 +180,17 @@ class Settings(BaseSettings):
     JUDGE_ENABLE_HOLD_OVERRIDE: bool = True
     JUDGE_OVERRIDE_ALLOC_SWING_PCT: float = 8.0
     JUDGE_OVERRIDE_ALLOC_POSITION_PCT: float = 5.0
+
+    # ===== Policy Engine: human-defined strategy constitution =====
+    POLICY_MAX_RISK_PER_TRADE_PCT: float = 1.0
+    POLICY_MIN_RR: float = 2.0
+    POLICY_TP1_R_MULTIPLE: float = 2.0
+    POLICY_TP1_EXIT_PCT: float = 50.0
+    POLICY_ATR_BUFFER_MULTIPLIER: float = 0.5
+    POLICY_REQUIRE_CONFIRMATION_SIGNALS: int = 1
+    POLICY_ZONE_TOLERANCE_PCT: float = 0.8
+    POLICY_ENABLE_LLM_VETO_ONLY: bool = True
+    POLICY_MAX_SPLIT_ALLOCATION_PCT: float = 100.0
 
     # 8. cloudflare_triage / cloudflare_rerank (CF infra)
     MODEL_CF_TRIAGE: str = "@cf/meta/llama-3-8b-instruct-awq"
@@ -195,6 +207,7 @@ class Settings(BaseSettings):
     MAX_INPUT_CHARS_SELF_CORRECTION: int = 10000
     MAX_INPUT_CHARS_RAG_EXTRACTION: int = 5000
     MAX_INPUT_CHARS_VLM_TELEGRAM_CHART: int = 1000  # caption only, short
+    MAX_INPUT_CHARS_TRIGGER_VETO: int = 6000
 
     # ===== Trading Mode =====
     # "swing"       = multi-day (days~2weeks), 4h analysis cycle

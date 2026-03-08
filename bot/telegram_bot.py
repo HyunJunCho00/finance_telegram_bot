@@ -589,6 +589,7 @@ class TradingBot:
                 TradingMode.POSITION,
                 False,
                 True,
+                True,
             )
 
             if result:

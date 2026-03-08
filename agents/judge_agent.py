@@ -26,7 +26,8 @@ You receive ALL available data:
 8. Your previous decision (maintain consistency unless data clearly changed)
 9. Chart image (if provided) - Uses full history for indicators to prevent distortion. Visual window zooms: SWING (~6 months for trend clarity), POSITION (~5 years to capture previous ATHs and major historical resistance).
 
-YOUR JOB: Make a FINAL trading decision. 
+YOUR JOB: Make a DRAFT trading decision. 
+CRITICAL POLICY RULE: Human-defined policy engine has final authority. You must NOT rely on discretionary exceptions. If structure, stop, or reward/risk is unclear, prefer HOLD and explain why.
 CRITICAL V9 RULE: You MUST perform Falsifiability Analysis BEFORE your final decision. Identify the strongest evidence AGAINST your primary bias.
 If the Meta-Agent indicates a high-risk regime, you MUST demand higher confidence levels for any entry.
 

@@ -28,6 +28,8 @@ class ExecutionDesk:
             leverage    = order.get("leverage", 1)
             tp_price    = order.get("tp_price", 0.0)
             sl_price    = order.get("sl_price", 0.0)
+            tp2_price   = order.get("tp2_price", 0.0)
+            tp1_exit_pct = order.get("tp1_exit_pct", 50.0)
 
             if status == "PENDING":
                 state_manager.update_status(intent_id, "ACTIVE")
@@ -45,7 +47,7 @@ class ExecutionDesk:
                 if style == "MOMENTUM_SNIPER":
                     self._execute_chunk(
                         intent_id, symbol, direction, remaining,
-                        exchange, style, leverage, tp_price, sl_price
+                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct
                     )
 
                 elif style == "SMART_DCA":
@@ -53,19 +55,19 @@ class ExecutionDesk:
                     actual_chunk = min(chunk_size, remaining)
                     self._execute_chunk(
                         intent_id, symbol, direction, actual_chunk,
-                        exchange, style, leverage, tp_price, sl_price
+                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct
                     )
 
                 elif style == "PASSIVE_MAKER":
                     self._execute_chunk(
                         intent_id, symbol, direction, remaining,
-                        exchange, style, leverage, tp_price, sl_price
+                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct
                     )
 
                 elif style == "CASINO_EXIT":
                     self._execute_chunk(
                         intent_id, symbol, direction, remaining,
-                        exchange, style, leverage, tp_price, sl_price
+                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct
                     )
 
             except Exception as e:
@@ -84,6 +86,8 @@ class ExecutionDesk:
         leverage: float = 1.0,
         tp_price: float = 0.0,
         sl_price: float = 0.0,
+        tp2_price: float = 0.0,
+        tp1_exit_pct: float = 50.0,
     ):
         if amount <= 0:
             return
@@ -98,6 +102,8 @@ class ExecutionDesk:
             style=style,
             tp_price=tp_price,
             sl_price=sl_price,
+            tp2_price=tp2_price,
+            tp1_exit_pct=tp1_exit_pct,
         )
 
         if res.get("success"):

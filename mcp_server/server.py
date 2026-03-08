@@ -54,8 +54,11 @@ def get_cvd(symbol: str, minutes: int = 240) -> dict:
 def search_narrative(symbol: str) -> dict:
     """Search market narrative via Perplexity API.
     Returns WHY the price is moving: sentiment, bullish/bearish factors, macro context."""
-    logger.info(f"MCP tool: search_narrative {symbol}")
-    return mcp_tools.search_market_narrative(symbol)
+    logger.warning(f"MCP tool: search_narrative blocked for {symbol}")
+    return {
+        "success": False,
+        "error": "Public MCP search_narrative is disabled. Use the Telegram natural-language tool path instead.",
+    }
 
 
 @mcp.tool()

@@ -214,6 +214,17 @@ class ReportGenerator:
             f"<i>{final_logic}</i>\n",
         ]
 
+        policy = self._load_json_field(decision.get("policy_checks"), {}) if isinstance(decision, dict) else {}
+        if isinstance(policy, dict) and policy:
+            summary_lines.append(
+                f"Policy: <code>{self._escape_html(policy.get('status', 'N/A'))}</code> | "
+                f"RR: <code>{self._fmt_num(policy.get('rr'), 2)}</code> | "
+                f"Stop Basis: <code>{self._escape_html(policy.get('stop_basis', 'N/A'))}</code>"
+            )
+            flow_signals = policy.get("flow_signals", []) or []
+            if flow_signals:
+                summary_lines.append(f"Flow: <code>{self._escape_html(', '.join(flow_signals[:2]))}</code>")
+
         receipt = decision.get("execution_receipt")
         if receipt and receipt.get("success"):
             summary_lines.append(f"✅ <b>자동매매 실행 완료</b> ({len(receipt.get('receipts', []))} orders)")
