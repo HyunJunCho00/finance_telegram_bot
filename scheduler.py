@@ -676,19 +676,68 @@ def job_routine_market_status():
                 if not selected_items:
                     selected_items = (ext_items[:4] + tg_items[:2])[:6]
 
+                normalized_items = []
+                for item in selected_items[:6]:
+                    if not isinstance(item, dict):
+                        continue
+                    headline = str(
+                        item.get("headline")
+                        or item.get("title")
+                        or item.get("source")
+                        or "Untitled"
+                    ).strip()
+                    claim = str(
+                        item.get("claim")
+                        or item.get("description")
+                        or item.get("text")
+                        or headline
+                    ).strip()
+                    why = str(item.get("why") or "").strip()
+                    impact = item.get("impact", 3)
+                    try:
+                        impact = int(impact)
+                    except Exception:
+                        impact = 3
+
+                    sources = item.get("sources", [])
+                    if not isinstance(sources, list) or not sources:
+                        source_name = str(item.get("source", "unknown")).strip() or "unknown"
+                        source_ref = "telegram"
+                        if item.get("url"):
+                            source_ref = str(item.get("url", "")).strip()
+                        sources = [f"[{source_name} - {source_ref}]"]
+                    else:
+                        sources = [str(src).strip() for src in sources if str(src).strip()]
+
+                    normalized_items.append({
+                        "headline": headline,
+                        "claim": claim,
+                        "impact": max(1, min(5, impact)),
+                        "why": why,
+                        "sources": sources[:4],
+                    })
+
+                if not normalized_items:
+                    normalized_items = [{
+                        "headline": "최근 1시간 주요 뉴스 없음",
+                        "claim": "유의미한 신규 이벤트가 확인되지 않았습니다.",
+                        "impact": 1,
+                        "why": "",
+                        "sources": [],
+                    }]
+
                 _time.sleep(1.2)  # avoid burst-call spikes between stage 1 and stage 2
 
                 final_payload = {
-                    "selected_news": selected_items[:6],
+                    "selected_news": normalized_items[:6],
                     "utc_now": datetime.now(timezone.utc).isoformat(),
                 }
                 final_prompt = (
                     "Write a concise Korean market briefing based ONLY on selected_news.\n"
-                    "Output plain text only, under 320 words.\n"
-                    "For each claim include at least one source tag.\n"
-                    "Source format example:\n"
-                    "- [Bloomberg - https://example.com/...]\n"
-                    "- [Lookonchain - telegram]\n"
+                    "Output plain text only, under 220 words.\n"
+                    "Summarize the top 6 items as short numbered lines.\n"
+                    "Do NOT include raw URLs or long source tags in the summary body.\n"
+                    "Keep each line focused on event + likely market implication.\n"
                     "If signals conflict, mention the conflict clearly.\n"
                     "The final sentence MUST end with a full stop."
                 )
@@ -730,6 +779,29 @@ def job_routine_market_status():
                     asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"{news_header}\n\n{telegram_intel}"))
                 except Exception as e:
                     logger.warning(f"Routine news briefing send failed: {e}")
+
+                try:
+                    import html
+                    reference_payload = {
+                        "references": [
+                            {
+                                "index": idx + 1,
+                                "headline": item.get("headline", ""),
+                                "sources": item.get("sources", []),
+                            }
+                            for idx, item in enumerate(final_payload.get("selected_news", [])[:6])
+                        ]
+                    }
+                    refs_json = json.dumps(reference_payload, ensure_ascii=False, indent=2)
+                    refs_header = "<b>🔗 최근 1시간 뉴스 참고 링크(JSON)</b>"
+                    asyncio.run(
+                        trading_bot.send_message(
+                            settings.TELEGRAM_CHAT_ID,
+                            f"{refs_header}\n\n{html.escape(refs_json)}",
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"Routine news reference send failed: {e}")
             
             # Message 2: Market Status Summary (Indicators)
             market_header = "<b>📊 주요 시장 지표 업데이트</b>"
