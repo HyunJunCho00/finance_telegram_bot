@@ -87,6 +87,62 @@ class PerplexityCollector:
         citations = data.get("citations", [])
         return content, citations
 
+    def _safe_load_json(self, value):
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    def _load_latest_playbook(self, symbol: str, mode: str) -> Optional[Dict]:
+        try:
+            res = (
+                db.client.table("daily_playbooks")
+                .select("*")
+                .eq("symbol", symbol)
+                .eq("mode", mode)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            return res.data[0] if res.data else None
+        except Exception:
+            return None
+
+    def _extract_price_condition(self, conditions, preferred_ops: Optional[List[str]] = None) -> str:
+        preferred_ops = preferred_ops or [">", ">=", "<", "<="]
+        if not isinstance(conditions, list):
+            return ""
+
+        def _rank(op: str) -> int:
+            try:
+                return preferred_ops.index(op)
+            except ValueError:
+                return len(preferred_ops)
+
+        price_conditions = []
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            if str(cond.get("metric", "")).lower() != "price":
+                continue
+            op = str(cond.get("operator", "")).strip()
+            value = cond.get("value")
+            try:
+                price_conditions.append((_rank(op), op, float(value)))
+            except Exception:
+                continue
+
+        if not price_conditions:
+            return ""
+
+        _, op, value = sorted(price_conditions, key=lambda item: (item[0], item[2]))[0]
+        return f"price {op} {value:,.2f}"
+
     def _gather_market_state(self, symbol: str) -> Dict:
         """Pull live market indicators from DB for mode-aware prompt injection.
 
@@ -146,6 +202,88 @@ class PerplexityCollector:
                     state["funding_rate"] = float(funding_df["funding_rate"].iloc[-1])
             except Exception:
                 pass
+
+            try:
+                raw_funding_res = (
+                    db.client.table("funding_data")
+                    .select("funding_rate,long_short_ratio,oi_binance,oi_bybit,oi_okx,timestamp")
+                    .eq("symbol", symbol)
+                    .order("timestamp", desc=True)
+                    .limit(4)
+                    .execute()
+                )
+                if raw_funding_res.data:
+                    latest = raw_funding_res.data[0]
+                    ls_ratio = latest.get("long_short_ratio")
+                    if ls_ratio is not None:
+                        state["long_short_ratio"] = float(ls_ratio)
+
+                    if len(raw_funding_res.data) >= 2:
+                        latest_oi = sum(float(latest.get(k, 0) or 0) for k in ("oi_binance", "oi_bybit", "oi_okx"))
+                        prev = raw_funding_res.data[-1]
+                        prev_oi = sum(float(prev.get(k, 0) or 0) for k in ("oi_binance", "oi_bybit", "oi_okx"))
+                        if prev_oi:
+                            state["oi_change_pct"] = round(((latest_oi - prev_oi) / prev_oi) * 100, 2)
+
+                    funding_rate = float(latest.get("funding_rate", state.get("funding_rate", 0.0)) or 0.0)
+                    long_short_ratio = float(latest.get("long_short_ratio", 1.0) or 1.0)
+                    if funding_rate > 0.03 and long_short_ratio > 1.05:
+                        state["positioning_risk"] = "long_crowded"
+                    elif funding_rate < -0.02 and long_short_ratio < 0.95:
+                        state["positioning_risk"] = "short_crowded"
+                    else:
+                        state["positioning_risk"] = "balanced"
+            except Exception:
+                pass
+
+            try:
+                latest_report = db.get_latest_report(symbol=symbol)
+                decision = self._safe_load_json((latest_report or {}).get("final_decision"))
+                if decision:
+                    direction = str(decision.get("decision", "HOLD") or "HOLD").upper()
+                    state["policy_candidate_bias"] = direction if direction in ("LONG", "SHORT") else "NEUTRAL"
+                    policy_checks = self._safe_load_json(decision.get("policy_checks"))
+                    if isinstance(policy_checks, dict) and policy_checks:
+                        if policy_checks.get("flow_confirmed") is True:
+                            state["flow_state"] = "confirmed"
+                        elif policy_checks.get("flow_signals"):
+                            state["flow_state"] = "mixed"
+                        elif state.get("oi_change_pct") is not None:
+                            state["flow_state"] = "weak" if abs(float(state["oi_change_pct"])) < 1.0 else "mixed"
+                    if not state.get("flow_state"):
+                        state["flow_state"] = "unknown"
+            except Exception:
+                pass
+
+            try:
+                for lane in ("swing", "position"):
+                    playbook_row = self._load_latest_playbook(symbol, lane)
+                    if not playbook_row:
+                        continue
+                    playbook = playbook_row.get("playbook", {})
+                    if isinstance(playbook, str):
+                        playbook = self._safe_load_json(playbook)
+                    if not isinstance(playbook, dict):
+                        continue
+                    entry_hint = self._extract_price_condition(
+                        playbook.get("entry_conditions", []),
+                        preferred_ops=[">", ">=", "<", "<="],
+                    )
+                    invalid_hint = self._extract_price_condition(
+                        playbook.get("invalidation_conditions", []),
+                        preferred_ops=["<", "<=", ">", ">="],
+                    )
+                    if entry_hint:
+                        state[f"{lane}_entry_trigger"] = entry_hint
+                    if invalid_hint:
+                        state[f"{lane}_invalidation_level"] = invalid_hint
+            except Exception:
+                pass
+
+            if not state.get("policy_candidate_bias"):
+                state["policy_candidate_bias"] = "NEUTRAL"
+            if not state.get("flow_state"):
+                state["flow_state"] = "unknown"
 
         except Exception as e:
             logger.warning(f"Market state gather failed for {symbol}: {e}")
@@ -288,7 +426,7 @@ class PerplexityCollector:
         return "\n".join(lines)
 
     def _build_unified_prompt(self, coin_name: str, base: str, state: Dict) -> str:
-        """Single daily prompt that covers both SWING and POSITION horizons."""
+        """Single daily prompt aligned to the deterministic trading policy."""
         now_utc = datetime.now(timezone.utc)
         date_today = now_utc.strftime("%Y-%m-%d")
         date_8h_ago = (now_utc - timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
@@ -319,44 +457,173 @@ class PerplexityCollector:
             lines.append(f"- 2s10s spread: {state['ust_spread']:+.2f}%")
         if state.get("nasdaq") is not None:
             lines.append(f"- Nasdaq: {state['nasdaq']:,.0f}")
+        policy_hint_lines = []
+        if state.get("policy_candidate_bias"):
+            policy_hint_lines.append(f"- Policy candidate bias: {state['policy_candidate_bias']}")
+        if state.get("flow_state"):
+            flow_line = f"- Flow state: {state['flow_state']}"
+            if state.get("oi_change_pct") is not None:
+                flow_line += f" (OI change {state['oi_change_pct']:+.2f}%)"
+            policy_hint_lines.append(flow_line)
+        if state.get("positioning_risk"):
+            policy_hint_lines.append(f"- Positioning risk: {state['positioning_risk']}")
+        if state.get("swing_entry_trigger"):
+            policy_hint_lines.append(f"- Swing reference trigger: {state['swing_entry_trigger']}")
+        if state.get("swing_invalidation_level"):
+            policy_hint_lines.append(f"- Swing invalidation reference: {state['swing_invalidation_level']}")
+        if state.get("position_entry_trigger"):
+            policy_hint_lines.append(f"- Position reference trigger: {state['position_entry_trigger']}")
+        if state.get("position_invalidation_level"):
+            policy_hint_lines.append(f"- Position invalidation reference: {state['position_invalidation_level']}")
+
+        lines += [
+            "",
+            "Minimal internal policy context (relevance hint only, not ground truth):",
+        ]
+        if policy_hint_lines:
+            lines.extend(policy_hint_lines[:7])
+        else:
+            lines.append("- No internal policy context available.")
 
         lines += [
             "",
             "Search instructions:",
+            "You are NOT making a trade recommendation.",
+            "You are an external evidence engine for a deterministic crypto trading policy.",
+            "Your job is to identify only factual, policy-relevant external events that may strengthen, weaken, or invalidate an existing technical/flow setup.",
             f"1) SWING horizon: last 8 hours to next 7 days (window starts {date_8h_ago} UTC).",
             f"2) POSITION horizon: structural context from {date_30d_ago} to {date_today}.",
             f"3) Every factor/event must include concrete dates. Ignore events earlier than {date_30d_ago}.",
+            "4) Prefer high-authority reporting and official sources. Avoid speculation, social chatter, and generic sentiment commentary.",
+            "5) Distinguish whether the move is driven by a short-lived headline or a structural regime shift.",
+            "6) Focus on events that matter for policy questions such as: should a trend-following setup be trusted, delayed, downsized, or invalidated?",
             "",
             "Return strict JSON only with this schema:",
             "{",
             f'  "symbol": "{base}",',
-            '  "summary": "2-3 sentence combined summary for traders",',
+            '  "summary": "2-3 sentence policy-oriented summary of the most relevant external facts",',
             '  "sentiment": "bullish" | "bearish" | "neutral",',
-            '  "reasoning": "single most important combined driver now",',
-            '  "macro_context": "rates/dxy/risk regime impact now",',
+            '  "reasoning": "single most important external driver that currently matters for policy decisions",',
+            '  "macro_context": "rates/dxy/risk regime impact now, only if directly relevant",',
+            '  "policy_supporting_factors": ["YYYY-MM-DD HH:mm or YYYY-MM-DD: verified fact that supports trusting an existing LONG/SHORT setup"],',
+            '  "policy_risks": ["YYYY-MM-DD HH:mm or YYYY-MM-DD: verified fact that argues for caution, delay, smaller size, or lower conviction"],',
+            '  "invalidation_risks": ["YYYY-MM-DD HH:mm or YYYY-MM-DD: verified fact that could invalidate the thesis or sharply reverse positioning"],',
+            '  "scheduled_binary_events": ["YYYY-MM-DD HH:mm or YYYY-MM-DD: upcoming event that can materially move BTC/ETH"],',
+            '  "headline_vs_structural": "headline | structural | mixed, with one short sentence of explanation",',
+            '  "watchitems": ["policy-external but important emerging variable to monitor"],',
             '  "swing_view": {',
-            '    "summary": "1-2 sentence short-term setup for next 8-24h",',
+            '    "summary": "1-2 sentence short-term external evidence summary for the next 8-24h",',
             '    "sentiment": "bullish" | "bearish" | "neutral",',
-            '    "bullish_factors": ["YYYY-MM-DD HH:mm: ..."],',
-            '    "bearish_factors": ["YYYY-MM-DD HH:mm: ..."],',
-            '    "upcoming_events": ["YYYY-MM-DD: event in next 7 days"],',
+            '    "trigger_support": ["YYYY-MM-DD HH:mm: short-term fact that supports trusting the current setup"],',
+            '    "trigger_risks": ["YYYY-MM-DD HH:mm: short-term fact that weakens the setup or increases squeeze/fade risk"],',
+            '    "invalidation_risks": ["YYYY-MM-DD HH:mm: short-term fact that could break the setup"],',
+            '    "scheduled_events": ["YYYY-MM-DD HH:mm or YYYY-MM-DD: event in next 7 days"],',
             '    "key_levels": ["support/resistance with exact prices"]',
             '  },',
             '  "position_view": {',
-            '    "summary": "1-2 sentence medium-term thesis for next 2-8 weeks",',
+            '    "summary": "1-2 sentence medium-term external evidence summary for the next 2-8 weeks",',
             '    "sentiment": "bullish" | "bearish" | "neutral",',
             '    "cycle_position": "early_accumulation | late_accumulation | distribution | capitulation | recovery",',
-            '    "bullish_factors": ["YYYY-MM-DD: ..."],',
-            '    "bearish_factors": ["YYYY-MM-DD: ..."],',
+            '    "structural_support": ["YYYY-MM-DD: structural fact that supports the medium-term thesis"],',
+            '    "structural_risks": ["YYYY-MM-DD: structural fact that weakens the medium-term thesis"],',
+            '    "invalidation_risks": ["YYYY-MM-DD: structural fact that could invalidate the medium-term thesis"],',
             '    "institutional_flows": ["ETF/corporate flow facts with dates"],',
-            '    "regime_risks": ["macro/regulatory risk with dates"]',
+            '    "regime_risks": ["macro/regulatory risk with dates"],',
+            '    "watchitems": ["emerging medium-term variable not yet part of the core policy"]',
             '  }',
             "}",
             "",
+            "Output rules:",
+            "- No trade recommendation, no target position, no leverage guidance.",
+            "- Do not tell the user to buy, sell, long, short, hold, or wait.",
+            "- If evidence is weak, say so explicitly instead of filling with generic commentary.",
+            "- Keep lists short and high signal. Do not repeat the same fact in multiple sections unless needed.",
             "Source priority: high-authority financial media + official domains, then crypto data providers.",
             f"Do NOT include: generic statements, unrelated altcoin noise, or events before {date_7d_ago} for swing factors.",
         ]
         return "\n".join(lines)
+
+    def _ensure_list(self, value) -> List[str]:
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return []
+
+    def _ensure_dict(self, value) -> Dict:
+        return value if isinstance(value, dict) else {}
+
+    def _normalize_narrative_result(self, result: Dict, symbol: str, status: str = "ok") -> Dict:
+        normalized = dict(result or {})
+        normalized["symbol"] = symbol
+        normalized["status"] = status
+
+        normalized["summary"] = str(normalized.get("summary", "") or "").strip()
+        normalized["sentiment"] = str(normalized.get("sentiment", "neutral") or "neutral").lower()
+        normalized["reasoning"] = str(normalized.get("reasoning", "") or "").strip()
+        normalized["macro_context"] = str(normalized.get("macro_context", "") or "").strip()
+        normalized["headline_vs_structural"] = str(
+            normalized.get("headline_vs_structural", "") or ""
+        ).strip()
+
+        normalized["policy_supporting_factors"] = self._ensure_list(
+            normalized.get("policy_supporting_factors", normalized.get("bullish_factors", []))
+        )
+        normalized["policy_risks"] = self._ensure_list(
+            normalized.get("policy_risks", normalized.get("bearish_factors", []))
+        )
+        normalized["invalidation_risks"] = self._ensure_list(normalized.get("invalidation_risks", []))
+        normalized["scheduled_binary_events"] = self._ensure_list(
+            normalized.get("scheduled_binary_events", normalized.get("upcoming_events", []))
+        )
+        normalized["watchitems"] = self._ensure_list(normalized.get("watchitems", []))
+
+        swing_view = self._ensure_dict(normalized.get("swing_view", {}))
+        normalized["swing_view"] = {
+            "summary": str(swing_view.get("summary", "") or "").strip(),
+            "sentiment": str(swing_view.get("sentiment", normalized["sentiment"]) or normalized["sentiment"]).lower(),
+            "trigger_support": self._ensure_list(
+                swing_view.get("trigger_support", swing_view.get("bullish_factors", []))
+            ),
+            "trigger_risks": self._ensure_list(
+                swing_view.get("trigger_risks", swing_view.get("bearish_factors", []))
+            ),
+            "invalidation_risks": self._ensure_list(swing_view.get("invalidation_risks", [])),
+            "scheduled_events": self._ensure_list(
+                swing_view.get("scheduled_events", swing_view.get("upcoming_events", []))
+            ),
+            "key_levels": self._ensure_list(swing_view.get("key_levels", [])),
+        }
+
+        position_view = self._ensure_dict(normalized.get("position_view", {}))
+        normalized["position_view"] = {
+            "summary": str(position_view.get("summary", "") or "").strip(),
+            "sentiment": str(position_view.get("sentiment", normalized["sentiment"]) or normalized["sentiment"]).lower(),
+            "cycle_position": str(
+                position_view.get("cycle_position", normalized.get("cycle_position", "")) or ""
+            ).strip(),
+            "structural_support": self._ensure_list(
+                position_view.get("structural_support", position_view.get("bullish_factors", []))
+            ),
+            "structural_risks": self._ensure_list(
+                position_view.get("structural_risks", position_view.get("bearish_factors", []))
+            ),
+            "invalidation_risks": self._ensure_list(position_view.get("invalidation_risks", [])),
+            "institutional_flows": self._ensure_list(position_view.get("institutional_flows", [])),
+            "regime_risks": self._ensure_list(position_view.get("regime_risks", [])),
+            "watchitems": self._ensure_list(position_view.get("watchitems", [])),
+        }
+
+        normalized["cycle_position"] = normalized["position_view"].get("cycle_position", "")
+        normalized["upcoming_events"] = normalized["scheduled_binary_events"]
+        normalized["bullish_factors"] = normalized["policy_supporting_factors"]
+        normalized["bearish_factors"] = normalized["policy_risks"]
+        normalized["key_events"] = (
+            normalized["policy_supporting_factors"][:2]
+            + normalized["policy_risks"][:2]
+            + normalized["scheduled_binary_events"][:2]
+        )
+        return normalized
 
     def search_market_narrative(self, symbol: str = "BTC", is_emergency: bool = False) -> Dict:
         """Daily narrative search (one API call per symbol per UTC day)."""
@@ -647,35 +914,43 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
                 lines = [l for l in lines if not l.strip().startswith("```")]
                 text = "\n".join(lines)
             result = json.loads(text)
-            result["symbol"] = symbol
-            result["status"] = "ok"
-            return result
+            return self._normalize_narrative_result(result, symbol, status="ok")
         except json.JSONDecodeError:
             logger.warning("Failed to parse Perplexity JSON, using raw text")
-            return {
+            raw = {
                 "symbol": symbol,
-                "status": "raw",
                 "summary": content[:500],
                 "sentiment": "neutral",
-                "bullish_factors": [],
-                "bearish_factors": [],
                 "reasoning": content[:300],
-                "key_events": [],
                 "macro_context": "",
+                "policy_supporting_factors": [],
+                "policy_risks": [],
+                "invalidation_risks": [],
+                "scheduled_binary_events": [],
+                "headline_vs_structural": "unknown - raw text fallback",
+                "watchitems": [],
+                "swing_view": {},
+                "position_view": {},
             }
+            return self._normalize_narrative_result(raw, symbol, status="raw")
 
     def _empty_result(self, symbol: str) -> Dict:
-        return {
+        empty = {
             "symbol": symbol,
-            "status": "unavailable",
             "summary": "Market narrative unavailable.",
             "sentiment": "neutral",
-            "bullish_factors": [],
-            "bearish_factors": [],
             "reasoning": "No narrative data available.",
-            "key_events": [],
             "macro_context": "",
+            "policy_supporting_factors": [],
+            "policy_risks": [],
+            "invalidation_risks": [],
+            "scheduled_binary_events": [],
+            "headline_vs_structural": "",
+            "watchitems": [],
+            "swing_view": {},
+            "position_view": {},
         }
+        return self._normalize_narrative_result(empty, symbol, status="unavailable")
 
     def persist_narrative(self, narrative: Dict, symbol: str) -> None:
         """Persist narrative result into PostgreSQL for 4-hour report traceability."""
@@ -706,44 +981,60 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
             return "Market Narrative: Unavailable"
 
         lines = [
-            f"[NARRATIVE] {narrative.get('symbol', '?')} | Sentiment: {narrative.get('sentiment', '?').upper()}",
+            f"[NARRATIVE] {narrative.get('symbol', '?')} | Policy Bias: {narrative.get('sentiment', '?').upper()}",
             f"Summary: {narrative.get('summary', 'N/A')}",
         ]
 
-        # POSITION mode: show cycle position
-        if narrative.get("cycle_position"):
-            lines.append(f"Cycle: {narrative.get('cycle_position')}")
-
-        # SWING mode: show upcoming events
-        upcoming = narrative.get("upcoming_events", [])
-        if upcoming:
-            lines.append(f"Upcoming: {' | '.join(upcoming[:3])}")
-
-        bull = narrative.get("bullish_factors", [])
-        if bull:
-            lines.append(f"Bullish: {' | '.join(bull[:3])}")
-
-        bear = narrative.get("bearish_factors", [])
-        if bear:
-            lines.append(f"Bearish: {' | '.join(bear[:3])}")
-
         reasoning = narrative.get("reasoning", "")
         if reasoning:
-            lines.append(f"Why: {reasoning}")
+            lines.append(f"Policy Driver: {reasoning}")
 
         macro = narrative.get("macro_context", "")
         if macro:
             lines.append(f"Macro: {macro}")
 
+        support = narrative.get("policy_supporting_factors", [])
+        if support:
+            lines.append(f"Policy Support: {' | '.join(support[:3])}")
+
+        risks = narrative.get("policy_risks", [])
+        if risks:
+            lines.append(f"Policy Risks: {' | '.join(risks[:3])}")
+
+        invalidation = narrative.get("invalidation_risks", [])
+        if invalidation:
+            lines.append(f"Invalidation Risks: {' | '.join(invalidation[:3])}")
+
+        events = narrative.get("scheduled_binary_events", [])
+        if events:
+            lines.append(f"Scheduled Events: {' | '.join(events[:3])}")
+
+        structure = narrative.get("headline_vs_structural", "")
+        if structure:
+            lines.append(f"Regime Type: {structure}")
+
+        watchitems = narrative.get("watchitems", [])
+        if watchitems:
+            lines.append(f"Watchitems: {' | '.join(watchitems[:2])}")
+
         swing_view = narrative.get("swing_view", {})
         if isinstance(swing_view, dict) and swing_view:
             lines.append(f"[SWING] {swing_view.get('summary', '')}")
-            sw_bull = swing_view.get("bullish_factors", [])
-            if sw_bull:
-                lines.append(f"[SWING Bull] {' | '.join(sw_bull[:2])}")
-            sw_bear = swing_view.get("bearish_factors", [])
-            if sw_bear:
-                lines.append(f"[SWING Bear] {' | '.join(sw_bear[:2])}")
+            sw_support = swing_view.get("trigger_support", [])
+            if sw_support:
+                lines.append(f"[SWING Support] {' | '.join(sw_support[:2])}")
+            sw_risks = swing_view.get("trigger_risks", [])
+            if sw_risks:
+                lines.append(f"[SWING Risks] {' | '.join(sw_risks[:2])}")
+            sw_invalid = swing_view.get("invalidation_risks", [])
+            if sw_invalid:
+                lines.append(f"[SWING Invalid] {' | '.join(sw_invalid[:2])}")
+            sw_events = swing_view.get("scheduled_events", [])
+            if sw_events:
+                lines.append(f"[SWING Events] {' | '.join(sw_events[:2])}")
+            key_levels = swing_view.get("key_levels", [])
+            if key_levels:
+                lines.append(f"[SWING Levels] {' | '.join(key_levels[:2])}")
 
         position_view = narrative.get("position_view", {})
         if isinstance(position_view, dict) and position_view:
@@ -753,6 +1044,21 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
                 lines.append(f"[POSITION] cycle={cyc} | {pos_summary}")
             else:
                 lines.append(f"[POSITION] {pos_summary}")
+            pos_support = position_view.get("structural_support", [])
+            if pos_support:
+                lines.append(f"[POSITION Support] {' | '.join(pos_support[:2])}")
+            pos_risks = position_view.get("structural_risks", [])
+            if pos_risks:
+                lines.append(f"[POSITION Risks] {' | '.join(pos_risks[:2])}")
+            pos_invalid = position_view.get("invalidation_risks", [])
+            if pos_invalid:
+                lines.append(f"[POSITION Invalid] {' | '.join(pos_invalid[:2])}")
+            inst_flows = position_view.get("institutional_flows", [])
+            if inst_flows:
+                lines.append(f"[POSITION Flows] {' | '.join(inst_flows[:2])}")
+            pos_watch = position_view.get("watchitems", [])
+            if pos_watch:
+                lines.append(f"[POSITION Watch] {' | '.join(pos_watch[:2])}")
 
         return "\n".join(lines)
 
