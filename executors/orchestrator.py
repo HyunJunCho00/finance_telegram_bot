@@ -483,6 +483,13 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 hourly["total"] = hourly["long_liq_usd"] + hourly["short_liq_usd"]
                 liq_mean = float(hourly["total"].mean())
                 liq_std  = float(hourly["total"].std())
+                liq_median = float(hourly["total"].median())
+                liq_mad = float((hourly["total"] - liq_median).abs().median())
+                stats["liq_p90"] = float(hourly["total"].quantile(0.90))
+                stats["liq_p95"] = float(hourly["total"].quantile(0.95))
+                stats["liq_p99"] = float(hourly["total"].quantile(0.99))
+                stats["liq_median"] = liq_median
+                stats["liq_mad"] = liq_mad
                 if liq_std >= MIN_LIQ_STD_USD:
                     stats["liq_mean"] = liq_mean
                     stats["liq_std"]  = liq_std
@@ -693,12 +700,29 @@ def node_triage(state: AnalysisState) -> dict:
     # 2. Liquidity Agent (Z-Score 기반 청산 이상 탐지)
     try:
         _liq_stats = None
-        if _stats.get("liq_mean") is not None and _stats.get("liq_std") is not None:
-            _liq_stats = {"mean": _stats["liq_mean"], "std": _stats["liq_std"]}
+        if any(
+            _stats.get(key) is not None
+            for key in ("liq_mean", "liq_std", "liq_median", "liq_mad", "liq_p90", "liq_p95", "liq_p99")
+        ):
+            _liq_stats = {
+                "mean": _stats.get("liq_mean"),
+                "std": _stats.get("liq_std"),
+                "median": _stats.get("liq_median"),
+                "mad": _stats.get("liq_mad"),
+                "p90": _stats.get("liq_p90"),
+                "p95": _stats.get("liq_p95"),
+                "p99": _stats.get("liq_p99"),
+            }
+        raw_funding = state.get("raw_funding", {}) or {}
+        total_oi = sum(
+            float(raw_funding.get(key, 0) or 0)
+            for key in ("oi_binance", "oi_bybit", "oi_okx")
+        )
         _liq_result = liquidity_agent.analyze(
             cvd_context=state.get("funding_context", ""),
             liquidation_context=state.get("liquidation_context", ""),
             mode=state.get("mode", "SWING"),
+            total_oi=total_oi if total_oi > 0 else None,
             liq_stats=_liq_stats,
         )
         _liq_anomaly = _liq_result.get("anomaly", "none")
