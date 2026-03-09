@@ -249,6 +249,14 @@ class PolicyEngine:
         if not confluence.get("passed"):
             policy["reasons"].append("Confluence rule failed (<2 structural sources).")
 
+        scenario_engine = market_data.get("scenario_engine", {}) or {}
+        active_setup = scenario_engine.get("active_setup", {}) or {}
+        active_side = str(active_setup.get("side", "")).upper()
+        if active_side and active_side != direction:
+            policy["reasons"].append(f"Scenario side mismatch: active_setup={active_side}, decision={direction}.")
+        if active_setup and active_setup.get("invalidation") in (None, "", "N/A"):
+            policy["reasons"].append("Scenario invalidation missing.")
+
         flow = flow_confirm_engine.evaluate(direction=direction, raw_funding=raw_funding, cvd_df=cvd_df, liq_df=liq_df)
         policy["flow_confirmed"] = bool(flow.get("confirmed"))
         policy["flow_signals"] = flow.get("matched_signals", [])
@@ -296,6 +304,17 @@ class PolicyEngine:
                 else entry_price - (risk_per_unit * float(getattr(settings, "POLICY_TP1_R_MULTIPLE", 2.0)))
             )
             final["tp1_price"] = round(tp1_price, 6)
+            if isinstance(active_setup, dict) and active_setup:
+                final["split_entry_plan"] = active_setup.get("split_entries", [])
+                final["breakeven_rule"] = active_setup.get("breakeven_rule", "")
+                final["scenario_plan_summary"] = {
+                    "trigger": active_setup.get("trigger"),
+                    "entry_zone_low": active_setup.get("entry_zone_low"),
+                    "entry_zone_high": active_setup.get("entry_zone_high"),
+                    "invalidation": active_setup.get("invalidation"),
+                    "tp1": active_setup.get("tp1"),
+                    "tp2": active_setup.get("tp2"),
+                }
             final["policy_checks"] = policy
             policy["status"] = "APPROVED"
             reasoning["final_logic"] = (

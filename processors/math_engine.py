@@ -1142,6 +1142,475 @@ class MathEngine:
         clusters.sort(key=lambda x: x['strength'], reverse=True)
         return clusters[:5]
 
+    def detect_equal_levels(self, df: pd.DataFrame, mode: TradingMode = TradingMode.SWING) -> Dict:
+        """Cluster nearly-equal swing highs/lows that often become liquidity magnets."""
+        if len(df) < 20:
+            return {"equal_highs": [], "equal_lows": []}
+
+        working_df = df.tail(min(len(df), 180)).reset_index(drop=True)
+        order = max(4, min(12, len(working_df) // 16)) if mode == TradingMode.SWING else max(6, min(18, len(working_df) // 14))
+        highs = working_df['high'].astype(float).values
+        lows = working_df['low'].astype(float).values
+
+        high_idx = argrelextrema(highs, np.greater, order=order)[0]
+        low_idx = argrelextrema(lows, np.less, order=order)[0]
+        price_ref = float(working_df['close'].iloc[-1])
+        tolerance_pct = 0.2 if mode == TradingMode.SWING else 0.35
+        tolerance_abs = max(price_ref * (tolerance_pct / 100.0), 1e-9)
+
+        def _cluster(indices: np.ndarray, values: np.ndarray) -> List[Dict]:
+            if len(indices) < 2:
+                return []
+            pivots = sorted([(int(i), float(values[i])) for i in indices], key=lambda item: item[1])
+            groups: List[List[tuple[int, float]]] = []
+            for idx, price in pivots:
+                if not groups or abs(price - groups[-1][-1][1]) > tolerance_abs:
+                    groups.append([(idx, price)])
+                else:
+                    groups[-1].append((idx, price))
+            clusters = []
+            for group in groups:
+                if len(group) < 2:
+                    continue
+                prices = [p for _, p in group]
+                clusters.append({
+                    "price": round(float(np.mean(prices)), 2),
+                    "price_low": round(float(min(prices)), 2),
+                    "price_high": round(float(max(prices)), 2),
+                    "touches": len(group),
+                })
+            return clusters[-3:]
+
+        return {
+            "equal_highs": _cluster(high_idx, highs),
+            "equal_lows": _cluster(low_idx, lows),
+        }
+
+    def detect_sr_flip(self, df: pd.DataFrame, swing_levels: Dict) -> Dict:
+        """Check whether a recently-broken S/R level is acting as flipped support or resistance."""
+        if len(df) < 8 or not isinstance(swing_levels, dict):
+            return {"status": "none", "confirmed": False}
+
+        closes = df['close'].astype(float)
+        highs = df['high'].astype(float)
+        lows = df['low'].astype(float)
+        current_price = float(closes.iloc[-1])
+        tolerance = current_price * 0.0025
+
+        nearest_resistance = swing_levels.get("nearest_resistance")
+        if isinstance(nearest_resistance, (int, float)):
+            level = float(nearest_resistance)
+            if current_price > level and float(lows.tail(3).min()) <= (level + tolerance):
+                return {
+                    "status": "bullish_flip",
+                    "confirmed": True,
+                    "reference_level": round(level, 2),
+                    "reaction_close": round(current_price, 2),
+                }
+
+        nearest_support = swing_levels.get("nearest_support")
+        if isinstance(nearest_support, (int, float)):
+            level = float(nearest_support)
+            if current_price < level and float(highs.tail(3).max()) >= (level - tolerance):
+                return {
+                    "status": "bearish_flip",
+                    "confirmed": True,
+                    "reference_level": round(level, 2),
+                    "reaction_close": round(current_price, 2),
+                }
+
+        return {"status": "none", "confirmed": False}
+
+    def evaluate_retest_quality(self, df: pd.DataFrame, level: Optional[float], side: str) -> Dict:
+        """Score whether recent candles are respecting a support/resistance retest cleanly."""
+        if level is None or len(df) < 6:
+            return {"score": 0, "label": "unknown", "touches": 0, "close_acceptance": 0}
+
+        level = float(level)
+        recent = df.tail(10).copy()
+        closes = recent['close'].astype(float)
+        lows = recent['low'].astype(float)
+        highs = recent['high'].astype(float)
+        tolerance = max(level * 0.0025, 1e-9)
+
+        if side.upper() == "LONG":
+            touches = int(((lows >= (level - tolerance)) & (lows <= (level + tolerance))).sum())
+            close_acceptance = int((closes >= (level - tolerance)).sum())
+            reaction = int((closes.tail(3).diff().fillna(0) >= 0).sum())
+        else:
+            touches = int(((highs >= (level - tolerance)) & (highs <= (level + tolerance))).sum())
+            close_acceptance = int((closes <= (level + tolerance)).sum())
+            reaction = int((closes.tail(3).diff().fillna(0) <= 0).sum())
+
+        score = min(100, touches * 22 + close_acceptance * 5 + reaction * 8)
+        if score >= 70:
+            label = "clean"
+        elif score >= 45:
+            label = "acceptable"
+        elif score > 0:
+            label = "weak"
+        else:
+            label = "failed"
+
+        return {
+            "score": score,
+            "label": label,
+            "touches": touches,
+            "close_acceptance": close_acceptance,
+        }
+
+    def detect_liquidity_sweep(self, df: pd.DataFrame, swing_levels: Dict, equal_levels: Dict) -> Dict:
+        """Detect simple buy-side / sell-side liquidity sweeps around clustered highs/lows."""
+        if len(df) < 6:
+            return {"status": "none", "confirmed": False}
+
+        recent = df.tail(5).reset_index(drop=True)
+        last = recent.iloc[-1]
+        prev = recent.iloc[-2]
+        current_price = float(last['close'])
+        tolerance = max(current_price * 0.0025, 1e-9)
+
+        high_candidates: List[float] = []
+        low_candidates: List[float] = []
+        for item in (equal_levels.get("equal_highs", []) or []):
+            if isinstance(item, dict) and isinstance(item.get("price"), (int, float)):
+                high_candidates.append(float(item["price"]))
+        for item in (equal_levels.get("equal_lows", []) or []):
+            if isinstance(item, dict) and isinstance(item.get("price"), (int, float)):
+                low_candidates.append(float(item["price"]))
+
+        nearest_resistance = swing_levels.get("nearest_resistance")
+        nearest_support = swing_levels.get("nearest_support")
+        if isinstance(nearest_resistance, (int, float)):
+            high_candidates.append(float(nearest_resistance))
+        if isinstance(nearest_support, (int, float)):
+            low_candidates.append(float(nearest_support))
+
+        above = sorted([p for p in high_candidates if p >= current_price])
+        below = sorted([p for p in low_candidates if p <= current_price], reverse=True)
+
+        if above:
+            level = above[0]
+            if float(last['high']) > (level + tolerance) and float(last['close']) < level and float(prev['close']) <= level:
+                return {
+                    "status": "buy_side_sweep",
+                    "confirmed": True,
+                    "reference_level": round(level, 2),
+                    "sweep_extreme": round(float(last['high']), 2),
+                    "close_back_inside": round(float(last['close']), 2),
+                    "bias_after_sweep": "SHORT",
+                }
+
+        if below:
+            level = below[0]
+            if float(last['low']) < (level - tolerance) and float(last['close']) > level and float(prev['close']) >= level:
+                return {
+                    "status": "sell_side_sweep",
+                    "confirmed": True,
+                    "reference_level": round(level, 2),
+                    "sweep_extreme": round(float(last['low']), 2),
+                    "close_back_inside": round(float(last['close']), 2),
+                    "bias_after_sweep": "LONG",
+                }
+
+        return {"status": "none", "confirmed": False}
+
+    def detect_balance_price_range(self, fvg_data: List[Dict]) -> Optional[Dict]:
+        """Approximate BPR by overlapping recent bullish and bearish imbalance zones."""
+        if not isinstance(fvg_data, list) or len(fvg_data) < 2:
+            return None
+
+        bulls = [g for g in fvg_data if str(g.get("type")) == "bullish"]
+        bears = [g for g in fvg_data if str(g.get("type")) == "bearish"]
+        for bull in reversed(bulls[-3:]):
+            for bear in reversed(bears[-3:]):
+                low = max(float(bull.get("gap_low", 0)), float(bear.get("gap_low", 0)))
+                high = min(float(bull.get("gap_high", 0)), float(bear.get("gap_high", 0)))
+                if high > low:
+                    return {
+                        "price_low": round(low, 2),
+                        "price_high": round(high, 2),
+                        "label": "bpr_overlap",
+                    }
+        return None
+
+    def _bias_from_structure(self, info: Dict) -> str:
+        if not isinstance(info, dict):
+            return "neutral"
+        msb_type = str((info.get("msb") or {}).get("type", "")).lower()
+        choch_type = str((info.get("choch") or {}).get("type", "")).lower()
+        structure = str(info.get("structure", "")).lower()
+        if "bullish" in msb_type or "bullish" in choch_type or structure == "uptrend":
+            return "bullish"
+        if "bearish" in msb_type or "bearish" in choch_type or structure == "downtrend":
+            return "bearish"
+        return "neutral"
+
+    def _choose_targets(self, levels: List[float], entry_price: float, side: str) -> tuple[Optional[float], Optional[float]]:
+        cleaned = sorted({round(float(v), 2) for v in levels if isinstance(v, (int, float))})
+        if side == "LONG":
+            candidates = [v for v in cleaned if v > entry_price]
+            return (candidates[0] if candidates else None, candidates[1] if len(candidates) > 1 else None)
+        candidates = [v for v in cleaned if v < entry_price]
+        candidates = list(reversed(candidates))
+        return (candidates[0] if candidates else None, candidates[1] if len(candidates) > 1 else None)
+
+    def _build_scenario_for_side(
+        self,
+        side: str,
+        current_price: float,
+        supports: List[float],
+        resistances: List[float],
+        confluence_zones: List[Dict],
+        liquidity_sweep: Dict,
+        sr_flip: Dict,
+        retest_quality: Dict,
+        bpr_zone: Optional[Dict],
+        timeframe: str,
+    ) -> Dict:
+        side = side.upper()
+        entry_zone = None
+        invalidation = None
+        trigger = "wait_for_retest"
+
+        if side == "LONG":
+            support_candidates = sorted({round(float(v), 2) for v in supports if isinstance(v, (int, float)) and v < current_price}, reverse=True)
+            reference = support_candidates[0] if support_candidates else None
+            invalidation = support_candidates[1] if len(support_candidates) > 1 else reference
+            for zone in confluence_zones:
+                low = zone.get("price_low")
+                high = zone.get("price_high")
+                if isinstance(low, (int, float)) and isinstance(high, (int, float)) and float(high) <= current_price * 1.01:
+                    entry_zone = (round(float(low), 2), round(float(high), 2))
+                    break
+            if entry_zone is None and isinstance(reference, (int, float)):
+                band = max(reference * 0.002, current_price * 0.0018)
+                entry_zone = (round(reference - band, 2), round(reference + band, 2))
+            if liquidity_sweep.get("status") == "sell_side_sweep":
+                trigger = "reclaim_after_sell_side_sweep"
+            elif sr_flip.get("status") == "bullish_flip":
+                trigger = "bullish_sr_flip_retest"
+            elif bpr_zone:
+                trigger = "acceptance_from_bpr"
+        else:
+            resistance_candidates = sorted({round(float(v), 2) for v in resistances if isinstance(v, (int, float)) and v > current_price})
+            reference = resistance_candidates[0] if resistance_candidates else None
+            invalidation = resistance_candidates[1] if len(resistance_candidates) > 1 else reference
+            for zone in confluence_zones:
+                low = zone.get("price_low")
+                high = zone.get("price_high")
+                if isinstance(low, (int, float)) and isinstance(high, (int, float)) and float(low) >= current_price * 0.99:
+                    entry_zone = (round(float(low), 2), round(float(high), 2))
+                    break
+            if entry_zone is None and isinstance(reference, (int, float)):
+                band = max(reference * 0.002, current_price * 0.0018)
+                entry_zone = (round(reference - band, 2), round(reference + band, 2))
+            if liquidity_sweep.get("status") == "buy_side_sweep":
+                trigger = "reject_after_buy_side_sweep"
+            elif sr_flip.get("status") == "bearish_flip":
+                trigger = "bearish_sr_flip_retest"
+            elif bpr_zone:
+                trigger = "acceptance_from_bpr"
+
+        entry_mid = None
+        if isinstance(entry_zone, tuple) and len(entry_zone) == 2:
+            entry_mid = round((float(entry_zone[0]) + float(entry_zone[1])) / 2.0, 2)
+        tp1, tp2 = self._choose_targets(resistances if side == "LONG" else supports, entry_mid or current_price, side)
+
+        if invalidation is None and entry_mid is not None:
+            invalidation = entry_mid * (0.995 if side == "LONG" else 1.005)
+
+        invalidation = round(float(invalidation), 2) if isinstance(invalidation, (int, float)) else None
+        risk_pct = None
+        if isinstance(entry_mid, (int, float)) and isinstance(invalidation, (int, float)) and entry_mid:
+            risk_pct = round(abs(float(entry_mid) - float(invalidation)) / float(entry_mid) * 100.0, 3)
+
+        split_entries = []
+        if isinstance(entry_zone, tuple) and len(entry_zone) == 2:
+            low, high = float(entry_zone[0]), float(entry_zone[1])
+            split_entries = [round(high, 2), round((low + high) / 2.0, 2), round(low, 2)]
+            split_entries = sorted(set(split_entries), reverse=(side == "LONG"))
+
+        if isinstance(entry_zone, tuple) and len(entry_zone) == 2 and float(entry_zone[0]) <= current_price <= float(entry_zone[1]):
+            status = "active_zone"
+        else:
+            status = "wait_trigger"
+
+        trigger_conditions = []
+        if isinstance(entry_mid, (int, float)):
+            operator = ">=" if side == "LONG" and "reclaim" in trigger else "<=" if side == "SHORT" and "reject" in trigger else "<=" if side == "LONG" else ">="
+            trigger_conditions.append({"metric": "price", "operator": operator, "value": float(entry_mid)})
+        if liquidity_sweep.get("confirmed"):
+            trigger_conditions.append({"metric": "price_chg_pct_1h", "operator": ">=" if side == "LONG" else "<=", "value": 0.1 if side == "LONG" else -0.1})
+
+        invalidation_conditions = []
+        if isinstance(invalidation, (int, float)):
+            invalidation_conditions.append({"metric": "price", "operator": "<=" if side == "LONG" else ">=", "value": float(invalidation)})
+
+        return {
+            "side": side,
+            "timeframe": timeframe,
+            "status": status,
+            "trigger": trigger,
+            "entry_zone_low": round(float(entry_zone[0]), 2) if isinstance(entry_zone, tuple) else None,
+            "entry_zone_high": round(float(entry_zone[1]), 2) if isinstance(entry_zone, tuple) else None,
+            "entry_reference": entry_mid,
+            "invalidation": invalidation,
+            "tp1": tp1,
+            "tp2": tp2,
+            "risk_box_pct": risk_pct,
+            "split_entries": split_entries,
+            "partial_tp_plan": {
+                "tp1_price": tp1,
+                "tp1_exit_pct": 40,
+                "tp2_price": tp2,
+                "tp2_exit_pct": 40 if tp2 is not None else 0,
+                "runner_exit_pct": 20 if tp2 is not None else 60,
+            },
+            "breakeven_rule": f"Move stop to breakeven after TP1 or after {str(retest_quality.get('label', 'clean'))} retest acceptance.",
+            "retest_quality": retest_quality,
+            "trap_context": liquidity_sweep,
+            "sr_flip": sr_flip,
+            "trigger_conditions": trigger_conditions,
+            "invalidation_conditions": invalidation_conditions,
+        }
+
+    def build_scenario_engine(self, analysis: Dict, mode: TradingMode, raw_timeframes: Optional[Dict[str, pd.DataFrame]] = None) -> Dict:
+        """Create an execution-first scenario object shared by chart, VLM, judge, and monitor."""
+        if not isinstance(analysis, dict):
+            return {}
+
+        current_price = float(analysis.get("current_price", 0) or 0)
+        if current_price <= 0:
+            return {}
+
+        execution_tf = "1d" if mode == TradingMode.POSITION else "4h"
+        higher_tf = "1w" if mode == TradingMode.POSITION else "1d"
+
+        market_structure = analysis.get("market_structure", {}) or {}
+        exec_struct = market_structure.get(execution_tf, {}) or {}
+        htf_struct = market_structure.get(higher_tf, {}) or {}
+
+        htf_bias = self._bias_from_structure(htf_struct)
+        execution_bias = self._bias_from_structure(exec_struct)
+
+        structure = analysis.get("structure", {}) or {}
+        fibonacci = analysis.get("fibonacci", {}) or {}
+        swing = analysis.get("swing_levels", {}) or {}
+        confluence = analysis.get("confluence_zones", []) or []
+        fvg_data = (analysis.get("fvg", {}) or {}).get(execution_tf, []) or []
+
+        supports: List[float] = []
+        resistances: List[float] = []
+        for val in (swing.get(execution_tf, {}) or {}).get("swing_lows", []) or []:
+            if isinstance(val, (int, float)):
+                supports.append(float(val))
+        for val in (swing.get(execution_tf, {}) or {}).get("swing_highs", []) or []:
+            if isinstance(val, (int, float)):
+                resistances.append(float(val))
+        for val in (swing.get(higher_tf, {}) or {}).get("swing_lows", []) or []:
+            if isinstance(val, (int, float)):
+                supports.append(float(val))
+        for val in (swing.get(higher_tf, {}) or {}).get("swing_highs", []) or []:
+            if isinstance(val, (int, float)):
+                resistances.append(float(val))
+        for tf in (execution_tf, higher_tf):
+            fib = fibonacci.get(tf, {}) or {}
+            for key in ("fib_500", "fib_618", "fib_705", "fib_786"):
+                val = fib.get(key)
+                if isinstance(val, (int, float)):
+                    if val <= current_price:
+                        supports.append(float(val))
+                    if val >= current_price:
+                        resistances.append(float(val))
+            sup = (structure.get(f"support_{tf}") or {}).get("support_price")
+            res = (structure.get(f"resistance_{tf}") or {}).get("resistance_price")
+            if isinstance(sup, (int, float)):
+                supports.append(float(sup))
+            if isinstance(res, (int, float)):
+                resistances.append(float(res))
+
+        tf_df = (raw_timeframes or {}).get(execution_tf)
+        equal_levels = self.detect_equal_levels(tf_df, mode=mode) if isinstance(tf_df, pd.DataFrame) and not tf_df.empty else {"equal_highs": [], "equal_lows": []}
+        sr_flip = self.detect_sr_flip(tf_df, swing.get(execution_tf, {}) or {}) if isinstance(tf_df, pd.DataFrame) and not tf_df.empty else {"status": "none", "confirmed": False}
+        liquidity_sweep = self.detect_liquidity_sweep(tf_df, swing.get(execution_tf, {}) or {}, equal_levels) if isinstance(tf_df, pd.DataFrame) and not tf_df.empty else {"status": "none", "confirmed": False}
+
+        long_anchor = (swing.get(execution_tf, {}) or {}).get("nearest_support")
+        short_anchor = (swing.get(execution_tf, {}) or {}).get("nearest_resistance")
+        retest_long = self.evaluate_retest_quality(tf_df, long_anchor, "LONG") if isinstance(tf_df, pd.DataFrame) and not tf_df.empty else {"score": 0, "label": "unknown"}
+        retest_short = self.evaluate_retest_quality(tf_df, short_anchor, "SHORT") if isinstance(tf_df, pd.DataFrame) and not tf_df.empty else {"score": 0, "label": "unknown"}
+        bpr_zone = self.detect_balance_price_range(fvg_data)
+
+        relevant_confluence = []
+        for zone in confluence:
+            if not isinstance(zone, dict):
+                continue
+            zone_tfs = {str(tf).lower() for tf in zone.get("timeframes", [])}
+            if execution_tf in zone_tfs or higher_tf in zone_tfs:
+                relevant_confluence.append(zone)
+
+        primary_side = "LONG"
+        if htf_bias == "bearish":
+            primary_side = "SHORT"
+        elif htf_bias == "neutral" and execution_bias == "bearish":
+            primary_side = "SHORT"
+        alternate_side = "SHORT" if primary_side == "LONG" else "LONG"
+
+        primary = self._build_scenario_for_side(
+            primary_side,
+            current_price,
+            supports,
+            resistances,
+            relevant_confluence,
+            liquidity_sweep,
+            sr_flip,
+            retest_long if primary_side == "LONG" else retest_short,
+            bpr_zone,
+            execution_tf,
+        )
+        alternate = self._build_scenario_for_side(
+            alternate_side,
+            current_price,
+            supports,
+            resistances,
+            relevant_confluence,
+            liquidity_sweep,
+            sr_flip,
+            retest_short if alternate_side == "SHORT" else retest_long,
+            bpr_zone,
+            execution_tf,
+        )
+
+        if htf_bias != "neutral" and execution_bias not in ("neutral", htf_bias):
+            revision_reason = f"HTF {htf_bias} but execution TF shifted to {execution_bias}; scenario must stay flexible."
+        elif liquidity_sweep.get("confirmed"):
+            revision_reason = f"Recent {liquidity_sweep.get('status')} detected near {liquidity_sweep.get('reference_level')}."
+        else:
+            revision_reason = "No forced scenario revision."
+
+        active_setup = primary.copy()
+        active_setup["bias_alignment"] = {
+            "higher_timeframe": htf_bias,
+            "execution_timeframe": execution_bias,
+        }
+
+        return {
+            "profile": "inbum_shipalnam",
+            "higher_timeframe_bias": htf_bias,
+            "execution_bias": execution_bias,
+            "active_setup": active_setup,
+            "primary_scenario": primary,
+            "alternate_scenario": alternate,
+            "liquidity_map": {
+                "equal_levels": equal_levels,
+                "liquidity_sweep": liquidity_sweep,
+                "sr_flip": sr_flip,
+                "bpr_zone": bpr_zone,
+                "execution_timeframe": execution_tf,
+            },
+            "scenario_revision_reason": revision_reason,
+        }
+
 
 
     def analyze_market_swing(self, df_1m: pd.DataFrame,
@@ -1162,6 +1631,7 @@ class MathEngine:
             'fvg': {},
             'swing_levels': {},
             'confluence_zones': [],
+            'scenario_engine': {},
         }
 
         timeframes = {
@@ -1242,6 +1712,7 @@ class MathEngine:
 
         # Multi-TF confluence zones
         result['confluence_zones'] = self.detect_confluence_zones(result)
+        result['scenario_engine'] = self.build_scenario_engine(result, TradingMode.SWING, raw_timeframes=timeframes)
 
         # Recent 4h candles
         if len(tf_4h) >= 3:
@@ -1268,6 +1739,7 @@ class MathEngine:
             'fvg': {},
             'swing_levels': {},
             'confluence_zones': [],
+            'scenario_engine': {},
         }
 
         timeframes = {
@@ -1345,6 +1817,7 @@ class MathEngine:
 
         # Multi-TF confluence zones
         result['confluence_zones'] = self.detect_confluence_zones(result)
+        result['scenario_engine'] = self.build_scenario_engine(result, TradingMode.POSITION, raw_timeframes=timeframes)
 
         # Recent 1d candles
         if len(tf_1d) >= 3:
@@ -1403,6 +1876,7 @@ class MathEngine:
             'fibonacci': {timeframe: self.calculate_fibonacci_levels(tf_df)},
             'swing_levels': {timeframe: self.calculate_swing_levels(tf_df)},
             'confluence_zones': [],
+            'scenario_engine': {},
         }
         if result['structure'].get(f'support_{timeframe}'):
             result['structure'][f'support_{timeframe}']['timeframe'] = timeframe
@@ -1416,7 +1890,9 @@ class MathEngine:
             if line:
                 if 'trendline_quality' not in result: result['trendline_quality'] = {}
                 result['trendline_quality'][key] = self.score_trendline_quality(tf_df, line, t)
-                
+
+        mode_hint = TradingMode.POSITION if timeframe.lower() in ('1d', '1w', '3d') else TradingMode.SWING
+        result['scenario_engine'] = self.build_scenario_engine(result, mode_hint, raw_timeframes={timeframe: tf_df})
         return result
 
     def analyze_market(self, df_1m: pd.DataFrame, mode: TradingMode,
@@ -1482,6 +1958,24 @@ class MathEngine:
             for k, v in fib.items():
                 if v:
                     lines.append(f"  {k}: {v}")
+
+        scenario_engine = analysis.get('scenario_engine', {}) or {}
+        if scenario_engine:
+            active = scenario_engine.get('active_setup', {}) or {}
+            lines.append("[SCENARIO]")
+            lines.append(
+                f"  htf_bias={scenario_engine.get('higher_timeframe_bias', 'neutral')} "
+                f"exec_bias={scenario_engine.get('execution_bias', 'neutral')} "
+                f"side={active.get('side', 'N/A')} trigger={active.get('trigger', 'N/A')}"
+            )
+            if active.get('entry_zone_low') is not None or active.get('entry_zone_high') is not None:
+                lines.append(
+                    f"  entry_zone={active.get('entry_zone_low')}~{active.get('entry_zone_high')} "
+                    f"invalidation={active.get('invalidation')} tp1={active.get('tp1')} tp2={active.get('tp2')}"
+                )
+            revision = scenario_engine.get('scenario_revision_reason')
+            if revision:
+                lines.append(f"  revision={revision}")
 
         vp = analysis.get('volume_profile', {})
         if vp:

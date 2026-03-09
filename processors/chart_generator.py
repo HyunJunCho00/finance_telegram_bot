@@ -172,6 +172,7 @@ class ChartGenerator:
 
     def _get_lane_panel_configs(self, mode: TradingMode) -> List[Dict]:
         lookback_months = self._lane_lookback_months(mode)
+        execution_profile = bool(getattr(get_settings(), 'use_execution_philosophy', False))
         if mode == TradingMode.POSITION:
             return [
                 {
@@ -193,11 +194,11 @@ class ChartGenerator:
                     'draw_swing_levels': False,
                     'draw_confluence': True,
                     'draw_execution_plan': False,
-                    'draw_volume_profile': False,
+                    'draw_volume_profile': execution_profile,
                     'draw_liquidations': False,
-                    'draw_fvg': False,
-                    'draw_macro_order_blocks': False,
-                    'draw_avwap': False,
+                    'draw_fvg': execution_profile,
+                    'draw_macro_order_blocks': execution_profile,
+                    'draw_avwap': execution_profile,
                     'draw_macro_alpha': False,
                     'draw_session_breaks': False,
                 },
@@ -220,11 +221,11 @@ class ChartGenerator:
                     'draw_swing_levels': True,
                     'draw_confluence': True,
                     'draw_execution_plan': True,
-                    'draw_volume_profile': False,
+                    'draw_volume_profile': execution_profile,
                     'draw_liquidations': False,
-                    'draw_fvg': False,
-                    'draw_macro_order_blocks': False,
-                    'draw_avwap': False,
+                    'draw_fvg': execution_profile,
+                    'draw_macro_order_blocks': execution_profile,
+                    'draw_avwap': execution_profile,
                     'draw_macro_alpha': False,
                     'draw_session_breaks': False,
                 },
@@ -250,11 +251,11 @@ class ChartGenerator:
                 'draw_swing_levels': False,
                 'draw_confluence': True,
                 'draw_execution_plan': False,
-                'draw_volume_profile': False,
+                'draw_volume_profile': execution_profile,
                 'draw_liquidations': False,
-                'draw_fvg': False,
-                'draw_macro_order_blocks': False,
-                'draw_avwap': False,
+                'draw_fvg': execution_profile,
+                'draw_macro_order_blocks': execution_profile,
+                'draw_avwap': execution_profile,
                 'draw_macro_alpha': False,
                 'draw_session_breaks': False,
             },
@@ -277,11 +278,11 @@ class ChartGenerator:
                 'draw_swing_levels': True,
                 'draw_confluence': True,
                 'draw_execution_plan': True,
-                'draw_volume_profile': False,
+                'draw_volume_profile': execution_profile,
                 'draw_liquidations': False,
-                'draw_fvg': False,
-                'draw_macro_order_blocks': False,
-                'draw_avwap': False,
+                'draw_fvg': execution_profile,
+                'draw_macro_order_blocks': execution_profile,
+                'draw_avwap': execution_profile,
                 'draw_macro_alpha': False,
                 'draw_session_breaks': True,
             },
@@ -1252,6 +1253,28 @@ class ChartGenerator:
 
     def _derive_execution_plan(self, chart_df: pd.DataFrame, analysis: Dict, config: Dict) -> Dict:
         """Infer practical execution levels from local structure for the lower panel."""
+        scenario_engine = analysis.get('scenario_engine', {}) or {}
+        active_setup = scenario_engine.get('active_setup', {}) or {}
+        if active_setup:
+            entry_low = active_setup.get('entry_zone_low')
+            entry_high = active_setup.get('entry_zone_high')
+            entry_zone = None
+            if isinstance(entry_low, (int, float)) and isinstance(entry_high, (int, float)):
+                entry_zone = (float(entry_low), float(entry_high))
+            return {
+                'bias': 'bullish' if str(active_setup.get('side', 'LONG')).upper() == 'LONG' else 'bearish',
+                'timeframe': str(active_setup.get('timeframe', config.get('swing_tf') or config.get('fib_tf') or '')).upper(),
+                'entry_zone': entry_zone,
+                'invalidation': active_setup.get('invalidation'),
+                'target': active_setup.get('tp1'),
+                'target_2': active_setup.get('tp2'),
+                'trigger': active_setup.get('trigger'),
+                'split_entries': active_setup.get('split_entries', []),
+                'breakeven_rule': active_setup.get('breakeven_rule'),
+                'trap_context': active_setup.get('trap_context', {}),
+                'sr_flip': active_setup.get('sr_flip', {}),
+            }
+
         current_price = float(chart_df['close'].iloc[-1])
         tf = str(config.get('swing_tf') or config.get('fib_tf') or '').lower()
 
@@ -1371,6 +1394,11 @@ class ChartGenerator:
         entry_zone = execution_plan.get('entry_zone')
         invalidation = execution_plan.get('invalidation')
         target = execution_plan.get('target')
+        target_2 = execution_plan.get('target_2')
+        trigger = execution_plan.get('trigger')
+        split_entries = execution_plan.get('split_entries', []) or []
+        trap_context = execution_plan.get('trap_context', {}) or {}
+        sr_flip = execution_plan.get('sr_flip', {}) or {}
         n = len(chart_df)
 
         if isinstance(entry_zone, tuple) and len(entry_zone) == 2:
@@ -1390,9 +1418,34 @@ class ChartGenerator:
 
         if isinstance(target, (int, float)):
             ax.axhline(float(target), color='#95A5A6', linestyle='--', linewidth=1.1, alpha=0.85, zorder=3)
-            ax.text(n - 1, float(target), f' {tf} NEXT TARGET'.strip(), color='#95A5A6',
+            ax.text(n - 1, float(target), f' {tf} TP1'.strip(), color='#95A5A6',
                     fontsize=8, fontweight='bold', va='center', ha='right',
                     bbox=dict(facecolor='black', alpha=0.28, edgecolor='none', pad=1))
+
+        if isinstance(target_2, (int, float)):
+            ax.axhline(float(target_2), color='#BDC3C7', linestyle='--', linewidth=1.0, alpha=0.75, zorder=3)
+            ax.text(n - 1, float(target_2), f' {tf} TP2'.strip(), color='#BDC3C7',
+                    fontsize=8, fontweight='bold', va='center', ha='right',
+                    bbox=dict(facecolor='black', alpha=0.24, edgecolor='none', pad=1))
+
+        for idx, price in enumerate(split_entries[:3], start=1):
+            if isinstance(price, (int, float)):
+                ax.axhline(float(price), color='#3498DB', linestyle=':', linewidth=0.9, alpha=0.55, zorder=2)
+                ax.text(n - 1, float(price), f' {tf} SCALE {idx}', color='#3498DB',
+                        fontsize=7, va='center', ha='right',
+                        bbox=dict(facecolor='black', alpha=0.18, edgecolor='none', pad=1))
+
+        notes = []
+        if trigger:
+            notes.append(str(trigger).upper())
+        if isinstance(trap_context, dict) and trap_context.get('confirmed'):
+            notes.append(str(trap_context.get('status', 'trap')).upper())
+        if isinstance(sr_flip, dict) and sr_flip.get('confirmed'):
+            notes.append(str(sr_flip.get('status', 'sr_flip')).upper())
+        if notes:
+            ax.text(0.01, 0.02, " | ".join(notes), transform=ax.transAxes,
+                    fontsize=8, color='#F1C40F', ha='left', va='bottom',
+                    bbox=dict(facecolor='black', alpha=0.20, edgecolor='none', pad=2))
 
     def _draw_liquidation_markers(self, ax, chart_df: pd.DataFrame,
                                    liq_df: pd.DataFrame):

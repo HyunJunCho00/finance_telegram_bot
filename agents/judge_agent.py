@@ -38,6 +38,16 @@ Regardless of your decision (even if HOLD), you MUST generate a `monitoring_play
 - Use metrics: `price`, `funding_rate`, `oi_chg_pct`, `price_chg_pct_1h`, `volatility`.
 - Ensure operators are one of: `>`, `<`, `>=`, `<=`, `==`.
 
+CRITICAL EXECUTION RULE:
+- Prioritize evidence in this order: Higher-timeframe structure -> liquidity event / trap -> retest quality -> derivatives confirmation -> narrative.
+- You MUST think in scenarios, not predictions. Always define:
+  1. primary_scenario
+  2. alternate_scenario
+  3. trigger_to_enter
+  4. trigger_to_abort
+  5. partial_tp_plan
+  6. stop_to_be_rule
+
 {mode_specific_rules}
 
 Output your decision as JSON:
@@ -64,6 +74,14 @@ Output your decision as JSON:
   "expected_loss_pct": float,
   "ev_rationale": "Clear math-based explanation of the Expected Value calculation.",
   "key_factors": ["short bullet 1", "short bullet 2", ...],
+  "scenario_plan": {{
+    "primary_scenario": "Korean sentence",
+    "alternate_scenario": "Korean sentence",
+    "trigger_to_enter": "Korean sentence",
+    "trigger_to_abort": "Korean sentence",
+    "partial_tp_plan": "Korean sentence",
+    "stop_to_be_rule": "Korean sentence"
+  }},
   "monitoring_playbook": {{
     "entry_conditions": [
         {{"metric": "price", "operator": ">", "value": 50000}},
@@ -98,6 +116,9 @@ Be aware of your previous decision for consistency."""
     SWING_RULES = """Professional SWING trading principles you should consider:
 - Top-down analysis: 1d determines bias, 4h identifies setup, 1h confirms entry
 - Fibonacci 38.2%/50%/61.8% are key retracement entry zones
+- Invalidation is more important than precise entry. If invalidation is unclear, choose HOLD.
+- Respect liquidity events: sweep -> reclaim/reject -> retest is stronger than raw breakout chasing.
+- Prefer scenario wording such as "if reclaimed", "if retest holds", "if sweep fails" over unconditional directional claims.
 - Extreme funding rates are contrarian signals (high positive = potential top)
 - OI divergence: rising OI + flat/falling price = fragile long squeeze risk (OI_DIV=DIVERGENCE)
 - MFI proxy INFLOW (OI↑ + Price↑) confirms trend; OUTFLOW (OI↓ + Price↓) confirms liquidation
@@ -112,6 +133,8 @@ Be aware of your previous decision for consistency."""
 
     POSITION_RULES = """Professional POSITION trading principles you should consider:
 - Top-down analysis: 1w determines macro bias, 1d identifies structural shifts
+- Invalidation is more important than precise entry. If invalidation is unclear, choose HOLD.
+- Prefer structure confirmation and liquidity sweep reversals over forcing continuation entries.
 - Macro cycles and previous All-Time Highs (ATH) act as absolute boundaries
 - Fundamental shifts and narrative multi-month trends are more important than daily orderbook noise
 - Extreme negative funding over long periods = generational bottom; Extreme positive over months = late cycle
@@ -286,7 +309,7 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
 
         normalized = self._decision_template()
         for key, value in decision.items():
-            if key in ("reasoning", "monitoring_playbook", "daily_dual_plan"):
+            if key in ("reasoning", "monitoring_playbook", "daily_dual_plan", "scenario_plan"):
                 continue
             normalized[key] = value
 
@@ -299,6 +322,12 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
             normalized["reasoning"]["final_logic"] = str(reasoning)
 
         monitoring = self._normalize_playbook(decision.get("monitoring_playbook"))
+        scenario_plan = decision.get("scenario_plan", {})
+        if not isinstance(scenario_plan, dict):
+            scenario_plan = {}
+        merged_scenario_plan = normalized["scenario_plan"].copy()
+        merged_scenario_plan.update({k: v for k, v in scenario_plan.items() if v not in (None, "")})
+
         dual = decision.get("daily_dual_plan", {})
         if not isinstance(dual, dict):
             dual = {}
@@ -311,6 +340,7 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
             normalized["decision"] = "HOLD"
 
         normalized["monitoring_playbook"] = monitoring
+        normalized["scenario_plan"] = merged_scenario_plan
         normalized["daily_dual_plan"] = {
             "swing_plan": swing_plan,
             "position_plan": position_plan,
@@ -342,6 +372,14 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
             "expected_loss_pct": 0.0,
             "ev_rationale": "N/A",
             "key_factors": [],
+            "scenario_plan": {
+                "primary_scenario": "",
+                "alternate_scenario": "",
+                "trigger_to_enter": "",
+                "trigger_to_abort": "",
+                "partial_tp_plan": "",
+                "stop_to_be_rule": "",
+            },
             "monitoring_playbook": {
                 "entry_conditions": [],
                 "invalidation_conditions": [],

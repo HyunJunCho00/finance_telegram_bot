@@ -129,6 +129,38 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             pass
         return indicators
 
+    def _get_live_scenario_snapshot(self, symbol: str, mode: str) -> Dict:
+        """Load the current deterministic scenario state for revision / invalidation checks."""
+        try:
+            monitor_mode = TradingMode(mode)
+            candle_limit = settings.POSITION_CANDLE_LIMIT if monitor_mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
+            df = db.get_latest_market_data(symbol, limit=candle_limit)
+            if df is None or df.empty:
+                return {}
+
+            market_data = math_engine.analyze_market(df, monitor_mode)
+            scenario = market_data.get("scenario_engine", {}) or {}
+            active = scenario.get("active_setup", {}) or {}
+            current_price = float(df["close"].iloc[-1])
+            side = str(active.get("side", "")).upper()
+            invalidation = active.get("invalidation")
+            invalidated = False
+            if isinstance(invalidation, (int, float)):
+                invalidated = (side == "LONG" and current_price <= float(invalidation)) or (
+                    side == "SHORT" and current_price >= float(invalidation)
+                )
+
+            return {
+                "bias": scenario.get("higher_timeframe_bias", "neutral"),
+                "execution_bias": scenario.get("execution_bias", "neutral"),
+                "scenario_revision_reason": scenario.get("scenario_revision_reason", ""),
+                "active_setup": active,
+                "scenario_invalidated": invalidated,
+            }
+        except Exception as e:
+            logger.warning(f"Scenario snapshot error ({symbol}/{mode}): {e}")
+            return {}
+
     def _compare(self, a_val, op: str, b_val: float) -> bool:
         """Deterministic comparison utility."""
         if op == "<": return a_val < b_val
@@ -243,6 +275,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             pass
 
         live = self._get_live_indicators(symbol)
+        scenario_snapshot = self._get_live_scenario_snapshot(symbol, mode)
         pb_data = playbook.get("playbook", {})
         
         # ── Deterministic Evaluation Logic ──
@@ -267,6 +300,10 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                             break
                     except Exception as e:
                         logger.debug(f"Invalidation parse error: {e}")
+
+        if not invalidated and scenario_snapshot.get("scenario_invalidated"):
+            invalidated = True
+            inval_reason = str(scenario_snapshot.get("scenario_revision_reason") or "deterministic scenario invalidation")
 
         if invalidated:
             logger.info(f"Monitor [{symbol}/{mode}]: NO_ACTION | Playbook Invalidated: {inval_reason}")
@@ -330,6 +367,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             "reasoning": reasoning,
             # [FEATURE-1] Extra context for DB debug logging
             "live_indicators": live,
+            "scenario_snapshot": scenario_snapshot,
             "playbook_id": playbook.get("id"),
             "match_ratio": round(match_ratio, 2)
         }

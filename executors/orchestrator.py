@@ -115,6 +115,7 @@ def _build_vlm_context_text(market_data: dict, mode: TradingMode) -> str:
     fibonacci = (analysis.get("fibonacci", {}) or {}).get(higher_tf.lower(), {}) or {}
     swing = (analysis.get("swing_levels", {}) or {}).get(higher_tf.lower(), {}) or {}
     zones = analysis.get("confluence_zones", []) or []
+    scenario_engine = analysis.get("scenario_engine", {}) or {}
 
     diag_support = structure.get(f"support_{higher_tf.lower()}") or {}
     diag_resistance = structure.get(f"resistance_{higher_tf.lower()}") or {}
@@ -183,6 +184,25 @@ def _build_vlm_context_text(market_data: dict, mode: TradingMode) -> str:
             )
         lines.append(f"{higher_tf} Confluence: {'; '.join(zone_lines)}")
 
+    active_setup = scenario_engine.get("active_setup", {}) or {}
+    if active_setup:
+        lines.extend([
+            f"Scenario Bias: HTF={scenario_engine.get('higher_timeframe_bias', 'neutral')} | EXEC={scenario_engine.get('execution_bias', 'neutral')}",
+            f"Active Setup: {active_setup.get('side', 'N/A')} {active_setup.get('trigger', 'wait')}",
+            f"Entry Zone: {_fmt_level(active_setup.get('entry_zone_low'))} ~ {_fmt_level(active_setup.get('entry_zone_high'))}",
+            f"Invalidation: {_fmt_level(active_setup.get('invalidation'))}",
+            f"Targets: {_fmt_level(active_setup.get('tp1'))} / {_fmt_level(active_setup.get('tp2'))}",
+        ])
+        trap_context = active_setup.get("trap_context", {}) or {}
+        if trap_context.get("confirmed"):
+            lines.append(
+                f"Liquidity Event: {str(trap_context.get('status', 'none')).upper()} "
+                f"around {_fmt_level(trap_context.get('reference_level'))}"
+            )
+        revision_reason = scenario_engine.get("scenario_revision_reason")
+        if revision_reason:
+            lines.append(f"Scenario Revision: {revision_reason}")
+
     return "\n".join(lines)
 
 # ???? State definition (LangGraph TypedDict) ????
@@ -227,6 +247,9 @@ class AnalysisState(TypedDict):
     chart_image_b64: Optional[str]
     chart_bytes: Optional[bytes]
     vlm_context_text: str
+    current_bias: str
+    scenario_revision_reason: str
+    active_setup: dict
 
     # Final output
     market_regime: str
@@ -751,6 +774,9 @@ def node_rule_based_chart(state: AnalysisState) -> dict:
     if not market_data or current_price is None:
         return {"blackboard": {"chart_rules": {"status": "unavailable"}}}
 
+    scenario_engine = market_data.get("scenario_engine", {}) or {}
+    active_setup = scenario_engine.get("active_setup", {}) or {}
+
     nearest_zone = None
     confluence_zones = market_data.get("confluence_zones", []) or []
     for zone in confluence_zones:
@@ -798,24 +824,44 @@ def node_rule_based_chart(state: AnalysisState) -> dict:
         if isinstance(msb, dict):
             structure_alerts.append({"timeframe": tf, "type": msb.get("type"), "price": msb.get("broken_level")})
 
-    return {"blackboard": {"chart_rules": {
+    side = str(active_setup.get("side", "")).upper()
+    invalidation = active_setup.get("invalidation")
+    invalidation_near = (
+        isinstance(invalidation, (int, float))
+        and abs(float(current_price) - float(invalidation)) / max(float(current_price), 1e-9) * 100.0 <= 0.7
+    )
+
+    chart_rules = {
         "status": "ok",
         "current_price": round(float(current_price), 2),
         "nearest_confluence": nearest_zone,
         "nearest_fibonacci": nearest_fib,
         "structure_alerts": structure_alerts,
+        "scenario_engine": scenario_engine,
+        "active_setup": active_setup,
         "signals": {
             "at_confluence": bool(nearest_zone and nearest_zone["dist_pct"] <= 0.7),
             "at_fibonacci": bool(nearest_fib and nearest_fib["dist_pct"] <= 0.5),
             "has_structure_alert": bool(structure_alerts),
+            "scenario_ready": bool(side and active_setup.get("entry_zone_low") is not None and invalidation is not None),
+            "has_trap_signal": bool((active_setup.get("trap_context", {}) or {}).get("confirmed")),
+            "invalidation_near": bool(invalidation_near),
         },
-    }}}
+    }
+    return {
+        "blackboard": {"chart_rules": chart_rules},
+        "current_bias": str(scenario_engine.get("higher_timeframe_bias", "neutral")),
+        "scenario_revision_reason": str(scenario_engine.get("scenario_revision_reason", "")),
+        "active_setup": active_setup,
+    }
 
 
 def _should_run_vlm(state: AnalysisState) -> bool:
     """Gate expensive visual reasoning to high-value conditions only."""
     if not settings.should_use_chart:
         return False
+    if getattr(settings, "use_execution_philosophy", False):
+        return True
     if state.get("is_emergency"):
         return True
 
@@ -831,7 +877,12 @@ def _should_run_vlm(state: AnalysisState) -> bool:
         return True
 
     chart_rules = (state.get("blackboard", {}) or {}).get("chart_rules", {}) or {}
-    return bool(chart_rules.get("signals", {}).get("has_structure_alert"))
+    signals = chart_rules.get("signals", {}) or {}
+    return bool(
+        signals.get("has_structure_alert")
+        or signals.get("scenario_ready")
+        or signals.get("has_trap_signal")
+    )
 
 def node_vlm_geometric_expert(state: AnalysisState) -> dict:
     """Run VLM Geometric visual analysis when high-impact conditions are present."""
@@ -1808,6 +1859,9 @@ class Orchestrator:
             "chart_image_b64": None,
             "chart_bytes": None,
             "vlm_context_text": "",
+            "current_bias": "neutral",
+            "scenario_revision_reason": "",
+            "active_setup": {},
             "final_decision": {},
             "daily_dual_plan": {},
             "policy_snapshot": {},
@@ -1843,6 +1897,7 @@ class Orchestrator:
             "errors": [],
             "onchain_snapshot": {}, "onchain_context": "", "onchain_gate": {},
             "vlm_context_text": "", "policy_snapshot": {},
+            "current_bias": "neutral", "scenario_revision_reason": "", "active_setup": {},
         }
 
         # Run each node sequentially — mirrors the LangGraph DAG order.

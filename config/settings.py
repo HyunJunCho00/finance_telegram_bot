@@ -1,5 +1,4 @@
 ﻿from pydantic_settings import BaseSettings, SettingsConfigDict
-from google.cloud import secretmanager
 from functools import lru_cache
 from typing import List
 from enum import Enum
@@ -213,6 +212,7 @@ class Settings(BaseSettings):
     # "swing"       = multi-day (days~2weeks), 4h analysis cycle
     # "position"    = long-term (weeks~months), 1d analysis cycle
     TRADING_MODE: str = "swing"
+    PHILOSOPHY_PROFILE: str = "inbum_shipalnam"
 
     # ===== Chart Image / VLM Cost Control =====
     # Smart image strategy:
@@ -299,6 +299,10 @@ class Settings(BaseSettings):
         return self.USE_CHART_IMAGES
 
     @property
+    def use_execution_philosophy(self) -> bool:
+        return str(self.PHILOSOPHY_PROFILE or "").strip().lower() == "inbum_shipalnam"
+
+    @property
     def chart_timeframe(self) -> str:
         """Primary chart timeframe per mode."""
         mode = self.trading_mode
@@ -365,6 +369,8 @@ class Settings(BaseSettings):
 
 class SecretManager:
     def __init__(self, project_id: str):
+        from google.cloud import secretmanager
+
         self.project_id = project_id
         self.client = secretmanager.SecretManagerServiceClient()
 
@@ -424,7 +430,7 @@ class SecretManager:
 
         return secrets
 
-
+@lru_cache(maxsize=1)
 def get_settings() -> Settings:
     # [FIX] 일시적 trading_mode 복원:
     # TRADING_MODE 환경변수가 세팅 되지 않았을 때만 SQLite에서 읽어와 주입.
@@ -473,4 +479,14 @@ def get_settings() -> Settings:
         return Settings()
 
 
-settings = get_settings()
+class _LazySettingsProxy:
+    """Defer secret loading until a setting is actually accessed."""
+
+    def __getattr__(self, name):
+        return getattr(get_settings(), name)
+
+    def __repr__(self) -> str:
+        return repr(get_settings())
+
+
+settings = _LazySettingsProxy()
