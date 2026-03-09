@@ -525,7 +525,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
             rows = (
                 db.client.table("deribit_data")
                 .select("dvol,pcr_oi")
-                .eq("currency", currency)
+                .eq("symbol", currency)
                 .order("timestamp", desc=True)
                 .limit(168)   # 7일 × 24h (기관 표준 최단 lookback)
                 .execute()

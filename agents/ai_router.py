@@ -223,6 +223,16 @@ class AIClient:
     def _is_critical_role(self, role: str) -> bool:
         return role in ["judge", "risk_eval", "meta_regime", "self_correction"]
 
+    def _cerebras_fallback_model(self, role: str) -> str:
+        role = (role or "").lower()
+        if role == "news_brief_final":
+            return settings.MODEL_NEWS_FINAL_FALLBACK
+        if role in ("meta_regime", "monitor_hourly"):
+            return "qwen/qwen3-32b"
+        if role == "risk_eval":
+            return settings.MODEL_RISK_EVAL_FALLBACK
+        return "meta-llama/llama-4-maverick-17b-128e-instruct"
+
     def _select_gemini_client(self, backend: str):
         if backend == "gemini_judge":
             return self._gemini_judge
@@ -410,21 +420,26 @@ class AIClient:
         if result:
             return result
         logger.warning(f"Cerebras failed for {model_id}, falling back to Groq")
-        fallback_model = (
-            settings.MODEL_NEWS_FINAL_FALLBACK
-            if role == "news_brief_final"
-            else settings.MODEL_RISK_EVAL_FALLBACK
-        )
-        return self._generate_openai_compat(
-            self.groq_client,
-            fallback_model,
+        fallback_model = self._cerebras_fallback_model(role)
+        if self.groq_client:
+            return self._handle_groq_backend(
+                fallback_model,
+                role,
+                system_prompt,
+                msg,
+                max_tokens,
+                temperature,
+                None,
+            )
+        logger.warning("Groq client unavailable after Cerebras failure. Falling back to Gemini.")
+        return self._generate_gemini(
+            self._gemini_default,
+            self.default_model_id,
             system_prompt,
             msg,
             max_tokens,
             temperature,
             None,
-            timeout=25.0,
-            name="Groq(fallback)",
         )
 
     def _handle_groq_backend(

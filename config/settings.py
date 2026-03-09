@@ -159,14 +159,14 @@ class Settings(BaseSettings):
     MODEL_RISK_EVAL: str = "gpt-oss-120b"
 
     # 5. risk_eval_fallback Groq
-    MODEL_RISK_EVAL_FALLBACK: str = "openai/gpt-oss-20b"
+    MODEL_RISK_EVAL_FALLBACK: str = "qwen/qwen3-32b"
 
     # 6. RAG extraction (Groq) + News summarize (Cerebras lightweight)
-    MODEL_RAG_EXTRACTION: str = "openai/gpt-oss-20b"
+    MODEL_RAG_EXTRACTION: str = "meta-llama/llama-4-maverick-17b-128e-instruct"
     MODEL_NEWS_SUMMARIZE: str = "llama3.1-8b"
     MODEL_NEWS_CLUSTER: str = "qwen/qwen3-32b"
     MODEL_NEWS_FINAL: str = "openai/gpt-oss-120b"
-    MODEL_NEWS_FINAL_FALLBACK: str = "openai/gpt-oss-20b"
+    MODEL_NEWS_FINAL_FALLBACK: str = "qwen/qwen3-32b"
     MODEL_TRIGGER_VETO: str = "llama3.1-8b"
 
     # 7. monitor_hourly OpenRouter (free)
