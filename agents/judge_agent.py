@@ -160,6 +160,34 @@ Swarm reasoning controls & Data Trust Hierarchy:
 - If conflict remains unresolved and violates Hierarchy rules, choose HOLD with clear uncertainty rationale.
 """
 
+    TRIGGER_VALIDATION_PROMPT = """You are a trigger-time execution validator.
+
+Your authority is strictly narrower than the daily strategy judge.
+- You MUST NOT invent a new thesis or reverse the playbook direction.
+- You MAY only choose one of:
+  1. EXECUTE: playbook still valid, execute in the original direction
+  2. WAIT: playbook thesis still valid but timing/quality is not good enough yet
+  3. REDUCE: playbook still valid but context is mixed, reduce size
+  4. CANCEL: do not execute this trigger
+  5. REPLAN: the daily thesis itself appears stale/broken and needs emergency re-planning
+
+Return strict JSON only:
+{
+  "trigger_action": "EXECUTE" | "WAIT" | "REDUCE" | "CANCEL" | "REPLAN",
+  "allocation_pct": 0-100,
+  "leverage": 1-3,
+  "reasoning": "Korean sentence",
+  "replan_reason": "Korean sentence"
+}
+
+Rules:
+- If the playbook source direction is LONG, you cannot output SHORT logic.
+- If the playbook source direction is SHORT, you cannot output LONG logic.
+- If context is stale or thesis-breaking, prefer REPLAN over inventing the opposite side.
+- Use Korean for reasoning and replan_reason.
+- Output exactly one JSON object only.
+"""
+
     def __init__(self):
         pass
 
@@ -282,6 +310,120 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
             logger.error(f"Judge agent error: {e}")
             return self._default_decision(f"Judge agent error: {e}")
 
+    def make_decision_from_snapshot(self, snapshot: Dict) -> Dict:
+        snapshot = snapshot or {}
+        return self.make_decision(
+            market_data_compact=str(snapshot.get("market_data_compact", "") or ""),
+            blackboard=snapshot.get("blackboard", {}) or {},
+            funding_context="\n".join(
+                filter(
+                    None,
+                    [
+                        str(snapshot.get("funding_context", "") or ""),
+                        str(snapshot.get("liquidation_context", "") or ""),
+                    ],
+                )
+            ),
+            chart_image_b64=snapshot.get("chart_image_b64"),
+            mode=TradingMode(str(snapshot.get("mode", TradingMode.SWING.value)).lower()),
+            feedback_text=str(snapshot.get("feedback_text", "") or ""),
+            active_orders=snapshot.get("active_orders", []) or [],
+            open_positions=str(snapshot.get("open_positions", "") or ""),
+            symbol=str(snapshot.get("symbol", "BTCUSDT") or "BTCUSDT"),
+            regime_context=snapshot.get("regime_context", {}) or {},
+            narrative_context="\n\n".join(
+                filter(
+                    None,
+                    [
+                        str(snapshot.get("narrative_text", "") or ""),
+                        str(snapshot.get("rag_context", "") or ""),
+                        str(snapshot.get("telegram_news", "") or ""),
+                    ],
+                )
+            ),
+            onchain_context=str(snapshot.get("onchain_context", "") or ""),
+        )
+
+    def validate_trigger_against_playbook(self, snapshot: Dict, playbook_context: Optional[Dict]) -> Dict:
+        snapshot = snapshot or {}
+        context = dict(playbook_context or {})
+        source_decision = str(context.get("source_decision", "HOLD") or "HOLD").upper()
+        allowed_sides = context.get("allowed_sides", [])
+        max_allocation_pct = context.get("max_allocation_pct")
+        compact_snapshot = {
+            "symbol": str(snapshot.get("symbol", "BTCUSDT") or "BTCUSDT"),
+            "mode": str(snapshot.get("mode", TradingMode.SWING.value) or TradingMode.SWING.value),
+            "market_data": snapshot.get("market_data", {}) or {},
+            "funding_context": str(snapshot.get("funding_context", "") or ""),
+            "liquidation_context": str(snapshot.get("liquidation_context", "") or ""),
+            "narrative_text": str(snapshot.get("narrative_text", "") or ""),
+            "telegram_news": str(snapshot.get("telegram_news", "") or ""),
+            "onchain_context": str(snapshot.get("onchain_context", "") or ""),
+            "onchain_gate": snapshot.get("onchain_gate", {}) or {},
+            "regime_context": snapshot.get("regime_context", {}) or {},
+            "blackboard": snapshot.get("blackboard", {}) or {},
+        }
+        user_message = (
+            f"PLAYBOOK_CONTEXT:\n{json.dumps(context, ensure_ascii=False, indent=2)}\n\n"
+            f"SNAPSHOT:\n{json.dumps(compact_snapshot, ensure_ascii=False, indent=2)}\n\n"
+            f"LOCKED_DIRECTION={source_decision}\n"
+            f"ALLOWED_SIDES={json.dumps(allowed_sides, ensure_ascii=False)}\n"
+            f"MAX_ALLOCATION_PCT={json.dumps(max_allocation_pct, ensure_ascii=False)}\n"
+        )
+        try:
+            response = ai_client.generate_response(
+                system_prompt=self.TRIGGER_VALIDATION_PROMPT,
+                user_message=user_message,
+                temperature=0.1,
+                max_tokens=700,
+                role="judge",
+            )
+            parsed = extract_decision_from_response(response) or {}
+        except Exception as e:
+            logger.error(f"Trigger validator error: {e}")
+            parsed = {}
+
+        trigger_action = str(parsed.get("trigger_action", "WAIT") or "WAIT").upper()
+        if trigger_action not in {"EXECUTE", "WAIT", "REDUCE", "CANCEL", "REPLAN"}:
+            trigger_action = "WAIT"
+
+        decision = self._decision_template()
+        decision["trigger_action"] = trigger_action
+        decision["playbook_context"] = context
+        decision["reasoning"]["final_logic"] = str(parsed.get("reasoning", "") or "").strip()
+        decision["reasoning"]["counter_scenario"] = str(parsed.get("replan_reason", "") or "").strip()
+        decision["entry_price"] = ((snapshot.get("market_data", {}) or {}).get("current_price"))
+        allocation_cap = context.get("max_allocation_pct")
+        raw_allocation = parsed.get("allocation_pct", allocation_cap if allocation_cap is not None else 0)
+        try:
+            allocation_pct = float(raw_allocation or 0)
+        except Exception:
+            allocation_pct = 0.0
+        if allocation_cap is not None:
+            try:
+                allocation_pct = min(allocation_pct, float(allocation_cap))
+            except Exception:
+                pass
+        try:
+            decision["leverage"] = max(1, min(3, int(float(parsed.get("leverage", 1) or 1))))
+        except Exception:
+            decision["leverage"] = 1
+
+        if trigger_action in {"EXECUTE", "REDUCE"} and source_decision in {"LONG", "SHORT"}:
+            decision["decision"] = source_decision
+            decision["allocation_pct"] = allocation_pct
+            if trigger_action == "REDUCE" and allocation_pct <= 0:
+                decision["allocation_pct"] = min(5.0, float(allocation_cap or 5.0))
+        elif trigger_action == "REPLAN":
+            decision["decision"] = "HOLD"
+            decision["replan_reason"] = str(parsed.get("replan_reason", "") or "").strip()
+        elif trigger_action == "CANCEL":
+            decision["decision"] = "HOLD"
+        else:
+            decision["decision"] = "HOLD"
+
+        return decision
+
     def _parse_decision(self, response: str) -> Dict:
         """Parse JSON-like LLM output with layered recovery before fallback."""
         try:
@@ -298,9 +440,19 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
             playbook = {}
         entry = playbook.get("entry_conditions", [])
         invalidation = playbook.get("invalidation_conditions", [])
+        allowed_sides = playbook.get("allowed_sides", [])
+        if not isinstance(allowed_sides, list):
+            allowed_sides = []
+        try:
+            max_allocation_pct = float(playbook.get("max_allocation_pct")) if playbook.get("max_allocation_pct") is not None else None
+        except Exception:
+            max_allocation_pct = None
         return {
             "entry_conditions": entry if isinstance(entry, list) else [],
             "invalidation_conditions": invalidation if isinstance(invalidation, list) else [],
+            "allowed_sides": allowed_sides,
+            "max_allocation_pct": max_allocation_pct,
+            "strategy_version": str(playbook.get("strategy_version") or "daily_playbook_v1"),
         }
 
     def _normalize_decision(self, decision: Dict) -> Dict:

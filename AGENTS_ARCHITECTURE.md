@@ -1,6 +1,6 @@
 # Finance Telegram Bot Architecture (Code-Accurate)
 
-Last updated: 2026-03-06 (Current Milestone: V14.1)
+Last updated: 2026-03-09 (Current Milestone: V14.1)
 Scope: based on current implementation in `scheduler.py`, `executors/`, `agents/`, `collectors/`, `evaluators/`, `processors/`, `config/`, `bot/`.
 
 ## 1. Purpose
@@ -71,7 +71,12 @@ flowchart LR
 
 Scheduled collectors write market and context signals into Supabase:
 
-- price/candles/CVD, funding+OI, microstructure, liquidations, macro, options, fear-greed, Telegram messages, Dune snapshots, narrative data.
+- price/candles/CVD, funding+OI, microstructure, liquidations, macro, options, fear-greed, Telegram messages, Dune snapshots, narrative data, on-chain daily snapshots.
+
+Additional system-generated market telemetry:
+
+- `job_routine_market_status` writes hourly `market_status_events` with technical snapshots, realtime pressure summary, on-chain overlay, and selected news.
+- `job_pressure_signal_evaluation` later backfills forward-return evaluation into those stored `market_status_events`.
 
 ### 3.2 Analysis graph (Orchestrator)
 
@@ -86,6 +91,7 @@ Key behaviors:
 - CRO-style risk override after judge decision,
 - execution-intent registration and later order processing,
 - Telegram report + evaluation logs.
+- daily playbook persistence is handled by `node_generate_playbook(...)` after `run_daily_playbook()` completes; it is not a LangGraph node.
 
 ### 3.3 Execution path
 
@@ -95,9 +101,12 @@ Key behaviors:
 
 ### 3.4 Evaluation loop
 
-- `EvaluatorDaemon` checks open outcomes against latest price and writes post-mortem results.
-- `PerformanceEvaluator` computes delayed prediction accuracy/risk metrics.
-- `FeedbackGenerator` stores corrective lessons in `feedback_logs`.
+- `node_generate_report` upserts `evaluation_predictions` and `evaluation_component_scores` for each AI report.
+- `PerformanceEvaluator` computes fixed-horizon outcomes and upserts `evaluation_outcomes`.
+- `FeedbackGenerator` consumes delayed evaluations and stores corrective lessons in `feedback_logs`.
+- `EvaluationRollupService` aggregates daily system/component metrics into `evaluation_rollups_daily`.
+- `job_pressure_signal_evaluation` converts hourly `market_status_events.realtime_pressure` signals into the same evaluation tables (`mode=realtime_pressure`).
+- `EvaluatorDaemon` remains a separate TP/SL watcher that writes post-mortem memory and JSONL resolution logs.
 
 ## 4. Scheduler Job Map
 
@@ -105,7 +114,9 @@ Defined in `scheduler.py`.
 
 - every 1m: `job_1min_tick` (price, funding, microstructure, volatility)
 - every 1m: `job_1min_execution` (intent processing, paper TP/SL, liquidation checks)
+- every 5m: websocket thread health check / auto-restart
 - every 15m: `job_15min_dune`
+- every 15m: `job_pressure_signal_evaluation`
 - hourly at :00: `job_1hour_deribit`
 - hourly at :05: `job_1hour_telegram` (batch + triangulation worker)
 - hourly at :10: `job_1hour_crypto_news`
@@ -114,13 +125,18 @@ Defined in `scheduler.py`.
 - hourly at :22: `job_hourly_swing_charts` (BTC/ETH swing chart push)
 - hourly at :45: `job_1hour_evaluation`
 - daily 00:00 UTC: `job_daily_precision` (daily playbook generation)
+- daily 00:12 UTC: `job_daily_coinmetrics`
 - daily 00:15 UTC: `job_daily_fear_greed`
 - daily 00:30 UTC: `job_24hour_evaluation`
-- daily 01:00 UTC: `job_daily_cleanup` (DB cleanup + archive + LightRAG cleanup)
-- every 5m: websocket health check
+- daily 00:40 UTC: `job_daily_evaluation_rollup`
+- daily 01:00 UTC: `job_daily_archive_to_gcs`
+- daily 01:20 UTC: `job_daily_safe_cleanup` (archive-verified deletion + LightRAG cleanup)
 - every 8h (paper mode): funding fee simulation
 
-Startup bootstrap also runs immediate initial collectors and Telegram catch-up synthesis.
+Notes:
+
+- `job_daily_precision` explicitly refreshes Coin Metrics and macro context before `orchestrator.run_daily_playbook()`.
+- startup bootstrap also runs immediate initial collectors plus delayed Telegram catch-up synthesis.
 
 ## 5. Agents Layer (Current Wiring)
 
@@ -142,6 +158,7 @@ Startup bootstrap also runs immediate initial collectors and Telegram catch-up s
 
 - `agents/market_monitor_agent.py` (`market_monitor_agent`):
   - hourly deterministic playbook evaluator (`NO_ACTION/WATCH/SOFT_TRIGGER/TRIGGER`),
+  - applies on-chain/policy downgrade logic and optional low-cost `trigger_veto`,
   - also generates routine status summary text.
 
 - `agents/ai_router.py` (`ai_client`):
@@ -166,7 +183,9 @@ They are not registered as independent LangGraph nodes.
 | `meta_regime` | `agents/meta_agent.py` | Regime classification + trust/risk directive | Cerebras: `MODEL_META_REGIME=gpt-oss-120b` | Market compact data, derivatives, macro, RAG context, Telegram news |
 | `risk_eval` | `agents/risk_manager_agent.py` | CRO override on size/leverage/venue + veto | Cerebras: `MODEL_RISK_EVAL=gpt-oss-120b` (fallback route to Groq pool including `MODEL_RISK_EVAL_FALLBACK=openai/gpt-oss-20b`) | Judge draft decision, funding/deribit contexts, deterministic venue hard rules |
 | `monitor_hourly` | `agents/market_monitor_agent.py` (`summarize_current_status`) | Routine market summary text | Cerebras: `MODEL_MONITOR_HOURLY=gpt-oss-120b` | Hourly indicator snapshot (price/funding/OI divergence/MFI proxy) |
+| `trigger_veto` | `agents/market_monitor_agent.py` (`lightweight_veto_check`) | Cheap contextual veto/reduce layer after deterministic `TRIGGER` | Groq: `MODEL_TRIGGER_VETO=llama3.1-8b` | Trigger payload, recent Telegram news, on-chain gate, policy snapshot |
 | `rag_extraction` | `processors/light_rag.py`, `processors/telegram_batcher.py` | Entity/relationship extraction + Telegram batch summarization | Groq: `MODEL_RAG_EXTRACTION=openai/gpt-oss-20b` | LightRAG ingest/query pipeline, Telegram chunk synthesis |
+| `vlm_telegram_chart` | `collectors/telegram_listener.py` | Chart-caption/image understanding for visual Telegram channels | Gemini VLM: `MODEL_VLM_TELEGRAM_CHART=gemini-3-flash-preview` | Telegram image bytes + cleaned caption text |
 | `self_correction` | `evaluators/feedback_generator.py` | Wrong-call feedback and lessons learned | Gemini judge route: `MODEL_SELF_CORRECTION=gemini-3.1-pro-preview` | Evaluation results + original reasoning/execution notes |
 | `macro` | `executors/post_mortem.py` | Post-trade case-study style lesson generation | Cerebras route (mapped to `MODEL_META_REGIME=gpt-oss-120b`) | Trade context + outcome analysis for memory loop |
 | `news_cluster` | `scheduler.py` (job_routine_market_status) | Selecting and merging high-impact news | Groq: `MODEL_NEWS_CLUSTER=qwen/qwen3-32b` | Telegram + External news inputs, JSON-schema grouping |
@@ -176,6 +195,7 @@ They are not registered as independent LangGraph nodes.
 Notes:
 
 - `MarketMonitorAgent.evaluate()` is deterministic rule evaluation against playbook conditions (no LLM call).
+- `MarketMonitorAgent.lightweight_veto_check()` is a separate post-trigger LLM pass and only runs after deterministic `TRIGGER`.
 - Router supports additional roles (`news_summarize`, `cloudflare_triage`, `cloudflare_rerank`, `chat`, etc.), but the table above lists the roles actively used in current runtime paths.
 
 ### 5.4 Model Routing and Failover
@@ -346,14 +366,29 @@ Two outputs exist:
   "invalidated": false,
   "reasoning": "string",
   "live_indicators": {},
+  "scenario_snapshot": {},
+  "trap_state": "none",
+  "revision_state": "stable",
   "playbook_id": 0,
-  "match_ratio": 0.0
+  "match_ratio": 0.0,
+  "policy_checks": {},
+  "onchain_gate": {}
 }
 ```
 
 2. LLM summary (`summarize_current_status`) return type:
 
 - `str` (HTML-formatted short market summary for Telegram/routine status push).
+
+3. Low-cost veto (`lightweight_veto_check`) return schema:
+
+```json
+{
+  "action": "PASS|VETO|REDUCE",
+  "reason": "string",
+  "risk_flags": []
+}
+```
 
 #### F) `rag_extraction` (`processors/light_rag.py`, `processors/telegram_batcher.py`)
 
@@ -440,8 +475,12 @@ Persisted feedback record schema:
   - alternative.me index,
   - writes `fear_greed_data`.
 
+- `collectors/coinmetrics_collector.py` (`coinmetrics_collector`)
+  - Coin Metrics daily timeseries pull + deterministic on-chain scoring,
+  - writes `onchain_daily_snapshots`.
+
 - `collectors/dune_collector.py` (`dune_collector`)
-  - cadence-aware Dune query runner with budget guards,
+  - cadence-aware Dune query runner with stale-result fallback and budget guards,
   - sanitizes and writes `dune_query_results`.
 
 ### 6.3 Narrative and Telegram intelligence
@@ -455,7 +494,7 @@ Persisted feedback record schema:
 
 - `collectors/telegram_listener.py` (`telegram_listener`)
   - real-time Telethon listener + startup backfill,
-  - saves Telegram messages and performs extraction/vision steps.
+  - sanitizes text, saves Telegram messages, runs triage-triggered extraction, and optional chart-image VLM extraction.
 
 - `collectors/telegram_collector.py` (`telegram_collector`)
   - legacy batch-style Telegram collector utilities still present.
@@ -609,6 +648,12 @@ Input: categories list
 Output: `None`
 Side effects: deduped article block ingestion to LightRAG (`channel="CRYPTO_NEWS_API"`).
 
+10. `collectors/coinmetrics_collector.py` -> `coinmetrics_collector.run()`
+Input: none
+Output: `Dict[str, Dict]`
+Internal snapshot keys include: `symbol`, `as_of_date`, `risk_bias`, `bias_score`, `valuation_state`, `flow_state`, `activity_state`, `structure_state`, `data_quality`, `regime_flags`, `raw_metrics`, `gate`.
+DB side effects: `onchain_daily_snapshots` upsert.
+
 ## 7. Processors Layer
 
 - `processors/math_engine.py` (`math_engine`):
@@ -622,6 +667,12 @@ Side effects: deduped article block ingestion to LightRAG (`channel="CRYPTO_NEWS
 
 - `processors/telegram_batcher.py` (`telegram_batcher`):
   category-based summarization and LightRAG ingestion from raw Telegram messages.
+
+- `processors/onchain_signal_engine.py` (`onchain_signal_engine`):
+  deterministic daily on-chain snapshot scoring, agent context formatting, and risk gate generation.
+
+- `processors/flow_confirm_engine.py` (`flow_confirm_engine`):
+  deterministic flow confirmation from funding/CVD/liquidation alignment for policy gating.
 
 - `processors/gcs_parquet.py` (`gcs_parquet_store`):
   long-term archive/read path for OHLCV and related timeseries.
@@ -642,6 +693,9 @@ Side effects: deduped article block ingestion to LightRAG (`channel="CRYPTO_NEWS
 
 - `executors/order_manager.py` (`execution_desk`):
   minute-by-minute intent processing and chunk fills.
+
+- `executors/policy_engine.py` (`policy_engine`):
+  deterministic structure/risk/flow gate applied before final execution and reused by hourly monitor re-checks.
 
 - `executors/paper_exchange.py` (`paper_engine`):
   paper wallets/positions, TP/SL, liquidation, funding fees.
@@ -727,22 +781,34 @@ Output: stored report payload including `report_id` when DB insert succeeds.
 - `notify(report, chart_bytes=None, mode=TradingMode.SWING) -> None`
 Side effects: asynchronous Telegram message/photo delivery.
 
+Related side effects from `node_generate_report(...)`:
+- upsert `evaluation_predictions`
+- upsert `evaluation_component_scores`
+- append JSONL metrics via `metrics_logger`
+
 6. `executors/evaluator_daemon.py`
 - `evaluate_recent_trades() -> None`
 Side effects:
 - checks latest report TP/SL outcome conditions
 - invokes post-mortem pipeline on failures
 - writes resolution metrics via `metrics_logger`
+- ingests post-mortem memory into LightRAG and local JSONL store
 
 ## 9. Evaluators Layer
 
 - `evaluators/performance_evaluator.py` (`performance_evaluator`)
   - delayed report outcome scoring,
+  - backfills/creates `evaluation_predictions` for `ai_reports`,
+  - writes fixed-horizon `evaluation_outcomes`,
   - realized-volatility and drawdown-style metrics.
 
 - `evaluators/feedback_generator.py` (`feedback_generator`)
   - LLM-generated mistake analysis for incorrect calls,
   - persistence to `feedback_logs`.
+
+- `evaluators/evaluation_rollup.py` (`evaluation_rollup_service`)
+  - daily aggregation over `evaluation_predictions`, `evaluation_outcomes`, `evaluation_component_scores`,
+  - writes `evaluation_rollups_daily` for system- and component-level KPI tracking.
 
 ## 10. Data Stores and Key Tables
 
@@ -759,11 +825,18 @@ Supabase/Postgres (core operational tables):
 - `telegram_messages`
 - `narrative_data`
 - `dune_query_results`
+- `onchain_daily_snapshots`
 - `daily_playbooks`
 - `monitor_logs`
+- `market_status_events`
 - `ai_reports`
 - `trade_executions`
 - `feedback_logs`
+- `evaluation_predictions`
+- `evaluation_outcomes`
+- `evaluation_component_scores`
+- `evaluation_rollups_daily`
+- `archive_manifests`
 
 Local SQLite (`data/local_state.db`):
 
@@ -771,6 +844,12 @@ Local SQLite (`data/local_state.db`):
 - `system_config`
 - `paper_positions`
 - `paper_wallets`
+
+Local file stores:
+
+- `data/eval_metrics/predictions.jsonl`
+- `data/eval_metrics/resolutions.jsonl`
+- `data/episodic_memory.jsonl`
 
 Optional external stores:
 
@@ -807,9 +886,15 @@ MCP server tools exposed in `mcp_server/server.py`:
 - `get_current_position(symbol)`
 - `execute_trade(symbol, side, amount, leverage=1)`
 - `get_chart_image(symbol, lane="swing")`
+- `get_chart_images(symbol, lane="swing")`
 - `get_indicator_summary(symbol)`
 - `get_trading_mode()`
 - `get_feedback_history(limit=5)`
+
+Notes:
+
+- `search_narrative(symbol)` is currently exposed but intentionally blocked in the public MCP surface.
+- `execute_trade(...)` is also safety-gated and only works when direct MCP trading is explicitly enabled in settings.
 
 Key internal tooling blocks:
 

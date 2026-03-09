@@ -31,6 +31,52 @@ import base64
 from datetime import datetime, timezone
 
 
+def _refresh_snapshots_for_modes(
+    modes: list[TradingMode],
+    *,
+    allow_perplexity: bool,
+    label: str,
+) -> None:
+    from config.local_state import state_manager
+
+    if not state_manager.is_analysis_enabled():
+        logger.info(f"{label} skipped (analysis disabled)")
+        return
+
+    for symbol in settings.trading_symbols:
+        for mode in modes:
+            try:
+                logger.info(
+                    f"{label}: refreshing snapshot for {symbol}/{mode.value} "
+                    f"(perplexity={'on' if allow_perplexity else 'off'})"
+                )
+                orchestrator.refresh_snapshot_with_mode(
+                    symbol,
+                    mode,
+                    allow_perplexity=allow_perplexity,
+                )
+            except Exception as e:
+                logger.error(f"{label} error for {symbol}/{mode.value}: {e}")
+
+
+def job_snapshot_refresh_fast():
+    """Warm hot-path snapshots for both lanes without slow web narrative calls."""
+    _refresh_snapshots_for_modes(
+        [TradingMode.SWING, TradingMode.POSITION],
+        allow_perplexity=False,
+        label="Snapshot fast refresh",
+    )
+
+
+def job_snapshot_refresh_narrative():
+    """Refresh slower narrative/RAG-rich snapshots on a looser cadence."""
+    _refresh_snapshots_for_modes(
+        [TradingMode.POSITION],
+        allow_perplexity=True,
+        label="Snapshot narrative refresh",
+    )
+
+
 def _project_trendline_price(line_info: dict, candle_len: int) -> float | None:
     """Project diagonal trendline value at the latest candle index."""
     if not isinstance(line_info, dict):
@@ -1179,6 +1225,22 @@ def main():
         max_instances=1,
     )
 
+    # Async-DAG snapshot prewarm for fast report hot path
+    scheduler_config.scheduler.add_job(
+        job_snapshot_refresh_fast,
+        CronTrigger(minute='*/5'),
+        id='job_snapshot_refresh_fast',
+        max_instances=1,
+    )
+
+    # Slower narrative refresh keeps cached Perplexity/RAG context warm
+    scheduler_config.scheduler.add_job(
+        job_snapshot_refresh_narrative,
+        CronTrigger(minute='2,32'),
+        id='job_snapshot_refresh_narrative',
+        max_instances=1,
+    )
+
     # ✨✨ Hourly Monitor [NO_ACTION / WATCH / TRIGGER] against Daily Playbook ✨✨
     scheduler_config.scheduler.add_job(
         job_hourly_monitor,
@@ -1247,8 +1309,8 @@ def main():
     scheduler_config.scheduler.start()
     logger.info("Scheduler started.")
     logger.info(
-        "Cadence(UTC): daily_precision=00:00 | telegram_batch=hh:05 | crypto_news=hh:10 | "
-        "hourly_monitor=hh:15 | market_status=hh:20 | daily_rollup=00:40 | "
+        "Cadence(UTC): daily_precision=00:00 | snapshot_fast=hh:*/5 | snapshot_narrative=hh:02,32 | "
+        "telegram_batch=hh:05 | crypto_news=hh:10 | hourly_monitor=hh:15 | market_status=hh:20 | daily_rollup=00:40 | "
         "hourly_eval=hh:45 | gcs_archive=01:00 | safe_cleanup=01:20"
     )
 
@@ -1272,6 +1334,7 @@ def main():
         ("Deribit", lambda: deribit_collector.run()),
         ("Fear & Greed", lambda: fear_greed_collector.run()),
         ("Coin Metrics", lambda: job_daily_coinmetrics()),
+        ("Snapshot prewarm", lambda: job_snapshot_refresh_fast()),
         ("Pressure signal evaluation", lambda: job_pressure_signal_evaluation()),
         ("Telegram catch-up (24h)", _startup_telegram_catchup),
     ]

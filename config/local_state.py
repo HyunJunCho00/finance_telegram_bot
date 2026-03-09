@@ -35,7 +35,12 @@ def init_db():
             tp_price          REAL DEFAULT 0,
             sl_price          REAL DEFAULT 0,
             tp2_price         REAL DEFAULT 0,
-            tp1_exit_pct      REAL DEFAULT 50
+            tp1_exit_pct      REAL DEFAULT 50,
+            playbook_id       TEXT DEFAULT '',
+            source_decision   TEXT DEFAULT '',
+            strategy_version  TEXT DEFAULT '',
+            trigger_reason    TEXT DEFAULT '',
+            thesis_id         TEXT DEFAULT ''
         )
     ''')
 
@@ -46,6 +51,11 @@ def init_db():
         ("sl_price", "REAL DEFAULT 0"),
         ("tp2_price", "REAL DEFAULT 0"),
         ("tp1_exit_pct", "REAL DEFAULT 50"),
+        ("playbook_id", "TEXT DEFAULT ''"),
+        ("source_decision", "TEXT DEFAULT ''"),
+        ("strategy_version", "TEXT DEFAULT ''"),
+        ("trigger_reason", "TEXT DEFAULT ''"),
+        ("thesis_id", "TEXT DEFAULT ''"),
     ]:
         try:
             conn.execute(f"ALTER TABLE active_orders ADD COLUMN {col} {col_def}")
@@ -271,6 +281,11 @@ class LocalStateManager:
         sl_price: float = 0.0,
         tp2_price: float = 0.0,
         tp1_exit_pct: float = 50.0,
+        playbook_id: str = "",
+        source_decision: str = "",
+        strategy_version: str = "",
+        trigger_reason: str = "",
+        thesis_id: str = "",
     ) -> str:
         """Register a new execution intent.
 
@@ -308,19 +323,26 @@ class LocalStateManager:
                 INSERT INTO active_orders
                 (intent_id, symbol, direction, execution_style,
                  total_target_amount, remaining_amount, exchange,
-                 created_at, expires_at, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 created_at, expires_at, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct,
+                 playbook_id, source_decision, strategy_version, trigger_reason, thesis_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 intent_id, symbol, direction, style,
                 amount, amount, exchange,
                 now.isoformat(), expires.isoformat(),
                 leverage, tp_price, sl_price, tp2_price, tp1_exit_pct,
+                str(playbook_id or ""),
+                str(source_decision or ""),
+                str(strategy_version or ""),
+                str(trigger_reason or ""),
+                str(thesis_id or ""),
             ))
             self.conn.commit()
 
         logger.info(
             f"Intent registered: {intent_id[:8]} | {direction} {symbol} "
-            f"${amount:.2f} lev={leverage}x tp1={tp_price} tp2={tp2_price} sl={sl_price} [{exchange}]"
+            f"${amount:.2f} lev={leverage}x tp1={tp_price} tp2={tp2_price} sl={sl_price} "
+            f"playbook={playbook_id or '-'} [{exchange}]"
         )
         return intent_id
 

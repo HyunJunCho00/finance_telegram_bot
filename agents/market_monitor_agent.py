@@ -20,6 +20,7 @@ from agents.ai_router import ai_client
 from config.database import db
 from config.settings import settings, TradingMode
 from executors.policy_engine import policy_engine
+from executors.playbook_guard import build_playbook_context
 from loguru import logger
 from processors.math_engine import math_engine
 from processors.onchain_signal_engine import onchain_signal_engine
@@ -280,6 +281,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         live = self._get_live_indicators(symbol)
         scenario_snapshot = self._get_live_scenario_snapshot(symbol, mode)
         pb_data = playbook.get("playbook", {})
+        playbook_context = build_playbook_context(playbook)
         
         # ── Deterministic Evaluation Logic ──
         matched = []
@@ -374,7 +376,8 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             "trap_state": scenario_snapshot.get("trap_state", "none"),
             "revision_state": scenario_snapshot.get("revision_state", "stable"),
             "playbook_id": playbook.get("id"),
-            "match_ratio": round(match_ratio, 2)
+            "match_ratio": round(match_ratio, 2),
+            "playbook_context": playbook_context,
         }
 
         playbook_direction = str(playbook.get("source_decision", "HOLD") or "HOLD").upper()
@@ -458,6 +461,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                             raw_funding=raw_funding,
                             cvd_df=cvd_df,
                             liq_df=liq_df,
+                            playbook_context=playbook_context,
                         )
                         result["policy_checks"] = policy_decision.get("policy_checks", {})
                         if policy_decision.get("decision") != direction:

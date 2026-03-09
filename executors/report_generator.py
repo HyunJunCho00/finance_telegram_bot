@@ -237,6 +237,30 @@ class ReportGenerator:
             logger.error(f"Report generation error: {e}")
             return {}
 
+    def generate_report_from_snapshot(self, bundle: Dict, final_decision: Dict) -> Dict:
+        bundle = bundle or {}
+        agents = bundle.get("agents", {}) or {}
+        symbol = str(bundle.get("symbol", "BTCUSDT") or "BTCUSDT")
+        mode = TradingMode(str(bundle.get("mode", TradingMode.SWING.value)).lower())
+
+        market_payload = ((agents.get("market_snapshot_agent") or {}).get("payload") or {})
+        narrative_payload = ((agents.get("narrative_agent") or {}).get("payload") or {})
+        funding_payload = ((agents.get("funding_liq_agent") or {}).get("payload") or {})
+        onchain_payload = ((agents.get("onchain_agent") or {}).get("payload") or {})
+
+        return self.generate_report(
+            symbol=symbol,
+            market_data=market_payload.get("market_data", market_payload),
+            bull_opinion=str(narrative_payload.get("narrative_text", "") or ""),
+            bear_opinion=str(funding_payload.get("liquidation_context", "") or ""),
+            risk_assessment="",
+            final_decision=final_decision or {},
+            funding_data=funding_payload.get("raw_funding", {}) or {},
+            mode=mode,
+            onchain_context=str(onchain_payload.get("onchain_context", "") or ""),
+            onchain_snapshot=onchain_payload.get("onchain_snapshot", {}) or {},
+        )
+
     def format_summary_message(self, report: Dict, mode: TradingMode = TradingMode.SWING) -> str:
         decision = self._load_json_field(report.get("final_decision"), {})
 

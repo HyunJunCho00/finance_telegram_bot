@@ -1,5 +1,5 @@
 ﻿import ccxt
-from typing import Dict
+from typing import Dict, Optional
 from datetime import datetime, timezone
 from config.settings import settings
 from config.database import db
@@ -35,11 +35,31 @@ class TradeExecutor:
             'secret': settings.COINBASE_API_SECRET,
             'enableRateLimit': True
         })
-    def execute_from_decision(self, final_decision: dict, mode: str, symbol: str) -> dict:
+
+    @staticmethod
+    def _build_lineage(final_decision: dict, playbook_context: Optional[dict] = None) -> dict:
+        context = dict(playbook_context or final_decision.get("playbook_context", {}) or {})
+        return {
+            "playbook_id": str(context.get("playbook_id") or ""),
+            "source_decision": str(context.get("source_decision") or final_decision.get("decision", "")),
+            "strategy_version": str(context.get("strategy_version") or ""),
+            "trigger_reason": str(context.get("trigger_reason") or ""),
+            "thesis_id": str(context.get("thesis_id") or ""),
+        }
+
+    def execute_from_decision(
+        self,
+        final_decision: dict,
+        mode: str,
+        symbol: str,
+        *,
+        playbook_context: Optional[dict] = None,
+    ) -> dict:
         """Calculate order sizes and register execution intents safely."""
         try:
             direction = final_decision.get("decision", "HOLD")
             mode_upper = (mode or "SWING").upper()
+            lineage = self._build_lineage(final_decision, playbook_context)
 
             if direction == "CANCEL_AND_CLOSE":
                 active = state_manager.get_active_orders()
@@ -53,6 +73,7 @@ class TradeExecutor:
                     "receipts": [{"note": f"CANCEL_AND_CLOSE executed. {cancelled_count} pending intents cancelled."}],
                     "strategy_applied": "CASINO_EXIT",
                     "total_notional": 0,
+                    **lineage,
                 }
 
             if direction not in ["LONG", "SHORT"]:
@@ -116,6 +137,7 @@ class TradeExecutor:
                     sl_price=sl_price,
                     tp2_price=tp2_price,
                     tp1_exit_pct=tp1_exit_pct,
+                    **lineage,
                 )
                 intent_u = state_manager.add_intent(
                     symbol=symbol,
@@ -128,6 +150,7 @@ class TradeExecutor:
                     sl_price=sl_price,
                     tp2_price=tp2_price,
                     tp1_exit_pct=tp1_exit_pct,
+                    **lineage,
                 )
                 if not intent_b or not intent_u:
                     return {"success": False, "note": f"Duplicate intent blocked for {symbol} (split route)"}
@@ -142,6 +165,7 @@ class TradeExecutor:
                         "note": f"SPLIT Intent: {exec_style}",
                         "tp1_price": tp_price,
                         "tp2_price": tp2_price,
+                        **lineage,
                     },
                     {
                         "order_id": intent_u,
@@ -152,6 +176,7 @@ class TradeExecutor:
                         "note": f"SPLIT Intent: {exec_style} (lev=1x)",
                         "tp1_price": tp_price,
                         "tp2_price": tp2_price,
+                        **lineage,
                     },
                 ]
                 total_not_usd = binance_notional
@@ -181,6 +206,7 @@ class TradeExecutor:
                     sl_price=sl_price,
                     tp2_price=tp2_price,
                     tp1_exit_pct=tp1_exit_pct,
+                    **lineage,
                 )
                 if not intent_id:
                     return {"success": False, "note": f"Duplicate intent blocked for {symbol} [{target_exchange}]"}
@@ -195,6 +221,7 @@ class TradeExecutor:
                         "note": f"Registered Intent: {exec_style}",
                         "tp1_price": tp_price,
                         "tp2_price": tp2_price,
+                        **lineage,
                     }
                 ]
                 total_not_usd = target_notional
@@ -204,6 +231,7 @@ class TradeExecutor:
                 "receipts": receipts,
                 "strategy_applied": exec_style,
                 "total_notional": total_not_usd,
+                **lineage,
             }
         except Exception as e:
             logger.error(f"Execution formatting error: {e}")
@@ -244,6 +272,7 @@ class TradeExecutor:
         sl_price: float = 0.0,
         tp2_price: float = 0.0,
         tp1_exit_pct: float = 50.0,
+        lineage: Optional[dict] = None,
     ) -> Dict:
         try:
             side = side.upper()
@@ -266,6 +295,15 @@ class TradeExecutor:
                     result = self._execute_coinbase(symbol, side, amount)
                 else:
                     return {"error": "Invalid exchange"}
+
+            if lineage:
+                result.update({
+                    "playbook_id": str(lineage.get("playbook_id") or ""),
+                    "source_decision": str(lineage.get("source_decision") or ""),
+                    "strategy_version": str(lineage.get("strategy_version") or ""),
+                    "trigger_reason": str(lineage.get("trigger_reason") or ""),
+                    "thesis_id": str(lineage.get("thesis_id") or ""),
+                })
 
             self._save_execution_record(result)
             return result

@@ -42,6 +42,9 @@ from config.local_state import state_manager
 from executors.report_generator import report_generator
 from executors.trade_executor import trade_executor
 from executors.policy_engine import policy_engine
+from executors.agent_snapshot_refresher import ensure_registered, refresh_snapshot_bundle
+from executors.performance_telemetry import performance_telemetry
+from executors.report_hot_path import run_report_hot_path, run_snapshot_analysis_hot_path
 from executors.post_mortem import write_post_mortem
 from executors.data_synthesizer import synthesize_training_data
 from utils.cooldown import is_on_cooldown, set_cooldown
@@ -49,6 +52,7 @@ from loguru import logger
 import numpy as np
 import pandas as pd
 import json
+import time
 from datetime import datetime, timezone
 
 # [FIX CRASH-2] Module-level cache to avoid 4x duplicate DB queries per cycle
@@ -214,6 +218,8 @@ class AnalysisState(TypedDict):
     execute_trades: bool
     allow_perplexity: bool
     notification_context: str
+    playbook_context: dict
+    emergency_context: dict
 
     # Data collection results
     df_size: int
@@ -1256,6 +1262,7 @@ def node_risk_manager(state: AnalysisState) -> dict:
         raw_funding=state.get("raw_funding", {}),
         cvd_df=cvd_df,
         liq_df=liq_df,
+        playbook_context=state.get("playbook_context", {}),
     )
     return {
         "final_decision": final_decision,
@@ -1319,6 +1326,10 @@ def node_execute_trade(state: AnalysisState) -> dict:
     decision = state.get("final_decision", {})
     symbol = state["symbol"]
     mode = TradingMode(state["mode"]).value.upper()
+    if state.get("playbook_context"):
+        decision["playbook_context"] = state.get("playbook_context", {})
+    if state.get("emergency_context"):
+        decision["emergency_context"] = state.get("emergency_context", {})
 
     # Optional guard: skip execution when explicitly disabled by caller.
     if not state.get("execute_trades", True):
@@ -1330,7 +1341,12 @@ def node_execute_trade(state: AnalysisState) -> dict:
     
     # Bridge to execution
     # This will simulate DCA or single entries based on the mode and CRO sizing
-    execution_result = trade_executor.execute_from_decision(decision, mode, symbol)
+    execution_result = trade_executor.execute_from_decision(
+        decision,
+        mode,
+        symbol,
+        playbook_context=state.get("playbook_context", {}),
+    )
     
     # Attach execution receipt back to the decision for reporting
     decision["execution_receipt"] = execution_result
@@ -1605,14 +1621,37 @@ def node_generate_playbook(state) -> dict:
     if not isinstance(dual_plan, dict):
         dual_plan = {}
 
-    def _normalize_playbook(playbook: dict) -> dict:
+    def _normalize_playbook(playbook: dict, source_decision: str, allocation_pct: object) -> dict:
         if not isinstance(playbook, dict):
             playbook = {}
         entry = playbook.get("entry_conditions", [])
         invalid = playbook.get("invalidation_conditions", [])
+        allowed_sides = playbook.get("allowed_sides", [])
+        if not isinstance(allowed_sides, list):
+            allowed_sides = []
+        source_side = str(source_decision or "").upper()
+        if not allowed_sides and source_side in ("LONG", "SHORT"):
+            allowed_sides = [source_side]
+        fallback_allocation = None
+        try:
+            parsed_allocation = float(allocation_pct)
+            if source_side in ("LONG", "SHORT") and parsed_allocation > 0:
+                fallback_allocation = parsed_allocation
+        except Exception:
+            fallback_allocation = None
+        try:
+            if playbook.get("max_allocation_pct") is not None:
+                max_allocation_pct = float(playbook.get("max_allocation_pct"))
+            else:
+                max_allocation_pct = fallback_allocation
+        except Exception:
+            max_allocation_pct = None
         return {
             "entry_conditions": entry if isinstance(entry, list) else [],
             "invalidation_conditions": invalid if isinstance(invalid, list) else [],
+            "allowed_sides": allowed_sides,
+            "max_allocation_pct": max_allocation_pct,
+            "strategy_version": str(playbook.get("strategy_version") or "daily_playbook_v1"),
         }
 
     def _has_meaningful_conditions(playbook: dict) -> bool:
@@ -1630,7 +1669,11 @@ def node_generate_playbook(state) -> dict:
             if isinstance(raw_plan, dict):
                 if "monitoring_playbook" in raw_plan and isinstance(raw_plan["monitoring_playbook"], dict):
                     raw_plan = raw_plan["monitoring_playbook"]
-                normalized = _normalize_playbook(raw_plan)
+                normalized = _normalize_playbook(
+                    raw_plan,
+                    str(final_decision.get("decision", "HOLD")),
+                    final_decision.get("allocation_pct"),
+                )
                 if not _has_meaningful_conditions(normalized):
                     logger.warning(
                         f"node_generate_playbook: skip empty playbook for {symbol}/{lane_mode} "
@@ -1652,7 +1695,11 @@ def node_generate_playbook(state) -> dict:
         if not isinstance(fallback, dict) or not fallback:
             logger.warning(f"node_generate_playbook: no dual plan or monitoring_playbook for {symbol}; skip save")
             return {}
-        normalized = _normalize_playbook(fallback)
+        normalized = _normalize_playbook(
+            fallback,
+            str(final_decision.get("decision", "HOLD")),
+            final_decision.get("allocation_pct"),
+        )
         if not _has_meaningful_conditions(normalized):
             logger.warning(
                 f"node_generate_playbook: skip empty fallback playbook for {symbol}/{mode_hint} "
@@ -1739,6 +1786,7 @@ class Orchestrator:
         self.symbols = settings.trading_symbols
         self._graph = None
         self._analysis_locks: Dict[str, threading.Lock] = {}
+        ensure_registered()
 
     @property
     def mode(self) -> TradingMode:
@@ -1781,6 +1829,8 @@ class Orchestrator:
         execute_trades: bool = True,
         allow_perplexity: bool = False,
         notification_context: str = "manual",
+        playbook_context: Optional[Dict] = None,
+        emergency_context: Optional[Dict] = None,
     ) -> Dict:
         lock_key = f"{symbol}:{mode.value}"
         lock = self._analysis_locks.setdefault(lock_key, threading.Lock())
@@ -1790,29 +1840,157 @@ class Orchestrator:
 
         logger.info(f"Starting {'EMERGENCY' if is_emergency else 'SCHEDULED'} {mode.value.upper()} analysis for {symbol}")
 
+        started = time.perf_counter()
+        execution_path = "langgraph" if self.graph else "sequential"
         try:
             # [FIX CRASH-2] Clear per-symbol+mode cache at the start of each analysis
             _clear_symbol_mode_caches(symbol, mode)
 
             if self.graph:
-                return self._run_with_langgraph(
+                result = self._run_with_langgraph(
                     symbol,
                     mode,
                     is_emergency,
                     execute_trades=execute_trades,
                     allow_perplexity=allow_perplexity,
                     notification_context=notification_context,
+                    playbook_context=playbook_context,
+                    emergency_context=emergency_context,
                 )
-            return self._run_sequential(
-                symbol,
-                mode,
-                is_emergency,
-                execute_trades=execute_trades,
-                allow_perplexity=allow_perplexity,
+            else:
+                result = self._run_sequential(
+                    symbol,
+                    mode,
+                    is_emergency,
+                    execute_trades=execute_trades,
+                    allow_perplexity=allow_perplexity,
+                    notification_context=notification_context,
+                    playbook_context=playbook_context,
+                    emergency_context=emergency_context,
+                )
+            performance_telemetry.log_full_path_run(
+                symbol=symbol,
+                mode=mode.value,
                 notification_context=notification_context,
+                execution_path=execution_path,
+                allow_perplexity=allow_perplexity,
+                execute_trades=execute_trades,
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                final_decision=result if isinstance(result, dict) else {},
             )
+            return result
         finally:
             lock.release()
+
+    def refresh_snapshot_with_mode(
+        self,
+        symbol: str,
+        mode: TradingMode,
+        *,
+        allow_perplexity: bool = False,
+    ) -> None:
+        refresh_snapshot_bundle(symbol, mode, allow_perplexity=allow_perplexity)
+
+    def run_report_hot_path_with_mode(
+        self,
+        symbol: str,
+        mode: TradingMode,
+        *,
+        allow_perplexity: bool = False,
+        wait_budget_s: float = 5.0,
+    ) -> Dict:
+        self.refresh_snapshot_with_mode(symbol, mode, allow_perplexity=allow_perplexity)
+        return run_report_hot_path(
+            symbol,
+            mode,
+            wait_budget_s=wait_budget_s,
+            notification_context="analysis",
+        )
+
+    def run_snapshot_analysis_with_mode(
+        self,
+        symbol: str,
+        mode: TradingMode,
+        *,
+        allow_perplexity: bool = False,
+        wait_budget_s: float = 5.0,
+        notification_context: str = "analysis",
+        playbook_context: Optional[Dict] = None,
+    ) -> Dict:
+        self.refresh_snapshot_with_mode(symbol, mode, allow_perplexity=allow_perplexity)
+        return run_snapshot_analysis_hot_path(
+            symbol,
+            mode,
+            wait_budget_s=wait_budget_s,
+            notification_context=notification_context,
+            playbook_context=playbook_context,
+        )
+
+    def run_snapshot_trigger_with_mode(
+        self,
+        symbol: str,
+        mode: TradingMode,
+        *,
+        allow_perplexity: bool = False,
+        wait_budget_s: float = 5.0,
+        notification_context: str = "scheduled_trigger",
+        playbook_context: Optional[Dict] = None,
+    ) -> Dict:
+        self.refresh_snapshot_with_mode(symbol, mode, allow_perplexity=allow_perplexity)
+        result = run_snapshot_analysis_hot_path(
+            symbol,
+            mode,
+            wait_budget_s=wait_budget_s,
+            notification_context=notification_context,
+            execute_trades=True,
+            playbook_context=playbook_context,
+        )
+        final_decision = result.get("final_decision", {}) if isinstance(result, dict) else {}
+        if str(final_decision.get("trigger_action", "")).upper() == "REPLAN":
+            return self.run_emergency_replan_with_mode(
+                symbol,
+                mode,
+                playbook_context=playbook_context,
+                reason=str(final_decision.get("replan_reason", "") or final_decision.get("reasoning", {}).get("final_logic", "")),
+                allow_perplexity=allow_perplexity,
+            )
+        return result
+
+    def run_emergency_replan_with_mode(
+        self,
+        symbol: str,
+        mode: TradingMode,
+        *,
+        playbook_context: Optional[Dict] = None,
+        reason: str = "",
+        allow_perplexity: bool = False,
+    ) -> Dict:
+        from agents.emergency_replan_agent import emergency_replan_agent
+
+        emergency_context = emergency_replan_agent.assess(
+            playbook_context=playbook_context,
+            trigger_validation={"trigger_action": "REPLAN", "replan_reason": reason},
+        )
+        if emergency_context.get("action") == "CANCEL_AND_CLOSE":
+            return {
+                "final_decision": {
+                    "decision": "CANCEL_AND_CLOSE",
+                    "allocation_pct": 0,
+                    "leverage": 1,
+                    "reasoning": {"final_logic": emergency_context.get("reason", "")},
+                    "playbook_context": playbook_context or {},
+                }
+            }
+        return self.run_analysis_with_mode(
+            symbol,
+            mode,
+            is_emergency=True,
+            execute_trades=False,
+            allow_perplexity=allow_perplexity,
+            notification_context="emergency_replan",
+            playbook_context=playbook_context,
+            emergency_context=emergency_context,
+        )
 
     def _run_with_langgraph(
         self,
@@ -1822,6 +2000,8 @@ class Orchestrator:
         execute_trades: bool = True,
         allow_perplexity: bool = False,
         notification_context: str = "manual",
+        playbook_context: Optional[Dict] = None,
+        emergency_context: Optional[Dict] = None,
     ) -> Dict:
         """Run analysis using LangGraph StateGraph."""
         initial_state: AnalysisState = {
@@ -1831,6 +2011,8 @@ class Orchestrator:
             "execute_trades": execute_trades,
             "allow_perplexity": allow_perplexity,
             "notification_context": notification_context,
+            "playbook_context": playbook_context or {},
+            "emergency_context": emergency_context or {},
             "df_size": 0,
             "market_data_compact": "",
             "narrative_text": "",
@@ -1887,6 +2069,8 @@ class Orchestrator:
         execute_trades: bool = True,
         allow_perplexity: bool = False,
         notification_context: str = "manual",
+        playbook_context: Optional[Dict] = None,
+        emergency_context: Optional[Dict] = None,
     ) -> Dict:
         """Fallback: sequential execution (no LangGraph)."""
         state = {
@@ -1895,6 +2079,8 @@ class Orchestrator:
             "execute_trades": execute_trades,
             "allow_perplexity": allow_perplexity,
             "notification_context": notification_context,
+            "playbook_context": playbook_context or {},
+            "emergency_context": emergency_context or {},
             "errors": [],
             "onchain_snapshot": {}, "onchain_context": "", "onchain_gate": {},
             "vlm_context_text": "", "policy_snapshot": {},
@@ -2012,15 +2198,35 @@ class Orchestrator:
             ("ETHUSDT", TradingMode.POSITION),
         ]
         logger.info("=== Daily Precision Run (00:00 UTC) ===")
+        use_snapshot_hot_path = bool(getattr(settings, "ENABLE_SNAPSHOT_HOT_PATH_DAILY", True))
         for i, (symbol, mode) in enumerate(schedule):
-            if i > 0:
+            if i > 0 and not use_snapshot_hot_path:
                 logger.info(f"Sleeping 3m before {symbol}/{mode.value} ...")
                 _time.sleep(3 * 60)
             try:
                 logger.info(f"[Daily] {symbol} {mode.value.upper()} starting...")
                 _clear_symbol_mode_caches(symbol, mode)
 
-                if self.graph:
+                if use_snapshot_hot_path:
+                    hot_result = self.run_snapshot_analysis_with_mode(
+                        symbol,
+                        mode,
+                        allow_perplexity=True,
+                        wait_budget_s=5.0,
+                        notification_context="scheduled_daily",
+                    )
+                    final_decision = hot_result.get("final_decision", {}) if isinstance(hot_result, dict) else {}
+                    state = {
+                        "symbol": symbol,
+                        "mode": mode.value,
+                        "final_decision": final_decision,
+                        "daily_dual_plan": (
+                            final_decision.get("daily_dual_plan", {})
+                            if isinstance(final_decision, dict)
+                            else {}
+                        ),
+                    }
+                elif self.graph:
                     state = self._run_with_langgraph(
                         symbol,
                         mode,
@@ -2040,11 +2246,19 @@ class Orchestrator:
                     )
 
                 # Generate & persist playbook (uses last completed state via global caches)
+                playbook_decision = state if isinstance(state, dict) else {}
+                if isinstance(state, dict) and isinstance(state.get("final_decision"), dict):
+                    playbook_decision = state.get("final_decision", {}) or {}
+                playbook_dual_plan = {}
+                if isinstance(state, dict):
+                    playbook_dual_plan = state.get("daily_dual_plan", {}) or {}
+                if not playbook_dual_plan and isinstance(playbook_decision, dict):
+                    playbook_dual_plan = playbook_decision.get("daily_dual_plan", {}) or {}
                 node_generate_playbook({
                     "symbol": symbol,
                     "mode": mode.value,
-                    "final_decision": state if isinstance(state, dict) else {},
-                    "daily_dual_plan": (state.get("daily_dual_plan", {}) if isinstance(state, dict) else {}),
+                    "final_decision": playbook_decision,
+                    "daily_dual_plan": playbook_dual_plan,
                 })
                 logger.info(f"[Daily] {symbol} {mode.value.upper()} done.")
             except Exception as e:
@@ -2149,14 +2363,25 @@ class Orchestrator:
                                 ).strip()
 
                             logger.info(f"[Monitor] TRIGGER! Running analysis for {symbol}/{mode.value}")
-                            self.run_analysis_with_mode(
-                                symbol,
-                                mode,
-                                is_emergency=False,
-                                execute_trades=True,
-                                allow_perplexity=False,
-                                notification_context="scheduled_trigger",
-                            )
+                            if bool(getattr(settings, "ENABLE_SNAPSHOT_HOT_PATH_TRIGGER", False)):
+                                self.run_snapshot_trigger_with_mode(
+                                    symbol,
+                                    mode,
+                                    allow_perplexity=False,
+                                    wait_budget_s=5.0,
+                                    notification_context="scheduled_trigger",
+                                    playbook_context=result.get("playbook_context", {}),
+                                )
+                            else:
+                                self.run_analysis_with_mode(
+                                    symbol,
+                                    mode,
+                                    is_emergency=False,
+                                    execute_trades=True,
+                                    allow_perplexity=False,
+                                    notification_context="scheduled_trigger",
+                                    playbook_context=result.get("playbook_context", {}),
+                                )
                             state_manager.set_system_config(_entry_count_key + symbol, str(entries_today + 1))
                         else:
                             # SOFT_TRIGGER: Just notify via Telegram (handled below in the loop)

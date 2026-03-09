@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Optional
 
 from config.settings import TradingMode, settings
+from executors.playbook_guard import evaluate_playbook_consistency
 from processors.flow_confirm_engine import flow_confirm_engine
 
 
@@ -209,6 +210,7 @@ class PolicyEngine:
         raw_funding: Optional[dict] = None,
         cvd_df=None,
         liq_df=None,
+        playbook_context: Optional[Dict] = None,
     ) -> Dict:
         final = dict(decision or {})
         direction = str(final.get("decision", "HOLD")).upper()
@@ -223,6 +225,10 @@ class PolicyEngine:
             "matched_sources": [],
             "flow_confirmed": False,
             "flow_signals": [],
+            "playbook_guard": {
+                "status": "SKIPPED",
+                "reasons": [],
+            },
         }
         final["policy_checks"] = policy
         final["tp1_exit_pct"] = float(getattr(settings, "POLICY_TP1_EXIT_PCT", 50.0))
@@ -241,6 +247,21 @@ class PolicyEngine:
             policy["status"] = "VETO"
             policy["reasons"].append("Missing valid entry price.")
             reasoning["final_logic"] = "[POLICY VETO] Missing valid entry price. " + reasoning.get("final_logic", "")
+            final["reasoning"] = reasoning
+            return final
+
+        playbook_guard = evaluate_playbook_consistency(final, playbook_context)
+        policy["playbook_guard"] = playbook_guard
+        if playbook_guard.get("status") == "VETO":
+            final["decision"] = "HOLD"
+            final["allocation_pct"] = 0
+            final["leverage"] = 1
+            policy["status"] = "VETO"
+            policy["reasons"].extend(playbook_guard.get("reasons", []))
+            reasoning["final_logic"] = (
+                f"[PLAYBOOK VETO] {' '.join(playbook_guard.get('reasons', []))} "
+                + reasoning.get("final_logic", "")
+            )
             final["reasoning"] = reasoning
             return final
 

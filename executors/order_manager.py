@@ -30,6 +30,13 @@ class ExecutionDesk:
             sl_price    = order.get("sl_price", 0.0)
             tp2_price   = order.get("tp2_price", 0.0)
             tp1_exit_pct = order.get("tp1_exit_pct", 50.0)
+            lineage = {
+                "playbook_id": order.get("playbook_id", ""),
+                "source_decision": order.get("source_decision", ""),
+                "strategy_version": order.get("strategy_version", ""),
+                "trigger_reason": order.get("trigger_reason", ""),
+                "thesis_id": order.get("thesis_id", ""),
+            }
 
             if status == "PENDING":
                 state_manager.update_status(intent_id, "ACTIVE")
@@ -47,7 +54,7 @@ class ExecutionDesk:
                 if style == "MOMENTUM_SNIPER":
                     self._execute_chunk(
                         intent_id, symbol, direction, remaining,
-                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct
+                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct, lineage
                     )
 
                 elif style == "SMART_DCA":
@@ -55,19 +62,19 @@ class ExecutionDesk:
                     actual_chunk = min(chunk_size, remaining)
                     self._execute_chunk(
                         intent_id, symbol, direction, actual_chunk,
-                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct
+                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct, lineage
                     )
 
                 elif style == "PASSIVE_MAKER":
                     self._execute_chunk(
                         intent_id, symbol, direction, remaining,
-                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct
+                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct, lineage
                     )
 
                 elif style == "CASINO_EXIT":
                     self._execute_chunk(
                         intent_id, symbol, direction, remaining,
-                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct
+                        exchange, style, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct, lineage
                     )
 
             except Exception as e:
@@ -88,6 +95,7 @@ class ExecutionDesk:
         sl_price: float = 0.0,
         tp2_price: float = 0.0,
         tp1_exit_pct: float = 50.0,
+        lineage: dict | None = None,
     ):
         if amount <= 0:
             return
@@ -104,6 +112,7 @@ class ExecutionDesk:
             sl_price=sl_price,
             tp2_price=tp2_price,
             tp1_exit_pct=tp1_exit_pct,
+            lineage=lineage or {},
         )
 
         if res.get("success"):

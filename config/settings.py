@@ -172,6 +172,8 @@ class Settings(BaseSettings):
     # 7. monitor_hourly OpenRouter (free)
     MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
     MONITOR_SOFT_TRIGGER_THRESHOLD: float = 0.7
+    ENABLE_SNAPSHOT_HOT_PATH_DAILY: bool = True
+    ENABLE_SNAPSHOT_HOT_PATH_TRIGGER: bool = True
     # Judge post-processing gates (deterministic, no extra LLM call)
     JUDGE_MIN_WIN_PROB_PCT: float = 52.0
     JUDGE_MIN_RR_FOR_ENTRY: float = 1.35
