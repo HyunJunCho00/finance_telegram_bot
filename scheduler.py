@@ -490,6 +490,43 @@ def job_routine_market_status():
     try:
         logger.info("Running routine market status check (Free-First)")
 
+        def _parse_reference_source(source_tag: str) -> tuple[str, str]:
+            raw = str(source_tag or "").strip()
+            if raw.startswith("[") and raw.endswith("]"):
+                raw = raw[1:-1].strip()
+            if " - " in raw:
+                source_name, source_ref = raw.split(" - ", 1)
+                return source_name.strip() or "Unknown", source_ref.strip()
+            return raw or "Unknown", ""
+
+        def _build_reference_message(selected_news: list[dict]) -> str:
+            lines = []
+            for idx, item in enumerate(selected_news[:6], start=1):
+                headline = str(item.get("headline") or f"뉴스 {idx}").strip()
+                lines.append(f"{idx}. {headline}")
+
+                raw_sources = item.get("sources", [])
+                if not isinstance(raw_sources, list):
+                    raw_sources = [raw_sources]
+
+                seen_sources = set()
+                for raw_source in raw_sources:
+                    source_name, source_ref = _parse_reference_source(raw_source)
+                    dedupe_key = (source_name, source_ref)
+                    if dedupe_key in seen_sources:
+                        continue
+                    seen_sources.add(dedupe_key)
+
+                    if source_ref:
+                        lines.append(f"{source_name} : {source_ref}")
+                    else:
+                        lines.append(source_name)
+
+                if idx < min(len(selected_news), 6):
+                    lines.append("")
+
+            return "\n".join(lines).strip()
+
         indicators = {}
         for symbol in settings.trading_symbols:
             indicators[symbol] = {}
@@ -782,22 +819,12 @@ def job_routine_market_status():
 
                 try:
                     import html
-                    reference_payload = {
-                        "references": [
-                            {
-                                "index": idx + 1,
-                                "headline": item.get("headline", ""),
-                                "sources": item.get("sources", []),
-                            }
-                            for idx, item in enumerate(final_payload.get("selected_news", [])[:6])
-                        ]
-                    }
-                    refs_json = json.dumps(reference_payload, ensure_ascii=False, indent=2)
-                    refs_header = "<b>🔗 최근 1시간 뉴스 참고 링크(JSON)</b>"
+                    refs_text = _build_reference_message(final_payload.get("selected_news", [])[:6])
+                    refs_header = "<b>🔗 최근 1시간 뉴스 참고 링크</b>"
                     asyncio.run(
                         trading_bot.send_message(
                             settings.TELEGRAM_CHAT_ID,
-                            f"{refs_header}\n\n{html.escape(refs_json)}",
+                            f"{refs_header}\n\n{html.escape(refs_text)}",
                         )
                     )
                 except Exception as e:
