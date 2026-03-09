@@ -1219,6 +1219,8 @@ def node_risk_manager(state: AnalysisState) -> dict:
     symbol = state.get("symbol", "BTCUSDT")
     mode = TradingMode(state.get("mode", "swing"))
     cache_key = _cache_key(symbol, mode)
+    market_data = _market_data_cache.get(cache_key, {}) or {}
+    scenario_context = market_data.get("scenario_engine", {}) or {}
     
     # Needs macro and funding context for risk overlays
     funding = state.get("funding_context", "")
@@ -1231,9 +1233,8 @@ def node_risk_manager(state: AnalysisState) -> dict:
         mode=mode,
         onchain_context=state.get("onchain_context", ""),
         onchain_gate=state.get("onchain_gate", {}),
+        scenario_context=scenario_context,
     )
-
-    market_data = _market_data_cache.get(cache_key, {}) or {}
     cvd_df = _cvd_cache.get(cache_key)
     if cvd_df is None:
         try:

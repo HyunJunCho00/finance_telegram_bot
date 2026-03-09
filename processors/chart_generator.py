@@ -772,6 +772,7 @@ class ChartGenerator:
             if config.get('draw_swing_levels', False) and config.get('swing_tf'):
                 swing = (analysis.get('swing_levels', {}) or {}).get(config['swing_tf'])
                 self._draw_swing_levels(price_ax, chart_df, swing, config.get('swing_tf'))
+            self._draw_scenario_liquidity_map(price_ax, chart_df, analysis)
             if config.get('draw_execution_plan', False):
                 execution_plan = self._derive_execution_plan(chart_df, analysis, config)
                 self._draw_execution_plan(price_ax, chart_df, execution_plan)
@@ -1250,6 +1251,188 @@ class ChartGenerator:
             ax.text(len(chart_df) - 1, high, f' {label}', color='#F1C40F',
                     fontsize=7, fontweight='bold', va='bottom', ha='right',
                     bbox=dict(facecolor='black', alpha=0.25, edgecolor='none', pad=1))
+
+    def _draw_scenario_liquidity_map(self, ax, chart_df: pd.DataFrame, analysis: Dict):
+        """Draw only the active scenario's liquidity hints with low visual noise."""
+        scenario_engine = analysis.get('scenario_engine', {}) or {}
+        if not isinstance(scenario_engine, dict) or not scenario_engine:
+            return
+
+        liquidity_map = scenario_engine.get('liquidity_map', {}) or {}
+        active_setup = scenario_engine.get('active_setup', {}) or {}
+        current_price = float(chart_df['close'].iloc[-1])
+
+        equal_levels = liquidity_map.get('equal_levels', {}) or {}
+        self._draw_equal_liquidity_levels(ax, chart_df, equal_levels, current_price)
+
+        bpr_zone = liquidity_map.get('bpr_zone')
+        self._draw_bpr_zone(ax, chart_df, bpr_zone, current_price)
+
+        sr_flip = active_setup.get('sr_flip') or liquidity_map.get('sr_flip') or {}
+        self._draw_sr_flip(ax, chart_df, sr_flip)
+
+        trap_context = active_setup.get('trap_context') or liquidity_map.get('liquidity_sweep') or {}
+        self._draw_liquidity_sweep_marker(ax, chart_df, trap_context)
+
+        self._draw_scenario_revision_note(ax, scenario_engine)
+
+    def _draw_equal_liquidity_levels(self, ax, chart_df: pd.DataFrame, equal_levels: Dict, current_price: float):
+        """Draw at most one EQH and one EQL nearest to current price."""
+        if not isinstance(equal_levels, dict):
+            return
+
+        chart_low = float(chart_df['low'].min())
+        chart_high = float(chart_df['high'].max())
+        clusters = []
+        for label, color, items in (
+            ('EQH', '#5DADE2', equal_levels.get('equal_highs', []) or []),
+            ('EQL', '#5DADE2', equal_levels.get('equal_lows', []) or []),
+        ):
+            visible = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                price = item.get('price')
+                if not isinstance(price, (int, float)):
+                    continue
+                price = float(price)
+                if chart_low <= price <= chart_high:
+                    visible.append((abs(price - current_price), price, int(item.get('touches', 0) or 0)))
+            if visible:
+                _, price, touches = sorted(visible, key=lambda row: row[0])[0]
+                clusters.append((label, color, price, touches))
+
+        n = len(chart_df)
+        for label, color, price, touches in clusters:
+            ax.axhline(price, color=color, linestyle=':', linewidth=0.9, alpha=0.22, zorder=2)
+            ax.text(
+                n - 1,
+                price,
+                f' {label} x{touches}'.strip(),
+                color=color,
+                fontsize=7,
+                fontweight='bold',
+                va='center',
+                ha='right',
+                bbox=dict(facecolor='black', alpha=0.16, edgecolor='none', pad=1),
+            )
+
+    def _draw_bpr_zone(self, ax, chart_df: pd.DataFrame, bpr_zone: Optional[Dict], current_price: float):
+        """Draw only one visible BPR overlap zone near the active price."""
+        if not isinstance(bpr_zone, dict):
+            return
+        low = bpr_zone.get('price_low')
+        high = bpr_zone.get('price_high')
+        if not isinstance(low, (int, float)) or not isinstance(high, (int, float)):
+            return
+
+        low = float(low)
+        high = float(high)
+        chart_low = float(chart_df['low'].min())
+        chart_high = float(chart_df['high'].max())
+        if high < chart_low or low > chart_high:
+            return
+        if abs(((low + high) / 2.0) - current_price) / max(current_price, 1e-9) > 0.06:
+            return
+
+        ax.axhspan(low, high, color='#AF7AC5', alpha=0.08, zorder=1)
+        ax.text(
+            len(chart_df) - 1,
+            high,
+            ' BPR',
+            color='#AF7AC5',
+            fontsize=7,
+            fontweight='bold',
+            va='bottom',
+            ha='right',
+            bbox=dict(facecolor='black', alpha=0.18, edgecolor='none', pad=1),
+        )
+
+    def _draw_sr_flip(self, ax, chart_df: pd.DataFrame, sr_flip: Dict):
+        """Draw only confirmed SR flips to avoid over-labeling."""
+        if not isinstance(sr_flip, dict) or not sr_flip.get('confirmed'):
+            return
+        level = sr_flip.get('reference_level')
+        if not isinstance(level, (int, float)):
+            return
+
+        status = str(sr_flip.get('status', 'none')).lower()
+        color = '#48C9B0' if 'bullish' in status else '#F5B041'
+        label = 'BULL SR FLIP' if 'bullish' in status else 'BEAR SR FLIP'
+        ax.axhline(float(level), color=color, linestyle='--', linewidth=1.0, alpha=0.42, zorder=3)
+        ax.text(
+            2,
+            float(level),
+            f' {label}',
+            color=color,
+            fontsize=7,
+            fontweight='bold',
+            va='bottom' if 'bullish' in status else 'top',
+            ha='left',
+            bbox=dict(facecolor='black', alpha=0.20, edgecolor='none', pad=1),
+        )
+
+    def _draw_liquidity_sweep_marker(self, ax, chart_df: pd.DataFrame, trap_context: Dict):
+        """Draw a single sweep marker near the latest candle when confirmed."""
+        if not isinstance(trap_context, dict) or not trap_context.get('confirmed'):
+            return
+
+        status = str(trap_context.get('status', 'none')).lower()
+        ref_level = trap_context.get('reference_level')
+        if not isinstance(ref_level, (int, float)):
+            return
+
+        n = len(chart_df)
+        x = max(0, n - 1)
+        y = float(ref_level)
+        if 'buy_side' in status:
+            color = '#E74C3C'
+            marker = 'v'
+            label = 'BUY-SIDE SWEEP'
+            va = 'top'
+        else:
+            color = '#27AE60'
+            marker = '^'
+            label = 'SELL-SIDE SWEEP'
+            va = 'bottom'
+
+        ax.scatter([x], [y], marker=marker, color=color, s=55, alpha=0.9, zorder=7, edgecolors='black', linewidth=0.5)
+        ax.text(
+            x - 1.0,
+            y,
+            f' {label}',
+            color=color,
+            fontsize=7,
+            fontweight='bold',
+            va=va,
+            ha='right',
+            bbox=dict(facecolor='black', alpha=0.24, edgecolor='none', pad=1),
+        )
+
+    def _draw_scenario_revision_note(self, ax, scenario_engine: Dict):
+        """Show scenario revision only when the engine explicitly flagged one."""
+        if not isinstance(scenario_engine, dict):
+            return
+        reason = str(scenario_engine.get('scenario_revision_reason', '') or '').strip()
+        if not reason or reason == 'No forced scenario revision.':
+            return
+
+        active_setup = scenario_engine.get('active_setup', {}) or {}
+        side = str(active_setup.get('side', 'N/A')).upper()
+        note = f"SCENARIO REVIEW ({side}): {reason}"
+        if len(note) > 120:
+            note = note[:117] + '...'
+        ax.text(
+            0.99,
+            0.96,
+            note,
+            transform=ax.transAxes,
+            fontsize=7,
+            color='#F7DC6F',
+            ha='right',
+            va='top',
+            bbox=dict(facecolor='black', alpha=0.28, edgecolor='none', pad=2),
+        )
 
     def _derive_execution_plan(self, chart_df: pd.DataFrame, analysis: Dict, config: Dict) -> Dict:
         """Infer practical execution levels from local structure for the lower panel."""

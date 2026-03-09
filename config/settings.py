@@ -218,7 +218,7 @@ class Settings(BaseSettings):
     # Smart image strategy:
     #   SWING mode: chart sent to Judge only (1280x800, ~2048 tokens)
     #   SCALP mode: no images (text-only, pure speed)
-    USE_CHART_IMAGES: bool = False
+    USE_CHART_IMAGES: bool = True
     CHART_LOW_RES: bool = False  # Set to False for premium quality
     CHART_IMAGE_WIDTH: int = 1280
     CHART_IMAGE_HEIGHT: int = 800

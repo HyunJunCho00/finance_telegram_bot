@@ -108,6 +108,67 @@ Output Format (Strict JSON):
             decision["risk_manager_note"] = " | ".join([p for p in [existing, "; ".join(note_parts)] if p])
         return decision
 
+    def _apply_scenario_overrides(self, decision: dict, scenario_context: dict | None, mode: TradingMode) -> dict:
+        if not isinstance(decision, dict):
+            return {"decision": "HOLD", "allocation_pct": 0, "leverage": 1}
+
+        scenario = scenario_context or {}
+        active_setup = scenario.get("active_setup", {}) if isinstance(scenario, dict) else {}
+        if not isinstance(active_setup, dict) or not active_setup:
+            return decision
+
+        direction = str(decision.get("decision", "HOLD")).upper()
+        active_side = str(active_setup.get("side", "")).upper()
+        note_parts = []
+
+        if direction in ("LONG", "SHORT") and active_side and direction != active_side:
+            decision["decision"] = "HOLD"
+            decision["allocation_pct"] = 0
+            decision["leverage"] = 1
+            decision["cro_veto_applied"] = True
+            decision["risk_manager_note"] = (
+                f"Scenario veto: active setup side is {active_side}, draft decision was {direction}."
+            )
+            return decision
+
+        invalidation = active_setup.get("invalidation")
+        if direction in ("LONG", "SHORT") and invalidation in (None, "", "N/A"):
+            decision["decision"] = "HOLD"
+            decision["allocation_pct"] = 0
+            decision["leverage"] = 1
+            decision["cro_veto_applied"] = True
+            decision["risk_manager_note"] = "Scenario veto: invalidation level missing."
+            return decision
+
+        trap_context = active_setup.get("trap_context", {}) or {}
+        if direction in ("LONG", "SHORT") and isinstance(trap_context, dict) and trap_context.get("confirmed"):
+            trap_bias = str(trap_context.get("bias_after_sweep", "")).upper()
+            if trap_bias and trap_bias != direction:
+                decision["decision"] = "HOLD"
+                decision["allocation_pct"] = 0
+                decision["leverage"] = 1
+                decision["cro_veto_applied"] = True
+                decision["risk_manager_note"] = (
+                    f"Scenario veto: liquidity trap implies {trap_bias}, not {direction}."
+                )
+                return decision
+            decision["allocation_pct"] = round(float(decision.get("allocation_pct", 0) or 0) * 0.7, 2)
+            if mode == TradingMode.SWING:
+                decision["leverage"] = min(float(decision.get("leverage", 1) or 1), 2.0)
+            note_parts.append(f"trap-aware size reduction ({trap_context.get('status', 'trap')})")
+
+        split_entries = active_setup.get("split_entries", []) or []
+        if direction in ("LONG", "SHORT") and len(split_entries) >= 2:
+            if decision.get("recommended_execution_style") == "MOMENTUM_SNIPER":
+                decision["recommended_execution_style"] = "SMART_DCA"
+            note_parts.append("split-entry discipline enforced")
+
+        if note_parts:
+            existing = str(decision.get("risk_manager_note", "") or "").strip()
+            decision["risk_manager_note"] = " | ".join([p for p in [existing, "; ".join(note_parts)] if p])
+
+        return decision
+
     def _parse_decision(self, response: str, draft: dict) -> dict:
         try:
             s, e = response.find('{'), response.rfind('}') + 1
@@ -150,7 +211,7 @@ Output Format (Strict JSON):
 
     def evaluate_trade(self, draft_decision: dict, funding_context: str, deribit_context: str,
                        mode: TradingMode = TradingMode.SWING, onchain_context: str = "",
-                       onchain_gate: dict | None = None) -> dict:
+                       onchain_gate: dict | None = None, scenario_context: dict | None = None) -> dict:
         
         # Fast-pass: If PM already voted HOLD or CANCEL_AND_CLOSE, CRO just agrees.
         dec = draft_decision.get('decision', 'HOLD')
@@ -192,6 +253,9 @@ Deribit Data: {deribit_context}
 ON-CHAIN RISK OVERLAY:
 {onchain_context if onchain_context else "On-chain Context: unavailable"}
 
+SCENARIO CONTEXT:
+{json.dumps(scenario_context, ensure_ascii=False, indent=2) if scenario_context else "Scenario Context: unavailable"}
+
 Please execute your Risk Management oversight and output the final, safe JSON."""
 
         try:
@@ -205,6 +269,7 @@ Please execute your Risk Management oversight and output the final, safe JSON.""
                 role="risk_eval"  # Cerebras gpt-oss-120b; fallback to Groq
             )
             final = self._parse_decision(response, draft_decision)
+            final = self._apply_scenario_overrides(final, scenario_context, mode)
             final = self._apply_onchain_overrides(final, onchain_gate, mode)
             if mode == TradingMode.POSITION and final.get('decision') == 'SHORT':
                 final['decision'] = 'HOLD'

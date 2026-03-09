@@ -156,6 +156,9 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 "scenario_revision_reason": scenario.get("scenario_revision_reason", ""),
                 "active_setup": active,
                 "scenario_invalidated": invalidated,
+                "trap_state": str((active.get("trap_context", {}) or {}).get("status", "none")),
+                "trap_confirmed": bool((active.get("trap_context", {}) or {}).get("confirmed")),
+                "revision_state": "revise" if str(scenario.get("scenario_revision_reason", "")).strip() not in ("", "No forced scenario revision.") else "stable",
             }
         except Exception as e:
             logger.warning(f"Scenario snapshot error ({symbol}/{mode}): {e}")
@@ -368,14 +371,36 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             # [FEATURE-1] Extra context for DB debug logging
             "live_indicators": live,
             "scenario_snapshot": scenario_snapshot,
+            "trap_state": scenario_snapshot.get("trap_state", "none"),
+            "revision_state": scenario_snapshot.get("revision_state", "stable"),
             "playbook_id": playbook.get("id"),
             "match_ratio": round(match_ratio, 2)
         }
 
+        playbook_direction = str(playbook.get("source_decision", "HOLD") or "HOLD").upper()
+        active_side = str((scenario_snapshot.get("active_setup", {}) or {}).get("side", "")).upper()
+        if result_status in ["TRIGGER", "SOFT_TRIGGER"] and active_side and playbook_direction in ("LONG", "SHORT") and active_side != playbook_direction:
+            result["status"] = "WATCH"
+            result["reasoning"] = (
+                f"{result['reasoning']} 시나리오 방향이 현재 플레이북 방향과 달라 재확인이 필요합니다."
+            ).strip()
+
+        if result["status"] in ["TRIGGER", "SOFT_TRIGGER"] and scenario_snapshot.get("trap_confirmed"):
+            result["reasoning"] = (
+                f"{result['reasoning']} 트랩 이벤트({scenario_snapshot.get('trap_state')})가 감지되어 보수적으로 감시합니다."
+            ).strip()
+            if result["status"] == "TRIGGER":
+                result["status"] = "WATCH"
+
+        if result["status"] in ["TRIGGER", "SOFT_TRIGGER"] and scenario_snapshot.get("revision_state") == "revise":
+            result["reasoning"] = (
+                f"{result['reasoning']} 시나리오 수정 사유가 있어 즉시 실행 대신 감시 상태로 유지합니다."
+            ).strip()
+            result["status"] = "WATCH"
+
         try:
             snapshot = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
             gate = onchain_signal_engine.build_gate(snapshot)
-            playbook_direction = str(playbook.get("source_decision", "HOLD") or "HOLD").upper()
             blocked = (
                 playbook_direction == "LONG" and not gate.get("allow_long", True)
             ) or (

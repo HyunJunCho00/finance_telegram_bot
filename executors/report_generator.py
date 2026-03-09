@@ -97,6 +97,13 @@ class ReportGenerator:
             return "N/A"
 
     @staticmethod
+    def _compact_text(value: Any, limit: int = 180) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3] + "..."
+
+    @staticmethod
     def _chart_profile(mode: TradingMode) -> tuple[str, str]:
         if mode == TradingMode.POSITION:
             return ("1W/1D", "60M")
@@ -271,6 +278,34 @@ class ReportGenerator:
             if flow_signals:
                 summary_lines.append(f"Flow: <code>{self._escape_html(', '.join(flow_signals[:2]))}</code>")
 
+        scenario_plan = self._load_json_field(decision.get("scenario_plan"), {}) if isinstance(decision, dict) else {}
+        if isinstance(scenario_plan, dict) and any(str(v or "").strip() for v in scenario_plan.values()):
+            summary_lines.extend([
+                "",
+                "<b>Scenario:</b>",
+                f"- Primary: <i>{self._escape_html(self._compact_text(scenario_plan.get('primary_scenario', ''), 140))}</i>",
+                f"- Trigger: <i>{self._escape_html(self._compact_text(scenario_plan.get('trigger_to_enter', ''), 120))}</i>",
+                f"- Abort: <i>{self._escape_html(self._compact_text(scenario_plan.get('trigger_to_abort', ''), 120))}</i>",
+            ])
+
+        scenario_summary = self._load_json_field(decision.get("scenario_plan_summary"), {}) if isinstance(decision, dict) else {}
+        if isinstance(scenario_summary, dict) and scenario_summary:
+            summary_lines.append(
+                "Setup: "
+                f"<code>{self._fmt_price(scenario_summary.get('entry_zone_low'))}</code> ~ "
+                f"<code>{self._fmt_price(scenario_summary.get('entry_zone_high'))}</code> | "
+                f"Inv <code>{self._fmt_price(scenario_summary.get('invalidation'))}</code> | "
+                f"TP1 <code>{self._fmt_price(scenario_summary.get('tp1'))}</code>"
+            )
+
+        split_entry_plan = decision.get("split_entry_plan", []) if isinstance(decision, dict) else []
+        if isinstance(split_entry_plan, list) and split_entry_plan:
+            split_text = ", ".join(self._fmt_price(v) for v in split_entry_plan[:3])
+            summary_lines.append(f"Scale-ins: <code>{self._escape_html(split_text)}</code>")
+
+        if decision.get("breakeven_rule"):
+            summary_lines.append(f"BE Rule: <i>{self._escape_html(self._compact_text(decision.get('breakeven_rule'), 120))}</i>")
+
         receipt = decision.get("execution_receipt")
         if receipt and receipt.get("success"):
             summary_lines.append(f"✅ <b>자동매매 실행 완료</b> ({len(receipt.get('receipts', []))} orders)")
@@ -311,6 +346,45 @@ class ReportGenerator:
                     lines.append(f"<b>{title}:</b>\n<i>{safe_value}</i>\n")
         else:
             lines.append(f"<i>{self._escape_html(reasoning)}</i>")
+
+        scenario_plan = self._load_json_field(decision.get("scenario_plan"), {}) if isinstance(decision, dict) else {}
+        if isinstance(scenario_plan, dict) and any(str(v or "").strip() for v in scenario_plan.values()):
+            lines.append("<b>Scenario Plan:</b>")
+            scenario_mapping = [
+                ("primary_scenario", "Primary"),
+                ("alternate_scenario", "Alternate"),
+                ("trigger_to_enter", "Trigger"),
+                ("trigger_to_abort", "Abort"),
+                ("partial_tp_plan", "Partial TP"),
+                ("stop_to_be_rule", "Stop to BE"),
+            ]
+            for key, label in scenario_mapping:
+                value = scenario_plan.get(key)
+                if value:
+                    lines.append(f"- <b>{label}:</b> <i>{self._escape_html(value)}</i>")
+            lines.append("")
+
+        scenario_summary = self._load_json_field(decision.get("scenario_plan_summary"), {}) if isinstance(decision, dict) else {}
+        if isinstance(scenario_summary, dict) and scenario_summary:
+            lines.append("<b>Execution Setup:</b>")
+            lines.append(f"- Trigger: <code>{self._escape_html(scenario_summary.get('trigger', 'N/A'))}</code>")
+            lines.append(
+                f"- Entry Zone: <code>{self._fmt_price(scenario_summary.get('entry_zone_low'))}</code> ~ "
+                f"<code>{self._fmt_price(scenario_summary.get('entry_zone_high'))}</code>"
+            )
+            lines.append(
+                f"- Invalidation: <code>{self._fmt_price(scenario_summary.get('invalidation'))}</code> | "
+                f"TP1: <code>{self._fmt_price(scenario_summary.get('tp1'))}</code> | "
+                f"TP2: <code>{self._fmt_price(scenario_summary.get('tp2'))}</code>"
+            )
+            split_entry_plan = decision.get("split_entry_plan", []) if isinstance(decision, dict) else []
+            if isinstance(split_entry_plan, list) and split_entry_plan:
+                split_text = ", ".join(self._fmt_price(v) for v in split_entry_plan[:3])
+                lines.append(f"- Scale-ins: <code>{self._escape_html(split_text)}</code>")
+            if decision.get("breakeven_rule"):
+                lines.append(f"- BE Rule: <i>{self._escape_html(decision.get('breakeven_rule'))}</i>")
+            if decision.get("risk_manager_note"):
+                lines.append(f"- CRO Note: <i>{self._escape_html(decision.get('risk_manager_note'))}</i>")
 
         return "\n".join(lines)
 
