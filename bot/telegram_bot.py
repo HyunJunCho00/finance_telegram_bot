@@ -241,6 +241,10 @@ class TradingBot:
         self.bot_token = settings.TELEGRAM_BOT_TOKEN
         self.chat_id = settings.TELEGRAM_CHAT_ID
 
+    async def _send_chat_text(self, chat_id: str, text: str):
+        """Send a chunked message to the given chat, preserving Telegram-safe formatting."""
+        await self.send_message(chat_id, text)
+
     async def send_message(self, chat_id: str, text: str):
         """Send a message via the bot API (stateless)."""
         from telegram import Bot
@@ -266,7 +270,11 @@ class TradingBot:
         except Exception as e:
             logger.warning(f"Telegram photo HTML caption failed, retrying plain text caption: {e}")
             plain_caption = re.sub(r"<[^>]+>", "", safe_caption)
-            await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=plain_caption)
+            caption_head = plain_caption[:1024]
+            caption_tail = plain_caption[1024:]
+            await bot.send_photo(chat_id=chat_id, photo=photo_bytes, caption=caption_head)
+            for chunk in self._chunk_text_for_telegram(caption_tail):
+                await bot.send_message(chat_id=chat_id, text=chunk)
 
     @staticmethod
     def _sanitize_html_for_telegram(text: str) -> str:
@@ -328,7 +336,7 @@ class TradingBot:
             f"/onchain - Latest on-chain snapshot\n"
             f"/chart   - Generate HD technical chart\n"
             f"/mode    - Show fixed policy\n"
-            f"/report  - Resend latest report\n"
+            f"/report  - Resend last scheduled report\n"
             f"/report_off - Pause AI (Save $)\n"
             f"/report_on  - Resume AI\n"
             f"/help    - Show all commands"
@@ -344,7 +352,7 @@ class TradingBot:
             "  Example: /evaluate ETH 72\n"
             "/onchain [BTC|ETH] - Show latest on-chain snapshot and MVRV\n"
             "/chart [BTC|ETH] [swing|position] - Generate premium HD chart\n"
-            "/report - Resend latest analysis report\n"
+            "/report - Resend last scheduled report\n"
             "/mode - Show fixed dual-mode policy (change disabled)\n"
             "/report_off - PAUSE AI automation (Save cost)\n"
             "/report_on  - RESUME AI automation\n"
@@ -643,34 +651,16 @@ class TradingBot:
 
     async def cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
-            for symbol in settings.trading_symbols:
-                report = db.get_latest_report(symbol=symbol)
-                if report:
-                    fd = report.get('final_decision')
-                    if isinstance(fd, str):
-                        fd = json.loads(fd)
-                    reasoning_value = fd.get('reasoning', 'N/A')
-                    if isinstance(reasoning_value, dict):
-                        reasoning_text = reasoning_value.get('final_logic') or json.dumps(reasoning_value, ensure_ascii=False)
-                    else:
-                        reasoning_text = str(reasoning_value)
+            from executors.report_generator import report_generator
 
-                    text = (
-                        f"Latest {symbol} Report\n"
-                        f"Time: {report.get('timestamp', 'N/A')[:19]}\n"
-                        f"Decision: {fd.get('decision', 'N/A')}\n"
-                        f"Confidence: {fd.get('confidence', fd.get('win_probability_pct', 0))}%\n"
-                        f"Entry: {fd.get('entry_price', 'N/A')}\n"
-                        f"SL: {fd.get('stop_loss', 'N/A')}\n"
-                        f"TP: {fd.get('take_profit', 'N/A')}\n"
-                        f"Hold: {fd.get('hold_duration', 'N/A')}\n\n"
-                        f"Reasoning: {reasoning_text[:500]}"
-                    )
-                    if report.get("onchain_context"):
-                        text += "\n\nOn-chain context saved: Yes (/onchain or Deep Analysis)"
-                    await update.message.reply_text(text)
-                else:
-                    await update.message.reply_text(f"No report for {symbol}")
+            chat_id = getattr(update.effective_chat, "id", None)
+            if chat_id is None:
+                await update.message.reply_text("Unable to detect current chat.")
+                return
+
+            replayed = await report_generator.replay_last_scheduled_report(str(chat_id))
+            if not replayed:
+                await update.message.reply_text("저장된 마지막 정기 리포트가 없습니다.")
         except Exception as e:
             logger.error(f"Report command error: {e}")
             await update.message.reply_text(f"Error: {e}")
@@ -692,6 +682,10 @@ class TradingBot:
             from executors.report_generator import report_generator
 
             found = False
+            chat_id = getattr(update.effective_chat, "id", None)
+            if chat_id is None:
+                await update.message.reply_text("Unable to detect current chat.")
+                return
             for symbol in symbols:
                 snapshot = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
                 if not snapshot:
@@ -699,7 +693,7 @@ class TradingBot:
                     continue
                 found = True
                 text = report_generator.format_onchain_message(symbol, snapshot)
-                await update.message.reply_text(text, parse_mode='HTML')
+                await self._send_chat_text(str(chat_id), text)
 
             if not found and not args:
                 await update.message.reply_text("No on-chain snapshots available.")
@@ -854,7 +848,11 @@ class TradingBot:
                         mode = TradingMode.POSITION
 
                     detail_text = report_generator.format_detail_message(report, mode)
-                    await query.message.reply_text(detail_text, parse_mode='HTML')
+                    chat_id = getattr(query.message.chat, "id", None)
+                    if chat_id is None:
+                        await query.message.reply_text("Unable to detect current chat.")
+                    else:
+                        await self._send_chat_text(str(chat_id), detail_text)
                 else:
                     await query.message.reply_text("Report no longer available in database.")
             except Exception as e:

@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from datetime import datetime, timezone
 from config.database import db
 from config.settings import settings, TradingMode
@@ -312,13 +312,241 @@ class ReportGenerator:
         else:
             lines.append(f"<i>{self._escape_html(reasoning)}</i>")
 
-        final_msg = "\n".join(lines)
-        return final_msg[:4000]
+        return "\n".join(lines)
 
     def format_onchain_message(self, symbol: str, snapshot: Optional[Dict]) -> str:
         if not snapshot:
             return f"<b>ON-CHAIN SNAPSHOT | {self._escape_html(symbol)}</b>\n<i>No snapshot available.</i>"
-        return "\n".join(self._build_onchain_lines(symbol=symbol, snapshot=snapshot, onchain_context="", include_header=True))[:4000]
+        return "\n".join(self._build_onchain_lines(symbol=symbol, snapshot=snapshot, onchain_context="", include_header=True))
+
+    @staticmethod
+    def _build_reply_markup(report_id: Any):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        if report_id in (None, ""):
+            return None
+        keyboard = [[InlineKeyboardButton("🔍 View Deep Analysis", callback_data=f"detail_{report_id}")]]
+        return InlineKeyboardMarkup(keyboard)
+
+    @staticmethod
+    def _last_scheduled_report_key() -> str:
+        return "last_scheduled_report_payload"
+
+    def _save_report_replay_payload(self, payload: Dict[str, Any]) -> None:
+        context = str(payload.get("context", "") or "")
+        if context != "scheduled_daily":
+            return
+        try:
+            from config.local_state import state_manager
+            state_manager.set_system_config(
+                self._last_scheduled_report_key(),
+                json.dumps(payload, ensure_ascii=False),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to persist scheduled report payload: {e}")
+
+    def get_last_scheduled_report_payload(self) -> Dict[str, Any]:
+        try:
+            from config.local_state import state_manager
+            raw = state_manager.get_system_config(self._last_scheduled_report_key(), "")
+            if not raw:
+                return {}
+            payload = json.loads(raw)
+            return payload if isinstance(payload, dict) else {}
+        except Exception as e:
+            logger.warning(f"Failed to load scheduled report payload: {e}")
+            return {}
+
+    def _build_notification_payload(
+        self,
+        report: Dict,
+        chart_bytes: Optional[bytes],
+        mode: TradingMode,
+        notification_context: str,
+    ) -> Dict[str, Any]:
+        summary_text = self._sanitize_html_for_telegram(self.format_summary_message(report, mode))
+        report_id = report.get("report_id") or report.get("id")
+        payload: Dict[str, Any] = {
+            "context": notification_context,
+            "symbol": report.get("symbol"),
+            "mode": mode.value,
+            "report_id": report_id,
+            "messages": [],
+        }
+
+        chart_panels = []
+        if not chart_bytes:
+            logger.info(f"Telegram notify: loading human chart panels for {report['symbol']} ({mode.value})")
+            chart_panels = self._load_human_chart_panels(report["symbol"], mode)
+
+        if chart_panels:
+            logger.info(f"Telegram notify: sending {len(chart_panels)} chart panels for {report['symbol']}")
+            total = len(chart_panels)
+            for idx, panel in enumerate(chart_panels, start=1):
+                timeframe = str(panel.get("timeframe", "-")).upper()
+                payload["messages"].append({
+                    "type": "photo",
+                    "photo_b64": panel.get("chart_base64", ""),
+                    "filename": f"{report['symbol']}_{timeframe}.png",
+                    "caption": (
+                        f"📊 <b>{report['symbol']} {mode.value.upper()} Chart</b>\n"
+                        f"Timeframe: <code>{timeframe}</code>\n"
+                        f"Panel: <code>{idx}/{total}</code>"
+                    ),
+                    "parse_mode": "HTML",
+                    "with_button": False,
+                })
+
+            if len(summary_text) <= 1024:
+                payload["messages"].append({
+                    "type": "text",
+                    "text": summary_text,
+                    "parse_mode": "HTML",
+                    "with_button": True,
+                })
+            else:
+                panel_label, lookback_label = self._chart_profile(mode)
+                payload["messages"].append({
+                    "type": "text",
+                    "text": (
+                        f"<b>{report['symbol']} {mode.value.upper()} Chart Profile</b>\n"
+                        f"Panels: <code>{panel_label}</code>\n"
+                        f"Lookback: <code>{lookback_label}</code>"
+                    ),
+                    "parse_mode": "HTML",
+                    "with_button": False,
+                })
+                payload["messages"].append({
+                    "type": "text",
+                    "text": summary_text,
+                    "parse_mode": "HTML",
+                    "with_button": True,
+                })
+        elif chart_bytes:
+            logger.info(f"Telegram notify: using inline chart bytes for {report['symbol']} ({len(chart_bytes)} bytes)")
+            photo_b64 = base64.b64encode(chart_bytes).decode("ascii")
+            if len(summary_text) <= 1024:
+                payload["messages"].append({
+                    "type": "photo",
+                    "photo_b64": photo_b64,
+                    "filename": f"{report['symbol']}_chart.png",
+                    "caption": summary_text,
+                    "parse_mode": "HTML",
+                    "with_button": True,
+                })
+            else:
+                panel_label, lookback_label = self._chart_profile(mode)
+                payload["messages"].append({
+                    "type": "photo",
+                    "photo_b64": photo_b64,
+                    "filename": f"{report['symbol']}_chart.png",
+                    "caption": f"{report['symbol']} Analysis",
+                    "parse_mode": None,
+                    "with_button": False,
+                })
+                payload["messages"].append({
+                    "type": "text",
+                    "text": (
+                        f"<b>{report['symbol']} {mode.value.upper()} Chart Profile</b>\n"
+                        f"Panels: <code>{panel_label}</code>\n"
+                        f"Lookback: <code>{lookback_label}</code>"
+                    ),
+                    "parse_mode": "HTML",
+                    "with_button": False,
+                })
+                payload["messages"].append({
+                    "type": "text",
+                    "text": summary_text,
+                    "parse_mode": "HTML",
+                    "with_button": True,
+                })
+        else:
+            payload["messages"].append({
+                "type": "text",
+                "text": summary_text,
+                "parse_mode": "HTML",
+                "with_button": True,
+            })
+
+        return payload
+
+    async def _send_payload(self, bot: Bot, chat_id: str, payload: Dict[str, Any]) -> None:
+        report_id = payload.get("report_id")
+        for message in payload.get("messages", []):
+            reply_markup = self._build_reply_markup(report_id) if message.get("with_button") else None
+
+            if message.get("type") == "photo":
+                photo_bytes = base64.b64decode(str(message.get("photo_b64") or ""))
+                caption = str(message.get("caption") or "")
+                parse_mode = message.get("parse_mode")
+                try:
+                    photo = BytesIO(photo_bytes)
+                    photo.name = str(message.get("filename") or "report.png")
+                    if parse_mode:
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=photo,
+                            caption=caption,
+                            parse_mode=parse_mode,
+                            reply_markup=reply_markup,
+                        )
+                    else:
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=photo,
+                            caption=caption,
+                            reply_markup=reply_markup,
+                        )
+                except Exception:
+                    plain_caption = re.sub(r"<[^>]+>", "", caption)
+                    retry_photo = BytesIO(photo_bytes)
+                    retry_photo.name = str(message.get("filename") or "report.png")
+                    caption_head = plain_caption[:1024]
+                    caption_tail = plain_caption[1024:]
+                    await bot.send_photo(
+                        chat_id=chat_id,
+                        photo=retry_photo,
+                        caption=caption_head,
+                        reply_markup=reply_markup,
+                    )
+                    if caption_tail:
+                        tail_chunks = self._chunk_text_for_telegram(caption_tail)
+                        for idx, chunk in enumerate(tail_chunks):
+                            await bot.send_message(
+                                chat_id=chat_id,
+                                text=chunk,
+                                reply_markup=reply_markup if idx == len(tail_chunks) - 1 else None,
+                            )
+                continue
+
+            text = str(message.get("text") or "")
+            parse_mode = message.get("parse_mode")
+            if parse_mode:
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode=parse_mode,
+                        reply_markup=reply_markup,
+                    )
+                    continue
+                except Exception:
+                    text = re.sub(r"<[^>]+>", "", text)
+
+            chunks = self._chunk_text_for_telegram(text)
+            for idx, chunk in enumerate(chunks):
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    reply_markup=reply_markup if idx == len(chunks) - 1 else None,
+                )
+
+    async def replay_last_scheduled_report(self, chat_id: str) -> bool:
+        payload = self.get_last_scheduled_report_payload()
+        if not payload or not payload.get("messages"):
+            return False
+        bot = Bot(token=self.bot_token)
+        await self._send_payload(bot, chat_id, payload)
+        return True
 
     @api_retry(max_attempts=3, delay_seconds=10)
     async def send_telegram_notification(
@@ -326,152 +554,20 @@ class ReportGenerator:
         report: Dict,
         chart_bytes: Optional[bytes] = None,
         mode: TradingMode = TradingMode.SWING,
+        notification_context: str = "analysis",
     ) -> None:
         try:
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-
             bot = Bot(token=self.bot_token)
             chat_id = self._get_target_chat_id()
-            summary_text = self._sanitize_html_for_telegram(self.format_summary_message(report, mode))
             logger.info(
                 f"Telegram notify start: symbol={report.get('symbol')} mode={mode.value} "
                 f"report_id={report.get('report_id') or report.get('id')} "
-                f"chart_bytes={'yes' if chart_bytes else 'no'}"
+                f"chart_bytes={'yes' if chart_bytes else 'no'} context={notification_context}"
             )
-
-            report_id = report.get("report_id") or report.get("id")
-            keyboard = [[InlineKeyboardButton("🔍 View Deep Analysis", callback_data=f"detail_{report_id}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            chart_panels = []
-            if not chart_bytes:
-                logger.info(f"Telegram notify: loading human chart panels for {report['symbol']} ({mode.value})")
-                chart_panels = self._load_human_chart_panels(report["symbol"], mode)
-
-            if chart_panels:
-                logger.info(f"Telegram notify: sending {len(chart_panels)} chart panels for {report['symbol']}")
-                total = len(chart_panels)
-                for idx, panel in enumerate(chart_panels, start=1):
-                    photo = BytesIO(base64.b64decode(panel["chart_base64"]))
-                    tf = str(panel.get("timeframe", "-")).upper()
-                    photo.name = f"{report['symbol']}_{tf}.png"
-                    await bot.send_photo(
-                        chat_id=chat_id,
-                        photo=photo,
-                        caption=(
-                            f"📊 <b>{report['symbol']} {mode.value.upper()} Chart</b>\n"
-                            f"Timeframe: <code>{tf}</code>\n"
-                            f"Panel: <code>{idx}/{total}</code>"
-                        ),
-                        parse_mode="HTML",
-                    )
-
-                if len(summary_text) <= 1024:
-                    try:
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=summary_text,
-                            parse_mode="HTML",
-                            reply_markup=reply_markup,
-                        )
-                    except Exception:
-                        plain_text = re.sub(r"<[^>]+>", "", summary_text)
-                        for idx, chunk in enumerate(self._chunk_text_for_telegram(plain_text)):
-                            await bot.send_message(
-                                chat_id=chat_id,
-                                text=chunk,
-                                reply_markup=reply_markup if idx == len(self._chunk_text_for_telegram(plain_text)) - 1 else None,
-                            )
-                else:
-                    panel_label, lookback_label = self._chart_profile(mode)
-                    profile_text = (
-                        f"<b>{report['symbol']} {mode.value.upper()} Chart Profile</b>\n"
-                        f"Panels: <code>{panel_label}</code>\n"
-                        f"Lookback: <code>{lookback_label}</code>"
-                    )
-                    await bot.send_message(chat_id=chat_id, text=profile_text, parse_mode="HTML")
-                    try:
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=summary_text,
-                            parse_mode="HTML",
-                            reply_markup=reply_markup,
-                        )
-                    except Exception:
-                        plain_text = re.sub(r"<[^>]+>", "", summary_text)
-                        for idx, chunk in enumerate(self._chunk_text_for_telegram(plain_text)):
-                            await bot.send_message(
-                                chat_id=chat_id,
-                                text=chunk,
-                                reply_markup=reply_markup if idx == len(self._chunk_text_for_telegram(plain_text)) - 1 else None,
-                            )
-            elif chart_bytes:
-                logger.info(f"Telegram notify: using inline chart bytes for {report['symbol']} ({len(chart_bytes)} bytes)")
-                photo = BytesIO(chart_bytes)
-                photo.name = f"{report['symbol']}_chart.png"
-
-                if len(summary_text) <= 1024:
-                    try:
-                        await bot.send_photo(
-                            chat_id=chat_id,
-                            photo=photo,
-                            caption=summary_text,
-                            parse_mode="HTML",
-                            reply_markup=reply_markup,
-                        )
-                    except Exception:
-                        plain_text = re.sub(r"<[^>]+>", "", summary_text)
-                        await bot.send_photo(
-                            chat_id=chat_id,
-                            photo=photo,
-                            caption=plain_text[:1024],
-                            reply_markup=reply_markup,
-                        )
-                else:
-                    panel_label, lookback_label = self._chart_profile(mode)
-                    await bot.send_photo(chat_id=chat_id, photo=photo, caption=f"{report['symbol']} Analysis")
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=(
-                            f"<b>{report['symbol']} {mode.value.upper()} Chart Profile</b>\n"
-                            f"Panels: <code>{panel_label}</code>\n"
-                            f"Lookback: <code>{lookback_label}</code>"
-                        ),
-                        parse_mode="HTML",
-                    )
-                    try:
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=summary_text,
-                            parse_mode="HTML",
-                            reply_markup=reply_markup,
-                        )
-                    except Exception:
-                        plain_text = re.sub(r"<[^>]+>", "", summary_text)
-                        for idx, chunk in enumerate(self._chunk_text_for_telegram(plain_text)):
-                            await bot.send_message(
-                                chat_id=chat_id,
-                                text=chunk,
-                                reply_markup=reply_markup if idx == len(self._chunk_text_for_telegram(plain_text)) - 1 else None,
-                            )
-            else:
-                try:
-                    await bot.send_message(
-                        chat_id=chat_id,
-                        text=summary_text,
-                        parse_mode="HTML",
-                        reply_markup=reply_markup,
-                    )
-                except Exception:
-                    plain_text = re.sub(r"<[^>]+>", "", summary_text)
-                    for idx, chunk in enumerate(self._chunk_text_for_telegram(plain_text)):
-                        await bot.send_message(
-                            chat_id=chat_id,
-                            text=chunk,
-                            reply_markup=reply_markup if idx == len(self._chunk_text_for_telegram(plain_text)) - 1 else None,
-                        )
-
-            logger.info(f"Telegram summary notification sent (ID: {report_id})")
+            payload = self._build_notification_payload(report, chart_bytes, mode, notification_context)
+            self._save_report_replay_payload(payload)
+            await self._send_payload(bot, chat_id, payload)
+            logger.info(f"Telegram summary notification sent (ID: {payload.get('report_id')})")
         except Exception as e:
             logger.error(f"Telegram notification error: {e}")
 
@@ -480,9 +576,12 @@ class ReportGenerator:
         report: Dict,
         chart_bytes: Optional[bytes] = None,
         mode: TradingMode = TradingMode.SWING,
+        notification_context: str = "analysis",
     ) -> None:
         threading.Thread(
-            target=lambda: asyncio.run(self.send_telegram_notification(report, chart_bytes, mode)),
+            target=lambda: asyncio.run(
+                self.send_telegram_notification(report, chart_bytes, mode, notification_context)
+            ),
             daemon=True,
         ).start()
 

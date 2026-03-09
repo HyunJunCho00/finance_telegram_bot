@@ -193,6 +193,7 @@ class AnalysisState(TypedDict):
     is_emergency: bool
     execute_trades: bool
     allow_perplexity: bool
+    notification_context: str
 
     # Data collection results
     df_size: int
@@ -1481,7 +1482,12 @@ def node_generate_report(state: AnalysisState) -> dict:
             logger.info(f"Passing {len(chart_bytes)} bytes of chart data to notify.")
         else:
             logger.warning("No chart data found in state at generate_report node.")
-        report_generator.notify(report, chart_bytes=chart_bytes, mode=mode)
+        report_generator.notify(
+            report,
+            chart_bytes=chart_bytes,
+            mode=mode,
+            notification_context=str(state.get("notification_context", "analysis") or "analysis"),
+        )
         
         # Log prediction for academic/quantitative evaluation
         metrics_logger.log_prediction(
@@ -1703,6 +1709,7 @@ class Orchestrator:
         is_emergency: bool = False,
         execute_trades: bool = True,
         allow_perplexity: bool = False,
+        notification_context: str = "manual",
     ) -> Dict:
         mode = self.mode
         return self.run_analysis_with_mode(
@@ -1711,6 +1718,7 @@ class Orchestrator:
             is_emergency=is_emergency,
             execute_trades=execute_trades,
             allow_perplexity=allow_perplexity,
+            notification_context=notification_context,
         )
 
     def run_analysis_with_mode(
@@ -1720,6 +1728,7 @@ class Orchestrator:
         is_emergency: bool = False,
         execute_trades: bool = True,
         allow_perplexity: bool = False,
+        notification_context: str = "manual",
     ) -> Dict:
         lock_key = f"{symbol}:{mode.value}"
         lock = self._analysis_locks.setdefault(lock_key, threading.Lock())
@@ -1740,6 +1749,7 @@ class Orchestrator:
                     is_emergency,
                     execute_trades=execute_trades,
                     allow_perplexity=allow_perplexity,
+                    notification_context=notification_context,
                 )
             return self._run_sequential(
                 symbol,
@@ -1747,6 +1757,7 @@ class Orchestrator:
                 is_emergency,
                 execute_trades=execute_trades,
                 allow_perplexity=allow_perplexity,
+                notification_context=notification_context,
             )
         finally:
             lock.release()
@@ -1758,6 +1769,7 @@ class Orchestrator:
         is_emergency: bool,
         execute_trades: bool = True,
         allow_perplexity: bool = False,
+        notification_context: str = "manual",
     ) -> Dict:
         """Run analysis using LangGraph StateGraph."""
         initial_state: AnalysisState = {
@@ -1766,6 +1778,7 @@ class Orchestrator:
             "is_emergency": is_emergency,
             "execute_trades": execute_trades,
             "allow_perplexity": allow_perplexity,
+            "notification_context": notification_context,
             "df_size": 0,
             "market_data_compact": "",
             "narrative_text": "",
@@ -1818,6 +1831,7 @@ class Orchestrator:
         is_emergency: bool,
         execute_trades: bool = True,
         allow_perplexity: bool = False,
+        notification_context: str = "manual",
     ) -> Dict:
         """Fallback: sequential execution (no LangGraph)."""
         state = {
@@ -1825,6 +1839,7 @@ class Orchestrator:
             "is_emergency": is_emergency,
             "execute_trades": execute_trades,
             "allow_perplexity": allow_perplexity,
+            "notification_context": notification_context,
             "errors": [],
             "onchain_snapshot": {}, "onchain_context": "", "onchain_gate": {},
             "vlm_context_text": "", "policy_snapshot": {},
@@ -1913,6 +1928,7 @@ class Orchestrator:
                         is_emergency=False,
                         execute_trades=True,
                         allow_perplexity=False,
+                        notification_context="scheduled_dual",
                     )
                 except Exception as e:
                     logger.error(f"Analysis error for {symbol} ({mode.value}): {e}")
@@ -1926,6 +1942,7 @@ class Orchestrator:
             is_emergency=True,
             execute_trades=True,
             allow_perplexity=False,
+            notification_context="emergency",
         )
 
 
@@ -1954,6 +1971,7 @@ class Orchestrator:
                         is_emergency=False,
                         execute_trades=True,
                         allow_perplexity=True,
+                        notification_context="scheduled_daily",
                     )
                 else:
                     state = self._run_sequential(
@@ -1962,6 +1980,7 @@ class Orchestrator:
                         is_emergency=False,
                         execute_trades=True,
                         allow_perplexity=True,
+                        notification_context="scheduled_daily",
                     )
 
                 # Generate & persist playbook (uses last completed state via global caches)
@@ -2080,6 +2099,7 @@ class Orchestrator:
                                 is_emergency=False,
                                 execute_trades=True,
                                 allow_perplexity=False,
+                                notification_context="scheduled_trigger",
                             )
                             state_manager.set_system_config(_entry_count_key + symbol, str(entries_today + 1))
                         else:
