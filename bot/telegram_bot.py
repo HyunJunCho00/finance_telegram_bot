@@ -710,12 +710,23 @@ class TradingBot:
     async def cmd_report_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         from config.local_state import state_manager
         state_manager.set_analysis_enabled(True)
-        await update.message.reply_text("🚀 <b>AI 리포트 및 분석이 활성화되었습니다.</b>\n이제 정기적으로 시장을 분석하고 정보를 검증합니다.", parse_mode='HTML')
+        chat_id = getattr(update.effective_chat, "id", None)
+        if chat_id is not None:
+            state_manager.set_telegram_chat_id(str(chat_id))
+        await update.message.reply_text(
+            "정기 AI 리포트를 다시 켰습니다.\n"
+            "이 채팅방을 정기 발송 대상으로 저장했습니다.",
+            parse_mode='HTML',
+        )
 
     async def cmd_report_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         from config.local_state import state_manager
         state_manager.set_analysis_enabled(False)
-        await update.message.reply_text("🛑 <b>AI 리포트 및 분석이 중단되었습니다.</b>\n데이터 수집은 계속되지만, 고비용 AI 호출은 발생하지 않습니다.", parse_mode='HTML')
+        await update.message.reply_text(
+            "정기 AI 리포트를 껐습니다.\n"
+            "데이터 수집은 계속되지만 자동 분석/발송은 중단됩니다.",
+            parse_mode='HTML',
+        )
 
     async def cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Direct command to get a chart image: /chart [symbol] [swing|position]"""

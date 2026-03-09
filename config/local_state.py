@@ -221,6 +221,18 @@ class LocalStateManager:
             self.conn.commit()
         logger.info(f"System Config: AI Analysis {'ENABLED' if enabled else 'DISABLED'}")
 
+    def get_telegram_chat_id(self, default: str = "") -> str:
+        """Return the persisted Telegram target chat id, if any."""
+        return self.get_system_config("telegram_chat_id", default)
+
+    def set_telegram_chat_id(self, chat_id: str):
+        """Persist the Telegram target chat id for scheduled notifications."""
+        normalized = str(chat_id or "").strip()
+        if not normalized:
+            return
+        self.set_system_config("telegram_chat_id", normalized)
+        logger.info(f"System Config: Telegram chat id set to {normalized}")
+
     def get_trading_mode(self) -> str:
         """Get persisted trading mode (swing|position). Defaults to 'swing'."""
         with self._lock:

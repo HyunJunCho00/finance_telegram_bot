@@ -8,7 +8,7 @@ from telegram import Bot
 from config.settings import settings
 from datetime import datetime, timezone
 from loguru import logger
-from config.local_state import DB_PATH
+from config.local_state import DB_PATH, state_manager
 
 
 FEE_PCT = 0.0005  # 0.05% Binance Futures Market Fee
@@ -34,7 +34,8 @@ class PaperExchangeEngine:
         async def _async_send():
             try:
                 bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
-                await bot.send_message(chat_id=settings.TELEGRAM_CHAT_ID, text=message, parse_mode='HTML')
+                chat_id = state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
+                await bot.send_message(chat_id=chat_id, text=message, parse_mode='HTML')
             except Exception as e:
                 logger.error(f"PaperEngine notification failed: {e}")
 

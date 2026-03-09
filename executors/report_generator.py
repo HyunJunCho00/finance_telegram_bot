@@ -9,6 +9,7 @@ import threading
 from loguru import logger
 import json
 import base64
+import re
 from utils.retry import api_retry
 
 
@@ -16,6 +17,14 @@ class ReportGenerator:
     def __init__(self):
         self.bot_token = settings.TELEGRAM_BOT_TOKEN
         self.chat_id = settings.TELEGRAM_CHAT_ID
+
+    @staticmethod
+    def _get_target_chat_id() -> str:
+        try:
+            from config.local_state import state_manager
+            return state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
+        except Exception:
+            return settings.TELEGRAM_CHAT_ID
 
     @staticmethod
     def _load_json_field(value, default):
@@ -33,6 +42,43 @@ class ReportGenerator:
     @staticmethod
     def _escape_html(value) -> str:
         return str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    @staticmethod
+    def _sanitize_html_for_telegram(text: str) -> str:
+        if not text:
+            return text
+        sanitized = str(text)
+        sanitized = re.sub(r"^\s*#{1,6}\s*(.+)$", r"\n<b>\1</b>", sanitized, flags=re.MULTILINE)
+        sanitized = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", sanitized)
+        sanitized = re.sub(r"^\s*\*\s+", "- ", sanitized, flags=re.MULTILINE)
+        sanitized = sanitized.replace("<blockquote>", "").replace("</blockquote>", "")
+        return sanitized
+
+    @staticmethod
+    def _chunk_text_for_telegram(text: str, limit: int = 4000) -> list[str]:
+        if len(text) <= limit:
+            return [text]
+
+        chunks: list[str] = []
+        current = ""
+        for line in text.splitlines(keepends=True):
+            candidate = current + line
+            if len(candidate) <= limit:
+                current = candidate
+                continue
+
+            if current:
+                chunks.append(current)
+                current = ""
+
+            while len(line) > limit:
+                chunks.append(line[:limit])
+                line = line[limit:]
+            current = line
+
+        if current:
+            chunks.append(current)
+        return chunks or [text[:limit]]
 
     @staticmethod
     def _fmt_price(value) -> str:
@@ -285,22 +331,32 @@ class ReportGenerator:
             from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
             bot = Bot(token=self.bot_token)
-            summary_text = self.format_summary_message(report, mode)
+            chat_id = self._get_target_chat_id()
+            summary_text = self._sanitize_html_for_telegram(self.format_summary_message(report, mode))
+            logger.info(
+                f"Telegram notify start: symbol={report.get('symbol')} mode={mode.value} "
+                f"report_id={report.get('report_id') or report.get('id')} "
+                f"chart_bytes={'yes' if chart_bytes else 'no'}"
+            )
 
             report_id = report.get("report_id") or report.get("id")
             keyboard = [[InlineKeyboardButton("🔍 View Deep Analysis", callback_data=f"detail_{report_id}")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
 
-            chart_panels = self._load_human_chart_panels(report["symbol"], mode)
+            chart_panels = []
+            if not chart_bytes:
+                logger.info(f"Telegram notify: loading human chart panels for {report['symbol']} ({mode.value})")
+                chart_panels = self._load_human_chart_panels(report["symbol"], mode)
 
             if chart_panels:
+                logger.info(f"Telegram notify: sending {len(chart_panels)} chart panels for {report['symbol']}")
                 total = len(chart_panels)
                 for idx, panel in enumerate(chart_panels, start=1):
                     photo = BytesIO(base64.b64decode(panel["chart_base64"]))
                     tf = str(panel.get("timeframe", "-")).upper()
                     photo.name = f"{report['symbol']}_{tf}.png"
                     await bot.send_photo(
-                        chat_id=self.chat_id,
+                        chat_id=chat_id,
                         photo=photo,
                         caption=(
                             f"📊 <b>{report['symbol']} {mode.value.upper()} Chart</b>\n"
@@ -311,51 +367,71 @@ class ReportGenerator:
                     )
 
                 if len(summary_text) <= 1024:
-                    await bot.send_message(
-                        chat_id=self.chat_id,
-                        text=summary_text,
-                        parse_mode="HTML",
-                        reply_markup=reply_markup,
-                    )
+                    try:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=summary_text,
+                            parse_mode="HTML",
+                            reply_markup=reply_markup,
+                        )
+                    except Exception:
+                        plain_text = re.sub(r"<[^>]+>", "", summary_text)
+                        for idx, chunk in enumerate(self._chunk_text_for_telegram(plain_text)):
+                            await bot.send_message(
+                                chat_id=chat_id,
+                                text=chunk,
+                                reply_markup=reply_markup if idx == len(self._chunk_text_for_telegram(plain_text)) - 1 else None,
+                            )
                 else:
                     panel_label, lookback_label = self._chart_profile(mode)
-                    await bot.send_message(
-                        chat_id=self.chat_id,
-                        text=(
-                            f"<b>{report['symbol']} {mode.value.upper()} Chart Profile</b>\n"
-                            f"Panels: <code>{panel_label}</code>\n"
-                            f"Lookback: <code>{lookback_label}</code>"
-                        ),
-                        parse_mode="HTML",
+                    profile_text = (
+                        f"<b>{report['symbol']} {mode.value.upper()} Chart Profile</b>\n"
+                        f"Panels: <code>{panel_label}</code>\n"
+                        f"Lookback: <code>{lookback_label}</code>"
                     )
-                    await bot.send_message(
-                        chat_id=self.chat_id,
-                        text=summary_text,
-                        parse_mode="HTML",
-                        reply_markup=reply_markup,
-                    )
+                    await bot.send_message(chat_id=chat_id, text=profile_text, parse_mode="HTML")
+                    try:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=summary_text,
+                            parse_mode="HTML",
+                            reply_markup=reply_markup,
+                        )
+                    except Exception:
+                        plain_text = re.sub(r"<[^>]+>", "", summary_text)
+                        for idx, chunk in enumerate(self._chunk_text_for_telegram(plain_text)):
+                            await bot.send_message(
+                                chat_id=chat_id,
+                                text=chunk,
+                                reply_markup=reply_markup if idx == len(self._chunk_text_for_telegram(plain_text)) - 1 else None,
+                            )
             elif chart_bytes:
+                logger.info(f"Telegram notify: using inline chart bytes for {report['symbol']} ({len(chart_bytes)} bytes)")
                 photo = BytesIO(chart_bytes)
                 photo.name = f"{report['symbol']}_chart.png"
 
                 if len(summary_text) <= 1024:
-                    await bot.send_photo(
-                        chat_id=self.chat_id,
-                        photo=photo,
-                        caption=summary_text,
-                        parse_mode="HTML",
-                        reply_markup=reply_markup,
-                    )
+                    try:
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=photo,
+                            caption=summary_text,
+                            parse_mode="HTML",
+                            reply_markup=reply_markup,
+                        )
+                    except Exception:
+                        plain_text = re.sub(r"<[^>]+>", "", summary_text)
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=photo,
+                            caption=plain_text[:1024],
+                            reply_markup=reply_markup,
+                        )
                 else:
                     panel_label, lookback_label = self._chart_profile(mode)
-                    await bot.send_photo(
-                        chat_id=self.chat_id,
-                        photo=photo,
-                        caption=f"📊 {report['symbol']} Analysis",
-                        parse_mode="HTML",
-                    )
+                    await bot.send_photo(chat_id=chat_id, photo=photo, caption=f"{report['symbol']} Analysis")
                     await bot.send_message(
-                        chat_id=self.chat_id,
+                        chat_id=chat_id,
                         text=(
                             f"<b>{report['symbol']} {mode.value.upper()} Chart Profile</b>\n"
                             f"Panels: <code>{panel_label}</code>\n"
@@ -363,19 +439,37 @@ class ReportGenerator:
                         ),
                         parse_mode="HTML",
                     )
+                    try:
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=summary_text,
+                            parse_mode="HTML",
+                            reply_markup=reply_markup,
+                        )
+                    except Exception:
+                        plain_text = re.sub(r"<[^>]+>", "", summary_text)
+                        for idx, chunk in enumerate(self._chunk_text_for_telegram(plain_text)):
+                            await bot.send_message(
+                                chat_id=chat_id,
+                                text=chunk,
+                                reply_markup=reply_markup if idx == len(self._chunk_text_for_telegram(plain_text)) - 1 else None,
+                            )
+            else:
+                try:
                     await bot.send_message(
-                        chat_id=self.chat_id,
+                        chat_id=chat_id,
                         text=summary_text,
                         parse_mode="HTML",
                         reply_markup=reply_markup,
                     )
-            else:
-                await bot.send_message(
-                    chat_id=self.chat_id,
-                    text=summary_text,
-                    parse_mode="HTML",
-                    reply_markup=reply_markup,
-                )
+                except Exception:
+                    plain_text = re.sub(r"<[^>]+>", "", summary_text)
+                    for idx, chunk in enumerate(self._chunk_text_for_telegram(plain_text)):
+                        await bot.send_message(
+                            chat_id=chat_id,
+                            text=chunk,
+                            reply_markup=reply_markup if idx == len(self._chunk_text_for_telegram(plain_text)) - 1 else None,
+                        )
 
             logger.info(f"Telegram summary notification sent (ID: {report_id})")
         except Exception as e:

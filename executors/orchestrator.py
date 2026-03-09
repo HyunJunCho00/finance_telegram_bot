@@ -2093,6 +2093,7 @@ class Orchestrator:
             # Send one consolidated dual-lane monitor message per symbol.
             try:
                 if trading_bot:
+                    target_chat_id = state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
                     swing_res = lane_results.get("SWING", {})
                     pos_res = lane_results.get("POSITION", {})
                     swing_status = swing_res.get("status", "NO_ACTION")
@@ -2104,7 +2105,7 @@ class Orchestrator:
                         f"{_lane_line('SWING', swing_res)}\n"
                         f"{_lane_line('POSITION', pos_res)}"
                     )
-                    asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, msg))
+                    asyncio.run(trading_bot.send_message(target_chat_id, msg))
                     
                     try:
                         from mcp_server.tools import mcp_tools
@@ -2125,7 +2126,7 @@ class Orchestrator:
                                             f"Panel: <code>{idx}/{total}</code>\n"
                                             f"Lookback: <code>{lookback_label}</code>"
                                         )
-                                        asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption=caption))
+                                        asyncio.run(trading_bot.send_photo(target_chat_id, chart_bytes, caption=caption))
                     except Exception as e:
                         logger.warning(f"Failed to send hourly monitor chart for {symbol}: {e}")
             except Exception as e:

@@ -527,6 +527,13 @@ def job_routine_market_status():
 
             return "\n".join(lines).strip()
 
+        def _get_target_chat_id() -> str:
+            try:
+                from config.local_state import state_manager
+                return state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
+            except Exception:
+                return settings.TELEGRAM_CHAT_ID
+
         indicators = {}
         for symbol in settings.trading_symbols:
             indicators[symbol] = {}
@@ -808,12 +815,13 @@ def job_routine_market_status():
         from bot.telegram_bot import trading_bot
         if trading_bot:
             import asyncio
+            target_chat_id = _get_target_chat_id()
             
             # Message 1: News Briefing (only if news exists)
             if telegram_intel and "주요 뉴스 없음" not in telegram_intel:
                 news_header = "<b>📰 최근 1시간 뉴스 브리핑 (Synthesized)</b>"
                 try:
-                    asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"{news_header}\n\n{telegram_intel}"))
+                    asyncio.run(trading_bot.send_message(target_chat_id, f"{news_header}\n\n{telegram_intel}"))
                 except Exception as e:
                     logger.warning(f"Routine news briefing send failed: {e}")
 
@@ -823,7 +831,7 @@ def job_routine_market_status():
                     refs_header = "<b>🔗 최근 1시간 뉴스 참고 링크</b>"
                     asyncio.run(
                         trading_bot.send_message(
-                            settings.TELEGRAM_CHAT_ID,
+                            target_chat_id,
                             f"{refs_header}\n\n{html.escape(refs_text)}",
                         )
                     )
@@ -835,7 +843,7 @@ def job_routine_market_status():
             summary = market_monitor_agent.summarize_current_status(indicators)
             logger.success(f"Market Summary Generated:\n{summary}")
             try:
-                asyncio.run(trading_bot.send_message(settings.TELEGRAM_CHAT_ID, f"{market_header}\n\n{summary}"))
+                asyncio.run(trading_bot.send_message(target_chat_id, f"{market_header}\n\n{summary}"))
             except Exception as e:
                 logger.warning(f"Routine market status send failed: {e}")
 
@@ -848,12 +856,14 @@ def job_hourly_swing_charts():
     """Hourly Swing chart push for BTC/ETH to Telegram."""
     try:
         from bot.telegram_bot import trading_bot
+        from config.local_state import state_manager
         if not trading_bot:
             logger.warning("Hourly swing chart skipped: trading_bot unavailable")
             return
 
         from mcp_server.tools import mcp_tools
         import asyncio
+        target_chat_id = state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
 
         target_symbols = [s for s in settings.trading_symbols if s in ("BTCUSDT", "ETHUSDT")]
         if not target_symbols:
@@ -878,7 +888,7 @@ def job_hourly_swing_charts():
                         f"Panel: <code>{idx}/{total}</code>\n"
                         f"Lookback: <code>12M</code>"
                     )
-                    asyncio.run(trading_bot.send_photo(settings.TELEGRAM_CHAT_ID, chart_bytes, caption))
+                    asyncio.run(trading_bot.send_photo(target_chat_id, chart_bytes, caption))
             except Exception as e:
                 logger.warning(f"Hourly swing chart send failed for {symbol}: {e}")
     except Exception as e:
