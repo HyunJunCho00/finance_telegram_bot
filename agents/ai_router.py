@@ -59,6 +59,26 @@ class CloudflareGenerator:
         if not isinstance(payload, dict):
             return ""
 
+        if "choices" in payload and isinstance(payload.get("choices"), list):
+            for choice in payload.get("choices", []):
+                text = CloudflareGenerator._extract_text(choice)
+                if text:
+                    return text
+
+        if "message" in payload and isinstance(payload.get("message"), dict):
+            message = payload.get("message") or {}
+            for key in ("content", "reasoning_content", "reasoning", "output_text", "text"):
+                text = CloudflareGenerator._extract_text(message.get(key))
+                if text:
+                    return text
+
+        if "delta" in payload and isinstance(payload.get("delta"), dict):
+            delta = payload.get("delta") or {}
+            for key in ("content", "reasoning_content", "reasoning", "text"):
+                text = CloudflareGenerator._extract_text(delta.get(key))
+                if text:
+                    return text
+
         result = payload.get("result")
         if isinstance(result, str) and result.strip():
             return result.strip()
@@ -279,7 +299,7 @@ class AIClient:
         return time.time() > expiry
 
     def _mark_model_exhausted(self, model_id: str, duration: int = 3600):
-        logger.warning(f"CIRCUIT BREAKER: Blocking [{model_id}] for {duration}s due to Rate Limit")
+        logger.warning(f"CIRCUIT BREAKER: Blocking [{model_id}] for {duration}s due to temporary failure/quota")
         self._circuit_breakers[model_id] = time.time() + duration
 
     def _get_route(self, role: str) -> Tuple[str, str, int]:
