@@ -1,10 +1,11 @@
 from .ai_router import ai_client
 from config.settings import settings, TradingMode
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 from config.database import db
 from executors.post_mortem import retrieve_similar_memories
 from loguru import logger
 import json
+import re
 from utils.decision_parser import extract_decision_from_response
 
 
@@ -199,6 +200,189 @@ Rules:
     def __init__(self):
         pass
 
+    @staticmethod
+    def _compact_text(value: Any, limit: int = 240) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3] + "..."
+
+    @classmethod
+    def _summarize_lines(cls, value: Any, *, max_lines: int = 8, max_chars: int = 800) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        lines = []
+        seen = set()
+        total = 0
+        for raw_line in text.splitlines():
+            line = re.sub(r"\s+", " ", raw_line).strip(" -")
+            if not line or line in seen:
+                continue
+            seen.add(line)
+            compact = cls._compact_text(line, 180)
+            projected = total + len(compact) + 2
+            if projected > max_chars:
+                break
+            lines.append(compact)
+            total = projected
+            if len(lines) >= max_lines:
+                break
+        if not lines:
+            return cls._compact_text(text, max_chars)
+        return "\n".join(f"- {line}" for line in lines)
+
+    @classmethod
+    def _summarize_previous_decision(cls, previous_decision: Optional[Dict]) -> Dict:
+        if not isinstance(previous_decision, dict) or not previous_decision:
+            return {"status": "none"}
+        reasoning = previous_decision.get("reasoning", {})
+        final_logic = ""
+        if isinstance(reasoning, dict):
+            final_logic = (
+                reasoning.get("final_logic")
+                or reasoning.get("technical")
+                or reasoning.get("narrative")
+                or reasoning.get("onchain")
+                or ""
+            )
+        else:
+            final_logic = str(reasoning or "")
+        return {
+            "status": "available",
+            "decision": str(previous_decision.get("decision", "N/A") or "N/A"),
+            "allocation_pct": previous_decision.get("allocation_pct", 0),
+            "leverage": previous_decision.get("leverage", 1),
+            "hold_duration": str(previous_decision.get("hold_duration", "N/A") or "N/A"),
+            "confidence": previous_decision.get("confidence", previous_decision.get("win_probability_pct", 0)),
+            "final_logic": cls._compact_text(final_logic, 180),
+        }
+
+    @classmethod
+    def _summarize_active_orders(cls, active_orders: list) -> Dict:
+        if not active_orders:
+            return {"count": 0, "orders": []}
+        items = []
+        for order in active_orders[:3]:
+            if not isinstance(order, dict):
+                continue
+            items.append({
+                "symbol": str(order.get("symbol", "") or ""),
+                "side": str(order.get("side", order.get("direction", "")) or ""),
+                "exchange": str(order.get("exchange", "") or ""),
+                "status": str(order.get("status", "") or ""),
+                "style": str(order.get("execution_style", order.get("style", "")) or ""),
+            })
+        return {"count": len(active_orders), "orders": items}
+
+    @classmethod
+    def _summarize_regime_context(cls, regime_context: Optional[Dict]) -> Dict:
+        context = regime_context if isinstance(regime_context, dict) else {}
+        return {
+            "regime": str(context.get("regime", "N/A") or "N/A"),
+            "risk_bias": str(context.get("risk_bias", "N/A") or "N/A"),
+            "risk_budget_pct": context.get("risk_budget_pct", "N/A"),
+            "trust_directive": cls._compact_text(context.get("trust_directive", ""), 220),
+            "rationale": cls._compact_text(context.get("rationale", ""), 220),
+        }
+
+    @classmethod
+    def _summarize_blackboard(cls, blackboard: Dict[str, dict]) -> list[Dict[str, Any]]:
+        if not isinstance(blackboard, dict):
+            return []
+
+        summaries: list[Dict[str, Any]] = []
+        preferred_order = ["macro", "liquidity", "microstructure", "chart_rules", "vlm_geometry"]
+        ordered_keys = preferred_order + [k for k in blackboard.keys() if k not in preferred_order]
+
+        for key in ordered_keys:
+            payload = blackboard.get(key)
+            if not isinstance(payload, dict):
+                continue
+            if key == "chart_rules":
+                signals = payload.get("signals", {}) if isinstance(payload.get("signals"), dict) else {}
+                summaries.append({
+                    "agent": key,
+                    "status": str(payload.get("status", "N/A") or "N/A"),
+                    "scenario_ready": bool(signals.get("scenario_ready")),
+                    "structure_alert": bool(signals.get("has_structure_alert")),
+                    "trap_signal": bool(signals.get("has_trap_signal")),
+                    "bias": str(payload.get("directional_bias", signals.get("bias", "N/A")) or "N/A"),
+                })
+                continue
+            if key == "vlm_geometry":
+                summaries.append({
+                    "agent": key,
+                    "bias": str(payload.get("directional_bias", "N/A") or "N/A"),
+                    "confidence": payload.get("confidence", "N/A"),
+                    "anomaly": str(payload.get("anomaly", "N/A") or "N/A"),
+                    "trap_type": str(payload.get("trap_type", "N/A") or "N/A"),
+                    "rationale": cls._compact_text(payload.get("rationale", ""), 160),
+                })
+                continue
+
+            verdict = (
+                payload.get("decision")
+                or payload.get("bias")
+                or payload.get("signal")
+                or payload.get("status")
+                or "N/A"
+            )
+            rationale = (
+                payload.get("summary")
+                or payload.get("reasoning")
+                or payload.get("rationale")
+                or payload.get("details")
+                or ""
+            )
+            summaries.append({
+                "agent": key,
+                "verdict": str(verdict or "N/A"),
+                "confidence": payload.get("confidence", payload.get("score", "N/A")),
+                "rationale": cls._compact_text(rationale, 160),
+            })
+            if len(summaries) >= 8:
+                break
+        return summaries
+
+    def _build_judge_brief(
+        self,
+        *,
+        symbol: str,
+        mode: TradingMode,
+        market_data_compact: str,
+        blackboard: Dict[str, dict],
+        funding_context: str,
+        narrative_context: str,
+        onchain_context: str,
+        regime_context: Optional[Dict],
+        previous_decision: Optional[Dict],
+        active_orders: list,
+        open_positions: str,
+        episodic_memory: str,
+        feedback_text: str,
+    ) -> Dict[str, Any]:
+        return {
+            "symbol": symbol,
+            "mode": mode.value.upper(),
+            "structure_snapshot": self._summarize_lines(market_data_compact, max_lines=18, max_chars=1800),
+            "regime_snapshot": self._summarize_regime_context(regime_context),
+            "derivatives_snapshot": self._summarize_lines(funding_context, max_lines=8, max_chars=700),
+            "narrative_snapshot": self._summarize_lines(narrative_context, max_lines=8, max_chars=700),
+            "onchain_snapshot": self._summarize_lines(onchain_context, max_lines=6, max_chars=500),
+            "expert_verdicts": self._summarize_blackboard(blackboard),
+            "execution_context": {
+                "open_positions": self._summarize_lines(open_positions, max_lines=4, max_chars=280) or "No open positions.",
+                "active_orders": self._summarize_active_orders(active_orders),
+            },
+            "previous_decision": self._summarize_previous_decision(previous_decision),
+            "episodic_memory": self._summarize_lines(episodic_memory, max_lines=5, max_chars=420),
+            "feedback_constraints": self._summarize_lines(feedback_text, max_lines=4, max_chars=260),
+        }
+
     def get_previous_decision(self, symbol: str = "BTCUSDT") -> Optional[Dict]:
         """[FIX CRITICAL-6] symbol parameter added — was NameError (symbol not in scope)."""
         try:
@@ -237,23 +421,6 @@ Rules:
         prompt = f"{base_formatted}\n\n{self.DEBATE_APPENDIX}"
         previous_decision = self.get_previous_decision(symbol=symbol)
 
-        previous_context = "No previous decision available."
-        if previous_decision:
-            reasoning = previous_decision.get('reasoning', 'N/A')
-            if isinstance(reasoning, dict):
-                # If structured, extract final_logic or join summaries
-                reasoning_text = reasoning.get('final_logic', str(reasoning))
-            else:
-                reasoning_text = str(reasoning)
-
-            previous_context = f"""Previous Decision:
-- Position: {previous_decision.get('decision', 'N/A')}
-- Allocation: {previous_decision.get('allocation_pct', 0)}%
-- Leverage: {previous_decision.get('leverage', 1)}x
-- Hold Duration: {previous_decision.get('hold_duration', 'N/A')}
-- Confidence: {previous_decision.get('confidence', 0)}%
-- Reasoning: {reasoning_text[:300]}"""
-
         # --- Episodic Memory Retrieval ---
         # Queries the JSONL vector DB placeholder for past identical patterns.
         try:
@@ -264,39 +431,36 @@ Rules:
             logger.error(f"Failed to query memory: {e}")
             episodic_memory = "Vector DB RAG Search: System running in Bootstrap mode."
 
-        bb_str = json.dumps(blackboard, indent=2)
+        judge_brief = self._build_judge_brief(
+            symbol=symbol,
+            mode=mode,
+            market_data_compact=market_data_compact,
+            blackboard=blackboard,
+            funding_context=funding_context,
+            narrative_context=narrative_context,
+            onchain_context=onchain_context,
+            regime_context=regime_context,
+            previous_decision=previous_decision,
+            active_orders=active_orders,
+            open_positions=open_positions,
+            episodic_memory=episodic_memory,
+            feedback_text=feedback_text,
+        )
 
-        user_message = f"""MARKET DATA:
-{market_data_compact}
-
-NARRATIVE & RAG CONTEXT:
-{narrative_context if narrative_context else "Narrative: Unavailable"}
-
-DERIVATIVES CONTEXT:
-{funding_context}
-
-BLACKBOARD (EXPERT ANALYSES):
-{bb_str}
-
-EPISODIC MEMORY (PAST SIMILAR TRADES):
-{episodic_memory}
-
-OPEN POSITIONS (CURRENTLY HELD):
-{open_positions if open_positions else "No open positions."}
-
-ACTIVE DCA/TWAP ORDERS (V5 EXECUTION DESK PENDING):
-{json.dumps(active_orders, indent=2) if active_orders else "No active pending orders."}
-
-REGIME CONTEXT (META-AGENT TRUST DIRECTIVES):
-{json.dumps(regime_context, indent=2) if regime_context else "No regime context available."}
-
-ON-CHAIN OVERLAY:
-{onchain_context if onchain_context else "On-chain Context: unavailable"}
-
-{previous_context}
-{feedback_text}
-
-Make your trading decision. Output as JSON. Ensure the counter_scenario is thoroughly explored."""
+        user_message = (
+            "Use this compressed investment-committee brief as the ground truth.\n"
+            "Do not assume missing raw fields exist.\n"
+            "If a field is absent or marked unavailable, treat it as unknown rather than inferring.\n\n"
+            f"JUDGE_BRIEF:\n{json.dumps(judge_brief, ensure_ascii=False, indent=2)}\n\n"
+            "Make your trading decision. Output as JSON. Ensure the counter_scenario is thoroughly explored."
+        )
+        logger.info(
+            f"Judge brief prepared for {symbol}/{mode.value}: "
+            f"market_chars={len(str(market_data_compact or ''))} "
+            f"narrative_chars={len(str(narrative_context or ''))} "
+            f"funding_chars={len(str(funding_context or ''))} "
+            f"brief_chars={len(user_message)}"
+        )
 
         try:
             # Judge uses the best model (Opus)

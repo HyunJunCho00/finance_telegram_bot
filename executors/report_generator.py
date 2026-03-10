@@ -103,6 +103,76 @@ class ReportGenerator:
             return text
         return text[: limit - 3] + "..."
 
+    @classmethod
+    def _extract_reasoning_text(cls, value: Any) -> str:
+        if value in (None, "", "N/A"):
+            return ""
+        if isinstance(value, dict):
+            for key in ("final_logic", "technical", "narrative", "onchain", "derivatives", "experts", "counter_scenario"):
+                text = cls._extract_reasoning_text(value.get(key))
+                if text:
+                    return text
+            return ""
+
+        text = str(value).strip()
+        if not text or text == "N/A":
+            return ""
+
+        parsed = cls._load_json_field(text, None)
+        if isinstance(parsed, dict):
+            nested = cls._extract_reasoning_text(parsed.get("reasoning"))
+            if nested:
+                return nested
+            for key in ("final_logic", "technical", "narrative", "onchain", "reasoning"):
+                nested = cls._extract_reasoning_text(parsed.get(key))
+                if nested:
+                    return nested
+
+        text = re.sub(r"\s+", " ", text).strip()
+        if text.startswith("{") and '"decision"' in text:
+            return ""
+        return text
+
+    @classmethod
+    def _summary_from_decision(cls, decision: Dict[str, Any]) -> str:
+        reasoning = decision.get("reasoning", {})
+        candidates: list[str] = []
+
+        if isinstance(reasoning, dict):
+            for key in ("final_logic", "technical", "narrative", "onchain", "derivatives", "experts"):
+                text = cls._extract_reasoning_text(reasoning.get(key))
+                if text:
+                    candidates.append(text)
+        else:
+            text = cls._extract_reasoning_text(reasoning)
+            if text:
+                candidates.append(text)
+
+        for candidate in candidates:
+            compact = cls._compact_text(candidate, 320)
+            if compact:
+                return compact
+        return "요약 가능한 핵심 논리가 아직 정리되지 않았습니다."
+
+    @staticmethod
+    def _should_render_execution_receipt(decision: Dict[str, Any], receipt: Any) -> bool:
+        if not isinstance(receipt, dict) or not receipt:
+            return False
+        if str(receipt.get("status", "")).upper() == "SKIPPED":
+            return False
+
+        direction = str((decision or {}).get("decision", "HOLD") or "HOLD").upper()
+        if direction not in {"LONG", "SHORT", "CANCEL_AND_CLOSE"}:
+            return False
+
+        note = str(receipt.get("note", "") or "").strip()
+        if note in {
+            "No valid trade direction",
+            "Allocation is 0% (Vetoed or No Confidence)",
+        }:
+            return False
+        return True
+
     @staticmethod
     def _chart_profile(mode: TradingMode) -> tuple[str, str]:
         if mode == TradingMode.POSITION:
@@ -264,7 +334,7 @@ class ReportGenerator:
     def format_summary_message(self, report: Dict, mode: TradingMode = TradingMode.SWING) -> str:
         decision = self._load_json_field(report.get("final_decision"), {})
 
-        direction = decision.get("decision", "N/A")
+        direction = str(decision.get("decision", "N/A") or "N/A").upper()
         confidence = decision.get("confidence", decision.get("win_probability_pct", 0))
 
         if direction == "LONG":
@@ -275,8 +345,7 @@ class ReportGenerator:
             header_icon, color_theme = "⚖️", "⚪ 관망 (HOLD)"
 
         mode_label = "SWING (스윙)" if mode == TradingMode.SWING else "POSITION (포지션)"
-        reasoning = decision.get("reasoning", {})
-        final_logic = reasoning.get("final_logic", "No summary available.") if isinstance(reasoning, dict) else str(reasoning)[:200]
+        final_logic = self._summary_from_decision(decision)
 
         summary_lines = [
             f"{header_icon} <b>[ {mode_label} ] AI 분석 리포트 | {report['symbol']}</b>",
@@ -303,7 +372,7 @@ class ReportGenerator:
                 summary_lines.append(f"Flow: <code>{self._escape_html(', '.join(flow_signals[:2]))}</code>")
 
         scenario_plan = self._load_json_field(decision.get("scenario_plan"), {}) if isinstance(decision, dict) else {}
-        if isinstance(scenario_plan, dict) and any(str(v or "").strip() for v in scenario_plan.values()):
+        if direction in {"LONG", "SHORT"} and isinstance(scenario_plan, dict) and any(str(v or "").strip() for v in scenario_plan.values()):
             summary_lines.extend([
                 "",
                 "<b>Scenario:</b>",
@@ -313,7 +382,7 @@ class ReportGenerator:
             ])
 
         scenario_summary = self._load_json_field(decision.get("scenario_plan_summary"), {}) if isinstance(decision, dict) else {}
-        if isinstance(scenario_summary, dict) and scenario_summary:
+        if direction in {"LONG", "SHORT"} and isinstance(scenario_summary, dict) and scenario_summary:
             summary_lines.append(
                 "Setup: "
                 f"<code>{self._fmt_price(scenario_summary.get('entry_zone_low'))}</code> ~ "
@@ -323,14 +392,15 @@ class ReportGenerator:
             )
 
         split_entry_plan = decision.get("split_entry_plan", []) if isinstance(decision, dict) else []
-        if isinstance(split_entry_plan, list) and split_entry_plan:
+        if direction in {"LONG", "SHORT"} and isinstance(split_entry_plan, list) and split_entry_plan:
             split_text = ", ".join(self._fmt_price(v) for v in split_entry_plan[:3])
             summary_lines.append(f"Scale-ins: <code>{self._escape_html(split_text)}</code>")
 
-        if decision.get("breakeven_rule"):
+        if direction in {"LONG", "SHORT"} and decision.get("breakeven_rule"):
             summary_lines.append(f"BE Rule: <i>{self._escape_html(self._compact_text(decision.get('breakeven_rule'), 120))}</i>")
 
         receipt = decision.get("execution_receipt")
+        receipt = receipt if self._should_render_execution_receipt(decision, receipt) else None
         if receipt and receipt.get("success"):
             summary_lines.append(f"✅ <b>자동매매 실행 완료</b> ({len(receipt.get('receipts', []))} orders)")
         elif receipt:
