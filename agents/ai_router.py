@@ -1,6 +1,7 @@
 """Hybrid AI router with backend-aware fallback and circuit breaking."""
 
 import base64
+import json
 import mimetypes
 import threading
 import time
@@ -10,6 +11,7 @@ from google import genai
 from google.genai import types
 from loguru import logger
 from openai import OpenAI
+from requests import exceptions as requests_exceptions
 
 from config.settings import settings
 
@@ -23,6 +25,7 @@ class CloudflareGenerator:
         self._api_key = ""
         self._enabled = False
         self._session = None
+        self._last_failure_kind = ""
 
     def _init(self):
         if self._enabled:
@@ -40,6 +43,58 @@ class CloudflareGenerator:
             f"/ai/run/{model}"
         )
 
+    @staticmethod
+    def _extract_text(payload: object) -> str:
+        if payload is None:
+            return ""
+        if isinstance(payload, str):
+            return payload.strip()
+        if isinstance(payload, list):
+            parts: List[str] = []
+            for item in payload:
+                text = CloudflareGenerator._extract_text(item)
+                if text:
+                    parts.append(text)
+            return "\n".join(parts).strip()
+        if not isinstance(payload, dict):
+            return ""
+
+        result = payload.get("result")
+        if isinstance(result, str) and result.strip():
+            return result.strip()
+        if isinstance(result, dict):
+            for key in ("response", "output_text", "text", "content", "generated_text", "output"):
+                text = CloudflareGenerator._extract_text(result.get(key))
+                if text:
+                    return text
+            choices = result.get("choices")
+            if isinstance(choices, list):
+                for choice in choices:
+                    text = CloudflareGenerator._extract_text(choice)
+                    if text:
+                        return text
+            messages = result.get("messages")
+            if isinstance(messages, list):
+                for message in messages:
+                    text = CloudflareGenerator._extract_text(message)
+                    if text:
+                        return text
+
+        for key in ("response", "output_text", "text", "content", "generated_text", "output"):
+            text = CloudflareGenerator._extract_text(payload.get(key))
+            if text:
+                return text
+
+        message = payload.get("message")
+        if isinstance(message, dict):
+            text = CloudflareGenerator._extract_text(message.get("content"))
+            if text:
+                return text
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+
+        return ""
+
     def generate(
         self,
         system_prompt: str,
@@ -50,6 +105,7 @@ class CloudflareGenerator:
         self._init()
         if not self._enabled:
             return None
+        self._last_failure_kind = ""
 
         import requests
 
@@ -66,14 +122,58 @@ class CloudflareGenerator:
             if self._session is None:
                 self._session = requests.Session()
                 self._session.headers.update(
-                    {"Authorization": f"Bearer {self._api_key}"}
+                    {
+                        "Authorization": f"Bearer {self._api_key}",
+                        "Content-Type": "application/json",
+                    }
                 )
-            resp = self._session.post(self._url(model_id), json=payload, timeout=10.0)
+            timeout_seconds = max(5.0, float(getattr(settings, "CLOUDFLARE_AI_TIMEOUT_SECONDS", 25.0)))
+            resp = self._session.post(self._url(model_id), json=payload, timeout=timeout_seconds)
             resp.raise_for_status()
-            return resp.json().get("result", {}).get("response", "")
-        except Exception as e:
-            logger.warning(f"CloudflareGenerator failed ({model_id}): {e}")
+            body = resp.json()
+            text = self._extract_text(body)
+            if text:
+                return text
+            self._last_failure_kind = "empty_payload"
+            body_keys = list(body.keys()) if isinstance(body, dict) else [type(body).__name__]
+            preview = str(body)
+            if len(preview) > 500:
+                preview = preview[:500] + "...[truncated]"
+            logger.warning(
+                f"CloudflareGenerator empty/unknown payload ({model_id}). "
+                f"keys={body_keys} body={preview}"
+            )
             return None
+        except requests_exceptions.ReadTimeout:
+            self._last_failure_kind = "timeout"
+            logger.warning(f"CloudflareGenerator read timeout ({model_id})")
+            return None
+        except requests_exceptions.HTTPError as e:
+            status_code = getattr(getattr(e, "response", None), "status_code", None)
+            self._last_failure_kind = "rate_limit" if status_code == 429 else "http_error"
+            response_text = ""
+            try:
+                response_text = getattr(e.response, "text", "") or ""
+            except Exception:
+                response_text = ""
+            if len(response_text) > 500:
+                response_text = response_text[:500] + "...[truncated]"
+            logger.warning(
+                f"CloudflareGenerator HTTP error ({model_id}) "
+                f"status={status_code} body={response_text}"
+            )
+            return None
+        except Exception as e:
+            self._last_failure_kind = "request_error"
+            err_preview = str(e)
+            if len(err_preview) > 300:
+                err_preview = err_preview[:300] + "...[truncated]"
+            logger.warning(f"CloudflareGenerator failed ({model_id}): {err_preview}")
+            return None
+
+    @property
+    def last_failure_kind(self) -> str:
+        return self._last_failure_kind
 
 
 class AIClient:
@@ -272,6 +372,15 @@ class AIClient:
             if result:
                 logger.success(f"Cloudflare Fallback SUCCEEDED for [{role}] with [{model_id}]")
                 return result
+            failure_kind = self._cf_generator.last_failure_kind
+            if failure_kind == "rate_limit":
+                cooldown = max(300, int(getattr(settings, "CLOUDFLARE_AI_RATE_LIMIT_EXHAUST_SECONDS", 1800)))
+            elif failure_kind in {"timeout", "http_error", "request_error"}:
+                cooldown = max(60, int(getattr(settings, "CLOUDFLARE_AI_TIMEOUT_EXHAUST_SECONDS", 180)))
+            else:
+                cooldown = 60
+            logger.warning(f"Cloudflare Fallback yielded no usable text for [{role}] with [{model_id}]")
+            self._mark_model_exhausted(model_id, duration=cooldown)
 
         return ""
 

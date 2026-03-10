@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     # Used as borderline-zone cross-encoder in LightRAG dedup pipeline.
     CLOUDFLARE_ACCOUNT_ID: str = ""
     CLOUDFLARE_AI_API_KEY: str = ""
+    CLOUDFLARE_AI_TIMEOUT_SECONDS: float = 25.0
+    CLOUDFLARE_AI_TIMEOUT_EXHAUST_SECONDS: int = 180
+    CLOUDFLARE_AI_RATE_LIMIT_EXHAUST_SECONDS: int = 1800
 
 
     # ===== Trading Symbols (single source of truth) =====
