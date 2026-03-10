@@ -879,11 +879,6 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         if not any_event:
             lines.append("- 이번 사이클 이벤트 트리거 없음 (기본 요약만 유지)")
 
-        intel = str((indicators or {}).get("TELEGRAM_INTEL", "") or "").strip()
-        if intel and "주요 뉴스 없음" not in intel:
-            brief = intel[:240] + ("..." if len(intel) > 240 else "")
-            lines.append(f"- <i>뉴스 인텔 요약: {brief}</i>")
-
         lines.append(f"- <i>생성 시각(UTC): {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}</i>")
         return "\n".join(lines)
 

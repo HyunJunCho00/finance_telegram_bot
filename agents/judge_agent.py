@@ -9,9 +9,8 @@ from utils.decision_parser import extract_decision_from_response
 
 
 class JudgeAgent:
-    """The final decision maker. Uses the best available model
-    ONLY agent that receives chart image (SWING mode, cost optimization).
-    AI decides everything - we just deliver data."""
+    """The final decision maker using premium Pro/Ultra models.
+    Receives visual context + structural summaries for multi-modal cross-validation."""
 
     BASE_PROMPT = """You are a senior crypto portfolio manager making {mode_upper} trading decisions.
 
@@ -128,7 +127,10 @@ Be aware of your previous decision for consistency."""
 - Market narrative from Perplexity provides the "WHY" behind moves
 - Position sizing: 10-25% of Kelly criterion (conservative)
 - Leverage: 1-3x maximum for swing trades
-- Stop Loss & Take Profit: Allow wider stops (e.g., 5-10%) to survive crypto volatility. However, you MUST maintain a minimum 1.5:1 or 2:1 Reward/Risk ratio. Manage the absolute risk by reducing `allocation_pct` and `leverage`, NOT by tightening the stop loss to unrealistic levels that will just get hunted.
+- Stop Loss & Take Profit: Allow wider stops (e.g., 5-10%) to survive crypto volatility.
+  POLICY HARD FLOOR: You MUST maintain a MINIMUM 2.0:1 Reward/Risk ratio (POLICY_MIN_RR=2.0).
+  If achieving 2.0:1 R/R is impossible without an unrealistically tight stop, choose HOLD.
+  Manage absolute risk by reducing allocation_pct and leverage, NOT by tightening the stop.
 - Hold period: days to weeks"""
 
     POSITION_RULES = """Professional POSITION trading principles you should consider:
@@ -152,8 +154,9 @@ Be aware of your previous decision for consistency."""
 Swarm reasoning controls & Data Trust Hierarchy:
 - Synthesize all expert insights from the Blackboard into a cohesive probability map.
 - CONVICTION HIERARCHY (Resolve deadlocks using this rule):
-  1. For SCALP/Short-term: Microstructure (Orderbook/Slippage) > Liquidity (OI/Funding/MFI) > Macro > Visual Geometry.
-  2. For SWING/Position: Macro/Options > OI Divergence & Funding > Volume Profile > Visual Geometry > Microstructure.
+  For SWING mode: Macro/Options > OI Divergence & Funding > Volume Profile > Visual Geometry > Microstructure.
+  For POSITION mode: Macro/Options > OI Divergence & Funding > Volume Profile > Visual Geometry > Microstructure.
+  (Microstructure is least important for multi-day holds; most important only for intraday timing.)
 - Weigh conflicting evidence against the Hierarchy above.
 - Explicitly list strongest pro-trade and strongest anti-trade factors in key_factors.
 - Do not reward agreement itself; reward evidence quality and falsifiability.
@@ -170,6 +173,11 @@ Your authority is strictly narrower than the daily strategy judge.
   3. REDUCE: playbook still valid but context is mixed, reduce size
   4. CANCEL: do not execute this trigger
   5. REPLAN: the daily thesis itself appears stale/broken and needs emergency re-planning
+
+LEVERAGE HARD CAPS (non-negotiable, mode-specific):
+  - SWING mode: leverage 1–3x maximum
+  - POSITION mode: leverage 1.0–1.5x maximum (liquidation must be nearly impossible)
+  Do NOT output leverage > 1.5 when mode is POSITION, even if the playbook context suggests otherwise.
 
 Return strict JSON only:
 {
@@ -213,13 +221,14 @@ Rules:
         chart_image_b64: Optional[str] = None,
         mode: TradingMode = TradingMode.SWING,
         feedback_text: str = "",
-        active_orders: list = [],
+        active_orders: Optional[list] = None,
         open_positions: str = "",
         symbol: str = "BTCUSDT",
         regime_context: Optional[Dict] = None,
         narrative_context: str = "",
         onchain_context: str = "",
     ) -> Dict:
+        active_orders = active_orders or []  # Guard against mutable default
         mode_str = mode.value.upper()
         mode_rules = self.POSITION_RULES if mode == TradingMode.POSITION else self.SWING_RULES
         # Wait, format() evaluates all curly braces. self.DEBATE_APPENDIX contains raw JSON templates!
@@ -405,7 +414,12 @@ Make your trading decision. Output as JSON. Ensure the counter_scenario is thoro
             except Exception:
                 pass
         try:
-            decision["leverage"] = max(1, min(3, int(float(parsed.get("leverage", 1) or 1))))
+            raw_lev = int(float(parsed.get("leverage", 1) or 1))
+            mode_str_ctx = str(compact_snapshot.get("mode", "swing") or "swing").lower()
+            # POSITION mode hard cap: POSITION_RULES explicitly states max 1.5x
+            max_lev = 1 if mode_str_ctx == "position" else 3  # 1x enforced for position (floor applied below)
+            lev_cap = 1.5 if mode_str_ctx == "position" else 3.0
+            decision["leverage"] = max(1, min(raw_lev, max_lev)) if mode_str_ctx != "position" else max(1.0, min(float(raw_lev), lev_cap))
         except Exception:
             decision["leverage"] = 1
 

@@ -22,12 +22,55 @@ def initialize_memory_db():
             pass
 
 def assess_trade_outcome(decision: dict, entry_price: float, current_price: float) -> str:
-    """Simple heuristic to determine if the trade was successful."""
-    dir = decision.get("decision", "HOLD")
-    if dir == "HOLD": return "NEUTRAL"
-    if dir == "LONG" and current_price >= entry_price: return "SUCCESS"
-    if dir == "SHORT" and current_price <= entry_price: return "SUCCESS"
-    return "FAILURE"
+    """Heuristic to determine if the trade was successful.
+
+    Priority order:
+    1. Stop-loss breached   → FAILURE  (price at/below SL for LONG; at/above SL for SHORT)
+    2. Take-profit reached  → SUCCESS
+    3. Price vs entry price → SUCCESS or FAILURE
+
+    Limitation: snapshot-based; does not track intra-trade path.
+    If price hit the stop and then recovered, this returns FAILURE correctly only when
+    current_price is still at/beyond the stop level.
+    """
+    direction = decision.get("decision", "HOLD")
+    if direction == "HOLD":
+        return "NEUTRAL"
+
+    stop_loss   = decision.get("stop_loss")
+    take_profit = decision.get("take_profit")
+
+    if direction == "LONG":
+        if stop_loss is not None:
+            try:
+                if current_price <= float(stop_loss):
+                    return "FAILURE"
+            except (TypeError, ValueError):
+                pass
+        if take_profit is not None:
+            try:
+                if current_price >= float(take_profit):
+                    return "SUCCESS"
+            except (TypeError, ValueError):
+                pass
+        return "SUCCESS" if current_price >= entry_price else "FAILURE"
+
+    if direction == "SHORT":
+        if stop_loss is not None:
+            try:
+                if current_price >= float(stop_loss):
+                    return "FAILURE"
+            except (TypeError, ValueError):
+                pass
+        if take_profit is not None:
+            try:
+                if current_price <= float(take_profit):
+                    return "SUCCESS"
+            except (TypeError, ValueError):
+                pass
+        return "SUCCESS" if current_price <= entry_price else "FAILURE"
+
+    return "NEUTRAL"
 
 def generate_llm_lesson(trade_data: dict, outcome: str) -> str:
     """Uses LLM to reflect on what went right or wrong based on the original Blackboard state."""

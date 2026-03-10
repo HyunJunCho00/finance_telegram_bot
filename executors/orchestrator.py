@@ -1916,8 +1916,16 @@ class Orchestrator:
         mode: TradingMode,
         *,
         allow_perplexity: bool = False,
+        include_meta: bool = True,
+        include_vlm: bool = True,
     ) -> None:
-        refresh_snapshot_bundle(symbol, mode, allow_perplexity=allow_perplexity)
+        refresh_snapshot_bundle(
+            symbol,
+            mode,
+            allow_perplexity=allow_perplexity,
+            include_meta=include_meta,
+            include_vlm=include_vlm,
+        )
 
     def run_report_hot_path_with_mode(
         self,

@@ -115,6 +115,8 @@ def _refresh_snapshots_for_modes(
                     symbol,
                     mode,
                     allow_perplexity=allow_perplexity,
+                    include_meta=False,
+                    include_vlm=False,
                 )
             except Exception as e:
                 logger.error(f"{label} error for {symbol}/{mode.value}: {e}")

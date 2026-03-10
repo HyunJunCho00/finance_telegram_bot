@@ -97,7 +97,14 @@ def refresh_market_snapshot(symbol: str, mode: TradingMode, *, wait_budget_s: fl
     )
 
 
-def refresh_context_bundle(symbol: str, mode: TradingMode, *, wait_budget_s: float = 0.0, allow_perplexity: bool = False) -> None:
+def refresh_context_bundle(
+    symbol: str,
+    mode: TradingMode,
+    *,
+    wait_budget_s: float = 0.0,
+    allow_perplexity: bool = False,
+    include_meta: bool = True,
+) -> None:
     import executors.orchestrator as orchestrator_module
 
     started = time.perf_counter()
@@ -105,7 +112,16 @@ def refresh_context_bundle(symbol: str, mode: TradingMode, *, wait_budget_s: flo
     orchestrator_module._clear_symbol_mode_caches(symbol, mode)
     _apply_update(state, orchestrator_module.node_collect_data(state))
     _apply_update(state, orchestrator_module.node_context_gathering(state))
-    _apply_update(state, orchestrator_module.node_meta_agent(state))
+    if include_meta:
+        _apply_update(state, orchestrator_module.node_meta_agent(state))
+    else:
+        state["regime_context"] = {
+            "regime": state.get("market_regime", "RANGE_BOUND"),
+            "rationale": "Meta agent disabled for snapshot prewarm",
+            "trust_directive": "Use cached/deterministic context until precision/trigger analysis runs.",
+            "risk_budget_pct": 50,
+            "risk_bias": "NEUTRAL",
+        }
 
     market_data = orchestrator_module._market_data_cache.get(orchestrator_module._cache_key(symbol, mode), {}) or {}
     market_payload = {
@@ -182,11 +198,20 @@ def refresh_context_bundle(symbol: str, mode: TradingMode, *, wait_budget_s: flo
         details={
             "has_narrative": bool(narrative_payload.get("narrative_text")),
             "has_onchain": bool(onchain_payload.get("onchain_context")),
+            "includes_meta": include_meta,
         },
     )
 
 
-def refresh_chart_bundle(symbol: str, mode: TradingMode, *, wait_budget_s: float = 0.0, allow_perplexity: bool = False) -> None:
+def refresh_chart_bundle(
+    symbol: str,
+    mode: TradingMode,
+    *,
+    wait_budget_s: float = 0.0,
+    allow_perplexity: bool = False,
+    include_meta: bool = True,
+    include_vlm: bool = True,
+) -> None:
     import executors.orchestrator as orchestrator_module
 
     started = time.perf_counter()
@@ -194,11 +219,20 @@ def refresh_chart_bundle(symbol: str, mode: TradingMode, *, wait_budget_s: float
     orchestrator_module._clear_symbol_mode_caches(symbol, mode)
     _apply_update(state, orchestrator_module.node_collect_data(state))
     _apply_update(state, orchestrator_module.node_context_gathering(state))
-    _apply_update(state, orchestrator_module.node_meta_agent(state))
+    if include_meta:
+        _apply_update(state, orchestrator_module.node_meta_agent(state))
     _apply_update(state, orchestrator_module.node_triage(state))
     _apply_update(state, orchestrator_module.node_generate_chart(state))
     _apply_update(state, orchestrator_module.node_rule_based_chart(state))
-    _apply_update(state, orchestrator_module.node_vlm_geometric_expert(state))
+    if include_vlm:
+        _apply_update(state, orchestrator_module.node_vlm_geometric_expert(state))
+    else:
+        state.setdefault("blackboard", {})["vlm_geometry"] = {
+            "anomaly": "skipped",
+            "directional_bias": "NEUTRAL",
+            "confidence": 0,
+            "rationale": "VLM disabled for snapshot prewarm",
+        }
 
     blackboard = state.get("blackboard", {}) or {}
     chart_payload = {
@@ -233,11 +267,27 @@ def refresh_chart_bundle(symbol: str, mode: TradingMode, *, wait_budget_s: float
     )
 
 
-def refresh_snapshot_bundle(symbol: str, mode: TradingMode, *, allow_perplexity: bool = False) -> None:
+def refresh_snapshot_bundle(
+    symbol: str,
+    mode: TradingMode,
+    *,
+    allow_perplexity: bool = False,
+    include_meta: bool = True,
+    include_vlm: bool = True,
+) -> None:
     started = time.perf_counter()
-    logger.info(f"Refreshing snapshot bundle for {symbol}/{mode.value} (perplexity={'on' if allow_perplexity else 'off'})")
-    refresh_context_bundle(symbol, mode, allow_perplexity=allow_perplexity)
-    refresh_chart_bundle(symbol, mode, allow_perplexity=allow_perplexity)
+    logger.info(
+        f"Refreshing snapshot bundle for {symbol}/{mode.value} "
+        f"(perplexity={'on' if allow_perplexity else 'off'}, meta={'on' if include_meta else 'off'}, vlm={'on' if include_vlm else 'off'})"
+    )
+    refresh_context_bundle(symbol, mode, allow_perplexity=allow_perplexity, include_meta=include_meta)
+    refresh_chart_bundle(
+        symbol,
+        mode,
+        allow_perplexity=allow_perplexity,
+        include_meta=include_meta,
+        include_vlm=include_vlm,
+    )
     logger.info(f"Snapshot bundle ready for {symbol}/{mode.value}")
     performance_telemetry.log_snapshot_refresh(
         symbol=symbol,
@@ -245,7 +295,12 @@ def refresh_snapshot_bundle(symbol: str, mode: TradingMode, *, allow_perplexity:
         stage="snapshot_bundle",
         allow_perplexity=allow_perplexity,
         latency_ms=(time.perf_counter() - started) * 1000.0,
-        details={"includes_chart_bundle": True, "includes_context_bundle": True},
+        details={
+            "includes_chart_bundle": True,
+            "includes_context_bundle": True,
+            "includes_meta": include_meta,
+            "includes_vlm": include_vlm,
+        },
     )
 
 

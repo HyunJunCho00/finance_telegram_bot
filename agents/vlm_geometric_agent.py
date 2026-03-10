@@ -7,8 +7,9 @@ from .ai_router import ai_client
 
 
 class VLMGeometricAgent:
-    """Visual chart specialist. Sole agent that reads the chart image.
-    Judge receives only this agent's structured text output ??no raw chart
+    """Primary visual specialist using lightweight Flash models to extract 
+    structural data (Fibo, Trendlines, Liquidity) from chart images.
+    Output is used as structured context for the final Judge.
     """
 
     SYSTEM_PROMPT = """You are a master technical analyst and liquidity sniper with perfect spatial reasoning.

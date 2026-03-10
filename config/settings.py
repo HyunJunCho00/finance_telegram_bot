@@ -40,8 +40,8 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     VOYAGE_API_KEY: str = ""
     GEMINI_API_KEY: str = ""          # default Gemini key
-    GEMINI_API_KEY_JUDGE: str = ""    # Project A ??Judge (gemini-3.1-pro-preview)
-    GEMINI_API_KEY_VLM: str = ""      # Project B ??VLM Geometric (gemini-3.1-pro-preview)
+    GEMINI_API_KEY_JUDGE: str = ""    # Project A -- Judge (gemini-3.1-pro-preview)
+    GEMINI_API_KEY_VLM: str = ""      # Project B -- VLM Geometric (gemini-3-flash-preview)
     GROQ_API_KEY: str = ""
     CEREBRAS_API_KEY: str = ""        # Cerebras ??meta_regime + risk_eval (gpt-oss-120b)
     OPENROUTER_API_KEY: str = ""      # OpenRouter ??hourly monitor (free tier)
@@ -156,7 +156,7 @@ class Settings(BaseSettings):
     MODEL_JUDGE_FALLBACK: str = "gemini-3-flash-preview"
     MODEL_SELF_CORRECTION: str = "gemini-3.1-pro-preview"
 
-    # 2. vlm_geometric / vlm_telegram_chart Google AI Studio Project B
+    # 2. vlm_geometric / vlm_telegram_chart -- Lightweight Flash for Vision efficiency
     MODEL_VLM_GEOMETRIC: str = "gemini-3-flash-preview"
     MODEL_VLM_TELEGRAM_CHART: str = "gemini-3-flash-preview"
 
@@ -184,8 +184,12 @@ class Settings(BaseSettings):
     ENABLE_SNAPSHOT_HOT_PATH_DAILY: bool = True
     ENABLE_SNAPSHOT_HOT_PATH_TRIGGER: bool = True
     # Judge post-processing gates (deterministic, no extra LLM call)
-    JUDGE_MIN_WIN_PROB_PCT: float = 52.0
-    JUDGE_MIN_RR_FOR_ENTRY: float = 1.35
+    # JUDGE_MIN_WIN_PROB_PCT: 52% barely exceeds coin-flip; after fees/slippage ~0 edge.
+    #   Raised to 55% for meaningful statistical edge.
+    # JUDGE_MIN_RR_FOR_ENTRY: Was 1.35 — contradicted POLICY_MIN_RR=2.0. Aligned to 1.9
+    #   (slight tolerance below 2.0 for LLM rounding; hard floor is effectively the policy).
+    JUDGE_MIN_WIN_PROB_PCT: float = 55.0
+    JUDGE_MIN_RR_FOR_ENTRY: float = 1.9
     JUDGE_MIN_EV_FOR_ENTRY_PCT: float = 0.20
     JUDGE_ENABLE_HOLD_OVERRIDE: bool = True
     JUDGE_OVERRIDE_ALLOC_SWING_PCT: float = 8.0
