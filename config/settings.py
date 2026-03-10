@@ -139,6 +139,10 @@ class Settings(BaseSettings):
 
     VOLATILITY_THRESHOLD: float = 3.0
     ANALYSIS_INTERVAL_HOURS: int = 4
+    DAILY_PRECISION_HOUR_UTC: int = 1
+    DAILY_PRECISION_MINUTE_UTC: int = 30
+    DAILY_PRECISION_PROTECTION_MINUTES: int = 20
+    DAILY_PRECISION_SYMBOL_GAP_MINUTES: int = 10
 
     # ===== AI Models (role API model single policy table) =====
     MODEL_ENDPOINT: str = "gemini-3.1-pro-preview"

@@ -899,7 +899,7 @@ class TradingBot:
                     "position": {"venue": "binance_spot_upbit", "direction": "long_only"},
                     "chart_enabled": settings.should_use_chart,
                     "primary_scheduler_utc": {
-                        "job_daily_precision": "00:00",
+                        "job_daily_precision": f"{int(getattr(settings, 'DAILY_PRECISION_HOUR_UTC', 0)):02d}:{int(getattr(settings, 'DAILY_PRECISION_MINUTE_UTC', 30)):02d}",
                         "job_hourly_monitor": "hh:15",
                         "job_routine_market_status": "hh:20",
                     },

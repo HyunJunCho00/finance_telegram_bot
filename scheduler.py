@@ -28,7 +28,41 @@ import sys
 import threading
 import json
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+
+
+def _daily_precision_label_utc() -> str:
+    return (
+        f"{int(getattr(settings, 'DAILY_PRECISION_HOUR_UTC', 0)):02d}:"
+        f"{int(getattr(settings, 'DAILY_PRECISION_MINUTE_UTC', 30)):02d}"
+    )
+
+
+def _daily_precision_protection_window_minutes() -> int:
+    return max(0, int(getattr(settings, "DAILY_PRECISION_PROTECTION_MINUTES", 20)))
+
+
+def _is_daily_precision_protection_window(now_utc: datetime | None = None) -> bool:
+    now = now_utc or datetime.now(timezone.utc)
+    hour = int(getattr(settings, "DAILY_PRECISION_HOUR_UTC", 0))
+    minute = int(getattr(settings, "DAILY_PRECISION_MINUTE_UTC", 30))
+    protection_minutes = _daily_precision_protection_window_minutes()
+    scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    window_start = scheduled - timedelta(minutes=protection_minutes // 2)
+    window_end = scheduled + timedelta(minutes=protection_minutes)
+    return window_start <= now <= window_end
+
+
+def _should_defer_heavy_job(job_name: str) -> bool:
+    if orchestrator.is_daily_precision_running():
+        logger.info(f"{job_name} skipped (daily precision currently running)")
+        return True
+    if _is_daily_precision_protection_window():
+        logger.info(
+            f"{job_name} skipped (inside daily precision protection window around {_daily_precision_label_utc()} UTC)"
+        )
+        return True
+    return False
 
 
 def _refresh_snapshots_for_modes(
@@ -61,6 +95,8 @@ def _refresh_snapshots_for_modes(
 
 def job_snapshot_refresh_fast():
     """Warm hot-path snapshots for both lanes without slow web narrative calls."""
+    if _should_defer_heavy_job("Snapshot fast refresh"):
+        return
     _refresh_snapshots_for_modes(
         [TradingMode.SWING, TradingMode.POSITION],
         allow_perplexity=False,
@@ -70,6 +106,8 @@ def job_snapshot_refresh_fast():
 
 def job_snapshot_refresh_narrative():
     """Refresh slower narrative/RAG-rich snapshots on a looser cadence."""
+    if _should_defer_heavy_job("Snapshot narrative refresh"):
+        return
     _refresh_snapshots_for_modes(
         [TradingMode.POSITION],
         allow_perplexity=True,
@@ -969,6 +1007,8 @@ def job_1hour_evaluation():
 def job_1hour_telegram():
     """Batch stored Telegram messages into LightRAG every 1 hour (Real-time listener handles collection)."""
     try:
+        if _should_defer_heavy_job("1-hour Telegram job"):
+            return
         logger.info("Running 1-hour Telegram batching job")
 
         # 1. Synthesize and ingest to LightRAG
@@ -987,6 +1027,8 @@ def job_1hour_telegram():
 def job_1hour_crypto_news():
     """Fetch Free Crypto News API and ingest to LightRAG every 1 hour."""
     try:
+        if _should_defer_heavy_job("1-hour Crypto News API job"):
+            return
         logger.info("Running 1-hour Crypto News API fetch job")
         news_collector.fetch_and_ingest()
     except Exception as e:
@@ -1033,7 +1075,7 @@ def job_daily_safe_cleanup():
 
 
 def job_daily_precision():
-    """00:00 UTC serial: BTC POSITION -> ETH POSITION.
+    """Daily UTC serial: BTC POSITION -> ETH POSITION.
     Runs high-quality analysis once per symbol and persists dual-lane playbooks.
     """
     try:
@@ -1067,7 +1109,10 @@ def main():
     mode = settings.trading_mode
 
     logger.info(f"Starting Trading System (mode={mode.value})")
-    logger.info("  Primary analysis cadence (UTC): daily_precision=00:00 | hourly_monitor=hh:15 | market_status=hh:20")
+    logger.info(
+        f"  Primary analysis cadence (UTC): daily_precision={_daily_precision_label_utc()} | "
+        "hourly_monitor=hh:15 | market_status=hh:20"
+    )
     logger.info(f"  Timeframes: {settings.analysis_timeframes}")
     logger.info(f"  Chart timeframe: {settings.chart_timeframe}")
     logger.info(f"  Candle limit: {settings.candle_limit}")
@@ -1217,10 +1262,13 @@ def main():
         max_instances=1,
     )
 
-    # ✨✨ Daily Precision (00:00 UTC) [BTC/ETH] SWING/POSITION Playbook generation ✨✨
+    # ✨✨ Daily Precision (UTC-configurable) [BTC/ETH] SWING/POSITION Playbook generation ✨✨
     scheduler_config.scheduler.add_job(
         job_daily_precision,
-        CronTrigger(hour=0, minute=0),
+        CronTrigger(
+            hour=int(getattr(settings, "DAILY_PRECISION_HOUR_UTC", 0)),
+            minute=int(getattr(settings, "DAILY_PRECISION_MINUTE_UTC", 30)),
+        ),
         id='job_daily_precision',
         max_instances=1,
     )
@@ -1309,8 +1357,8 @@ def main():
     scheduler_config.scheduler.start()
     logger.info("Scheduler started.")
     logger.info(
-        "Cadence(UTC): daily_precision=00:00 | snapshot_fast=hh:*/5 | snapshot_narrative=hh:02,32 | "
-        "telegram_batch=hh:05 | crypto_news=hh:10 | hourly_monitor=hh:15 | market_status=hh:20 | daily_rollup=00:40 | "
+        f"Cadence(UTC): daily_precision={_daily_precision_label_utc()} | snapshot_fast=hh:*/5 | "
+        "snapshot_narrative=hh:02,32 | telegram_batch=hh:05 | crypto_news=hh:10 | hourly_monitor=hh:15 | market_status=hh:20 | daily_rollup=00:40 | "
         "hourly_eval=hh:45 | gcs_archive=01:00 | safe_cleanup=01:20"
     )
 

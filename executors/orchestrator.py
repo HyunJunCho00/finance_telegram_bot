@@ -1810,6 +1810,7 @@ class Orchestrator:
         self.symbols = settings.trading_symbols
         self._graph = None
         self._analysis_locks: Dict[str, threading.Lock] = {}
+        self._daily_precision_active = threading.Event()
         ensure_registered()
 
     @property
@@ -1826,6 +1827,9 @@ class Orchestrator:
             except Exception as e:
                 logger.error(f"LangGraph build error: {e}")
         return self._graph
+
+    def is_daily_precision_running(self) -> bool:
+        return self._daily_precision_active.is_set()
 
     def run_analysis(
         self,
@@ -1941,14 +1945,21 @@ class Orchestrator:
         notification_context: str = "analysis",
         playbook_context: Optional[Dict] = None,
     ) -> Dict:
+        logger.info(
+            f"Snapshot analysis start: {symbol}/{mode.value} "
+            f"context={notification_context} perplexity={'on' if allow_perplexity else 'off'}"
+        )
         self.refresh_snapshot_with_mode(symbol, mode, allow_perplexity=allow_perplexity)
-        return run_snapshot_analysis_hot_path(
+        logger.info(f"Snapshot analysis refreshed: {symbol}/{mode.value}")
+        result = run_snapshot_analysis_hot_path(
             symbol,
             mode,
             wait_budget_s=wait_budget_s,
             notification_context=notification_context,
             playbook_context=playbook_context,
         )
+        logger.info(f"Snapshot analysis done: {symbol}/{mode.value} context={notification_context}")
+        return result
 
     def run_snapshot_trigger_with_mode(
         self,
@@ -2217,76 +2228,92 @@ class Orchestrator:
         BTC POSITION -> ETH POSITION. Each run should include daily_dual_plan from Judge.
         """
         import time as _time
+        if self._daily_precision_active.is_set():
+            logger.warning("Daily Precision Run already active; skipping duplicate request.")
+            return
+
         schedule = [
             ("BTCUSDT", TradingMode.POSITION),
             ("ETHUSDT", TradingMode.POSITION),
         ]
-        logger.info("=== Daily Precision Run (00:00 UTC) ===")
-        use_snapshot_hot_path = bool(getattr(settings, "ENABLE_SNAPSHOT_HOT_PATH_DAILY", True))
-        for i, (symbol, mode) in enumerate(schedule):
-            if i > 0 and not use_snapshot_hot_path:
-                logger.info(f"Sleeping 3m before {symbol}/{mode.value} ...")
-                _time.sleep(3 * 60)
-            try:
-                logger.info(f"[Daily] {symbol} {mode.value.upper()} starting...")
-                _clear_symbol_mode_caches(symbol, mode)
-
-                if use_snapshot_hot_path:
-                    hot_result = self.run_snapshot_analysis_with_mode(
-                        symbol,
-                        mode,
-                        allow_perplexity=True,
-                        wait_budget_s=5.0,
-                        notification_context="scheduled_daily",
+        logger.info("=== Daily Precision Run ===")
+        self._daily_precision_active.set()
+        try:
+            use_snapshot_hot_path = bool(getattr(settings, "ENABLE_SNAPSHOT_HOT_PATH_DAILY", True))
+            inter_symbol_gap_minutes = max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
+            for i, (symbol, mode) in enumerate(schedule):
+                if i > 0 and inter_symbol_gap_minutes > 0:
+                    logger.info(
+                        f"Sleeping {inter_symbol_gap_minutes}m before {symbol}/{mode.value} "
+                        "to stagger daily precision load..."
                     )
-                    final_decision = hot_result.get("final_decision", {}) if isinstance(hot_result, dict) else {}
-                    state = {
+                    _time.sleep(inter_symbol_gap_minutes * 60)
+                try:
+                    logger.info(f"[Daily] {symbol} {mode.value.upper()} starting...")
+                    _clear_symbol_mode_caches(symbol, mode)
+
+                    if use_snapshot_hot_path:
+                        logger.info(f"[Daily] {symbol} {mode.value.upper()} refreshing snapshot + hot path...")
+                        hot_result = self.run_snapshot_analysis_with_mode(
+                            symbol,
+                            mode,
+                            allow_perplexity=True,
+                            wait_budget_s=5.0,
+                            notification_context="scheduled_daily",
+                        )
+                        logger.info(f"[Daily] {symbol} {mode.value.upper()} hot path returned.")
+                        final_decision = hot_result.get("final_decision", {}) if isinstance(hot_result, dict) else {}
+                        state = {
+                            "symbol": symbol,
+                            "mode": mode.value,
+                            "final_decision": final_decision,
+                            "daily_dual_plan": (
+                                final_decision.get("daily_dual_plan", {})
+                                if isinstance(final_decision, dict)
+                                else {}
+                            ),
+                        }
+                    elif self.graph:
+                        logger.info(f"[Daily] {symbol} {mode.value.upper()} running LangGraph path...")
+                        state = self._run_with_langgraph(
+                            symbol,
+                            mode,
+                            is_emergency=False,
+                            execute_trades=True,
+                            allow_perplexity=True,
+                            notification_context="scheduled_daily",
+                        )
+                    else:
+                        logger.info(f"[Daily] {symbol} {mode.value.upper()} running sequential path...")
+                        state = self._run_sequential(
+                            symbol,
+                            mode,
+                            is_emergency=False,
+                            execute_trades=True,
+                            allow_perplexity=True,
+                            notification_context="scheduled_daily",
+                        )
+
+                    playbook_decision = state if isinstance(state, dict) else {}
+                    if isinstance(state, dict) and isinstance(state.get("final_decision"), dict):
+                        playbook_decision = state.get("final_decision", {}) or {}
+                    playbook_dual_plan = {}
+                    if isinstance(state, dict):
+                        playbook_dual_plan = state.get("daily_dual_plan", {}) or {}
+                    if not playbook_dual_plan and isinstance(playbook_decision, dict):
+                        playbook_dual_plan = playbook_decision.get("daily_dual_plan", {}) or {}
+                    logger.info(f"[Daily] {symbol} {mode.value.upper()} persisting playbook...")
+                    node_generate_playbook({
                         "symbol": symbol,
                         "mode": mode.value,
-                        "final_decision": final_decision,
-                        "daily_dual_plan": (
-                            final_decision.get("daily_dual_plan", {})
-                            if isinstance(final_decision, dict)
-                            else {}
-                        ),
-                    }
-                elif self.graph:
-                    state = self._run_with_langgraph(
-                        symbol,
-                        mode,
-                        is_emergency=False,
-                        execute_trades=True,
-                        allow_perplexity=True,
-                        notification_context="scheduled_daily",
-                    )
-                else:
-                    state = self._run_sequential(
-                        symbol,
-                        mode,
-                        is_emergency=False,
-                        execute_trades=True,
-                        allow_perplexity=True,
-                        notification_context="scheduled_daily",
-                    )
-
-                # Generate & persist playbook (uses last completed state via global caches)
-                playbook_decision = state if isinstance(state, dict) else {}
-                if isinstance(state, dict) and isinstance(state.get("final_decision"), dict):
-                    playbook_decision = state.get("final_decision", {}) or {}
-                playbook_dual_plan = {}
-                if isinstance(state, dict):
-                    playbook_dual_plan = state.get("daily_dual_plan", {}) or {}
-                if not playbook_dual_plan and isinstance(playbook_decision, dict):
-                    playbook_dual_plan = playbook_decision.get("daily_dual_plan", {}) or {}
-                node_generate_playbook({
-                    "symbol": symbol,
-                    "mode": mode.value,
-                    "final_decision": playbook_decision,
-                    "daily_dual_plan": playbook_dual_plan,
-                })
-                logger.info(f"[Daily] {symbol} {mode.value.upper()} done.")
-            except Exception as e:
-                logger.error(f"Daily playbook error {symbol}/{mode.value}: {e}")
+                        "final_decision": playbook_decision,
+                        "daily_dual_plan": playbook_dual_plan,
+                    })
+                    logger.info(f"[Daily] {symbol} {mode.value.upper()} done.")
+                except Exception as e:
+                    logger.error(f"Daily playbook error {symbol}/{mode.value}: {e}")
+        finally:
+            self._daily_precision_active.clear()
 
     def run_hourly_monitor(self) -> None:
         """Hourly: evaluate each symbol/mode against its Daily Playbook.

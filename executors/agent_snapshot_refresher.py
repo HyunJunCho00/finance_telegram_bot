@@ -238,6 +238,7 @@ def refresh_snapshot_bundle(symbol: str, mode: TradingMode, *, allow_perplexity:
     logger.info(f"Refreshing snapshot bundle for {symbol}/{mode.value} (perplexity={'on' if allow_perplexity else 'off'})")
     refresh_context_bundle(symbol, mode, allow_perplexity=allow_perplexity)
     refresh_chart_bundle(symbol, mode, allow_perplexity=allow_perplexity)
+    logger.info(f"Snapshot bundle ready for {symbol}/{mode.value}")
     performance_telemetry.log_snapshot_refresh(
         symbol=symbol,
         mode=mode.value,
