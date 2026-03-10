@@ -503,7 +503,8 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             "- technical_snapshot contains swing/position/events.\n"
             "- Always include BOTH swing and position core lines per symbol.\n"
             "- Mention CHoCH/MSB only if explicitly present.\n"
-            "- In 실행 레벨, include nearest support, nearest resistance, and invalidation trigger.\n"
+            "- In 실행 레벨, include daily playbook bias, max allocation, first entry trigger, and invalidation trigger when present.\n"
+            "- Mention market_regime and onchain_snapshot briefly for each symbol when present.\n"
             "- Add <b>🔎 이벤트 상세</b> ONLY when events.has_event=true.\n"
             "- Keep concise and practical."
         )
@@ -556,8 +557,15 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 "choch": ms.get("choch"),
                 "msb": ms.get("msb"),
                 "realtime_pressure": {
+                    "signal": pressure.get("signal"),
                     "summary": pressure.get("summary"),
                     "details": (pressure.get("details") or [])[:2],
+                    "metrics": {
+                        "price_change_5m_pct": ((pressure.get("metrics") or {}).get("price_change_5m_pct")),
+                        "whale_delta_5m_usd": ((pressure.get("metrics") or {}).get("whale_delta_5m_usd")),
+                        "short_liq_5m_usd": ((pressure.get("metrics") or {}).get("short_liq_5m_usd")),
+                        "long_liq_5m_usd": ((pressure.get("metrics") or {}).get("long_liq_5m_usd")),
+                    },
                 },
                 "levels": {
                     "nearest_support": sw.get("nearest_support"),
@@ -586,6 +594,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 "price": row.get("price"),
                 "funding_rate": row.get("funding_rate"),
                 "volatility": row.get("volatility"),
+                "market_regime": row.get("market_regime"),
                 "swing": _compact_mode_snapshot(tech.get("swing", {}) or {}),
                 "position": _compact_mode_snapshot(tech.get("position", {}) or {}),
                 "events": {
@@ -596,8 +605,10 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 "onchain_snapshot": {
                     "risk_bias": onchain.get("risk_bias"),
                     "bias_score": onchain.get("bias_score"),
+                    "regime_flags": onchain.get("regime_flags", {}),
                     "is_stale": onchain.get("is_stale"),
                 },
+                "playbook_snapshot": row.get("playbook_snapshot", {}) if isinstance(row.get("playbook_snapshot"), dict) else {},
             }
 
         intel = str((indicators or {}).get("TELEGRAM_INTEL", "") or "").strip()
@@ -731,7 +742,10 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         lines.append("<b>🧭 구조/추세</b>")
         for symbol, row in symbol_rows:
             swing, position, _ = _mode_views(row)
-            lines.append(f"- <b>{symbol}</b> { _line_for_mode(swing, 'SWING') }")
+            regime = row.get("market_regime", "UNKNOWN")
+            onchain = row.get("onchain_snapshot", {}) if isinstance(row.get("onchain_snapshot"), dict) else {}
+            onchain_bias = onchain.get("risk_bias", "N/A")
+            lines.append(f"- <b>{symbol}</b> Regime={regime} | Onchain={onchain_bias} | { _line_for_mode(swing, 'SWING') }")
             lines.append(f"  - { _line_for_mode(position, 'POSITION') }")
 
         lines.append("<b>📐 빗각·지지/저항</b>")
@@ -762,10 +776,15 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             price = row.get("price")
             funding = row.get("funding_rate")
             vol = row.get("volatility")
+            onchain = row.get("onchain_snapshot", {}) if isinstance(row.get("onchain_snapshot"), dict) else {}
+            bias_score = onchain.get("bias_score")
+            stale = onchain.get("is_stale")
             price_txt = f"${price:,.2f}" if isinstance(price, (int, float)) else "N/A"
             funding_txt = f"{funding:+.5f}" if isinstance(funding, (int, float)) else "N/A"
             vol_txt = f"{vol:+.2f}%" if isinstance(vol, (int, float)) else "N/A"
-            lines.append(f"- <b>{symbol}</b> 가격 {price_txt} | 펀딩 {funding_txt} | 변동성 {vol_txt}")
+            score_txt = f"{bias_score:+.2f}" if isinstance(bias_score, (int, float)) else "N/A"
+            stale_txt = "stale" if stale else "fresh"
+            lines.append(f"- <b>{symbol}</b> 가격 {price_txt} | 펀딩 {funding_txt} | 변동성 {vol_txt} | 온체인점수 {score_txt} ({stale_txt})")
 
         lines.append("<b>🧩 실행 레벨</b>")
         for symbol, row in symbol_rows:
@@ -774,8 +793,18 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             sw4h = swing.get(f"swing_levels_{tf}", {}) or {}
             support = sw4h.get("nearest_support", "N/A")
             resistance = sw4h.get("nearest_resistance", "N/A")
-            invalidation = support
-            lines.append(f"- <b>{symbol}</b> 지지 {support} | 저항 {resistance} | 무효화 트리거 {invalidation}")
+            playbook = row.get("playbook_snapshot", {}) if isinstance(row.get("playbook_snapshot"), dict) else {}
+            position_pb = playbook.get("position", {}) if isinstance(playbook.get("position", {}), dict) else {}
+            bias = position_pb.get("source_decision", "HOLD")
+            allocation = position_pb.get("max_allocation_pct")
+            entry = ", ".join(position_pb.get("entry_conditions", [])[:1]) if isinstance(position_pb.get("entry_conditions"), list) else ""
+            invalidation = ", ".join(position_pb.get("invalidation_conditions", [])[:1]) if isinstance(position_pb.get("invalidation_conditions"), list) else support
+            alloc_txt = f"{allocation}%" if allocation is not None else "N/A"
+            lines.append(
+                f"- <b>{symbol}</b> Bias {bias} | MaxAlloc {alloc_txt} | 지지 {support} | 저항 {resistance}"
+                + (f" | 진입 {entry}" if entry else "")
+                + f" | 무효화 {invalidation}"
+            )
 
         lines.append("<b>🔎 이벤트 상세</b>")
         any_event = False

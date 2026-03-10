@@ -31,11 +31,32 @@ import base64
 from datetime import datetime, timezone, timedelta
 
 
+def _daily_precision_schedule_hours_utc() -> list[int]:
+    raw = str(getattr(settings, "DAILY_PRECISION_HOURS_UTC", "") or "").strip()
+    parsed: list[int] = []
+    if raw:
+        for chunk in raw.split(","):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            try:
+                hour = int(chunk)
+            except Exception:
+                continue
+            if 0 <= hour <= 23:
+                parsed.append(hour)
+    if parsed:
+        return sorted(set(parsed))
+    return [int(getattr(settings, "DAILY_PRECISION_HOUR_UTC", 0))]
+
+
+def _daily_precision_schedule_hours_expr_utc() -> str:
+    return ",".join(str(hour) for hour in _daily_precision_schedule_hours_utc())
+
+
 def _daily_precision_label_utc() -> str:
-    return (
-        f"{int(getattr(settings, 'DAILY_PRECISION_HOUR_UTC', 0)):02d}:"
-        f"{int(getattr(settings, 'DAILY_PRECISION_MINUTE_UTC', 30)):02d}"
-    )
+    minute = int(getattr(settings, "DAILY_PRECISION_MINUTE_UTC", 30))
+    return ", ".join(f"{hour:02d}:{minute:02d}" for hour in _daily_precision_schedule_hours_utc())
 
 
 def _daily_precision_protection_window_minutes() -> int:
@@ -44,13 +65,18 @@ def _daily_precision_protection_window_minutes() -> int:
 
 def _is_daily_precision_protection_window(now_utc: datetime | None = None) -> bool:
     now = now_utc or datetime.now(timezone.utc)
-    hour = int(getattr(settings, "DAILY_PRECISION_HOUR_UTC", 0))
     minute = int(getattr(settings, "DAILY_PRECISION_MINUTE_UTC", 30))
     protection_minutes = _daily_precision_protection_window_minutes()
-    scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    window_start = scheduled - timedelta(minutes=protection_minutes // 2)
-    window_end = scheduled + timedelta(minutes=protection_minutes)
-    return window_start <= now <= window_end
+    base_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    for day_offset in (-1, 0, 1):
+        day_anchor = base_day + timedelta(days=day_offset)
+        for hour in _daily_precision_schedule_hours_utc():
+            scheduled = day_anchor.replace(hour=hour, minute=minute)
+            window_start = scheduled - timedelta(minutes=protection_minutes // 2)
+            window_end = scheduled + timedelta(minutes=protection_minutes)
+            if window_start <= now <= window_end:
+                return True
+    return False
 
 
 def _should_defer_heavy_job(job_name: str) -> bool:
@@ -370,6 +396,49 @@ def _get_recent_market_regime(symbol: str) -> str:
     return "UNKNOWN"
 
 
+def _format_playbook_conditions(items: list, limit: int = 2) -> list[str]:
+    formatted: list[str] = []
+    for item in (items or [])[:limit]:
+        if isinstance(item, dict):
+            metric = str(item.get("metric") or "metric")
+            op = str(item.get("operator") or "?")
+            value = item.get("value")
+            formatted.append(f"{metric} {op} {value}")
+        elif isinstance(item, str) and item.strip():
+            formatted.append(item.strip())
+    return formatted
+
+
+def _get_latest_playbook_snapshot(symbol: str) -> dict:
+    try:
+        response = (
+            db.client.table("daily_playbooks")
+            .select("mode,source_decision,playbook,created_at")
+            .eq("symbol", symbol)
+            .order("created_at", desc=True)
+            .limit(6)
+            .execute()
+        )
+        rows = response.data or []
+        snapshot: dict = {}
+        for row in rows:
+            mode = str(row.get("mode") or "").lower()
+            if mode not in {"swing", "position"} or mode in snapshot:
+                continue
+            playbook = row.get("playbook", {}) if isinstance(row.get("playbook", {}), dict) else {}
+            snapshot[mode] = {
+                "source_decision": str(row.get("source_decision") or "HOLD").upper(),
+                "max_allocation_pct": playbook.get("max_allocation_pct"),
+                "entry_conditions": _format_playbook_conditions(playbook.get("entry_conditions", [])),
+                "invalidation_conditions": _format_playbook_conditions(playbook.get("invalidation_conditions", []), limit=1),
+                "created_at": row.get("created_at"),
+            }
+        return snapshot
+    except Exception as e:
+        logger.warning(f"Failed to load playbook snapshot for {symbol}: {e}")
+        return {}
+
+
 def _detect_technical_events(symbol: str, swing: dict, position: dict, funding: float | None,
                              volatility: float | None, regime: str = "UNKNOWN") -> dict:
     """Detect event flags for conditional detailed commentary."""
@@ -642,6 +711,7 @@ def job_routine_market_status():
             swing_snapshot = _build_mode_technical_snapshot(symbol, TradingMode.SWING)
             position_snapshot = _build_mode_technical_snapshot(symbol, TradingMode.POSITION)
             latest_regime = _get_recent_market_regime(symbol)
+            indicators[symbol]["market_regime"] = latest_regime
             indicators[symbol]["technical_snapshot"] = {
                 "swing": swing_snapshot,
                 "position": position_snapshot,
@@ -659,6 +729,7 @@ def job_routine_market_status():
                     regime=latest_regime,
                 ),
             }
+            indicators[symbol]["playbook_snapshot"] = _get_latest_playbook_snapshot(symbol)
             try:
                 onchain = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
                 if onchain:
@@ -1266,7 +1337,7 @@ def main():
     scheduler_config.scheduler.add_job(
         job_daily_precision,
         CronTrigger(
-            hour=int(getattr(settings, "DAILY_PRECISION_HOUR_UTC", 0)),
+            hour=_daily_precision_schedule_hours_expr_utc(),
             minute=int(getattr(settings, "DAILY_PRECISION_MINUTE_UTC", 30)),
         ),
         id='job_daily_precision',

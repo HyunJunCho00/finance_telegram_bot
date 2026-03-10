@@ -223,6 +223,58 @@ class AIClient:
     def _is_critical_role(self, role: str) -> bool:
         return role in ["judge", "risk_eval", "meta_regime", "self_correction"]
 
+    def _role_importance_tier(self, role: str) -> str:
+        role = (role or "").lower()
+        if role in {"judge", "self_correction"}:
+            return "decision"
+        if role in {"meta_regime", "macro", "risk_eval", "risk_eval_fallback", "trigger_veto", "monitor_hourly"}:
+            return "strategy"
+        if role in {"vlm_geometric", "vlm_analysis", "vlm_telegram_chart", "rag_vision"}:
+            return "vision"
+        return "light"
+
+    def _parse_model_pool(self, raw_value: str) -> List[str]:
+        return [item.strip() for item in str(raw_value or "").split(",") if item.strip()]
+
+    def _cloudflare_pool_for_role(self, role: str) -> List[str]:
+        tier = self._role_importance_tier(role)
+        if tier == "decision":
+            return self._parse_model_pool(getattr(settings, "MODEL_CF_POOL_DECISION", ""))
+        if tier == "strategy":
+            return self._parse_model_pool(getattr(settings, "MODEL_CF_POOL_STRATEGY", ""))
+        if tier == "vision":
+            return self._parse_model_pool(getattr(settings, "MODEL_CF_POOL_VISION", ""))
+        return self._parse_model_pool(getattr(settings, "MODEL_CF_POOL_LIGHT", ""))
+
+    def _try_cloudflare_fallback(
+        self,
+        role: str,
+        system_prompt: str,
+        msg: str,
+        max_tokens: int,
+    ) -> str:
+        pool = self._cloudflare_pool_for_role(role)
+        if not pool:
+            return ""
+
+        for model_id in pool:
+            if not self._is_model_available(model_id):
+                logger.debug(f"Circuit Breaker: Skipping Cloudflare candidate [{model_id}]")
+                continue
+
+            logger.info(f"Cloudflare Fallback ({role}): Trying [{model_id}]...")
+            result = self._cf_generator.generate(
+                system_prompt,
+                msg,
+                max_tokens=max_tokens,
+                model=model_id,
+            )
+            if result:
+                logger.success(f"Cloudflare Fallback SUCCEEDED for [{role}] with [{model_id}]")
+                return result
+
+        return ""
+
     def _cerebras_fallback_model(self, role: str) -> str:
         role = (role or "").lower()
         if role == "news_brief_final":
@@ -365,7 +417,7 @@ class AIClient:
 
         logger.warning(f"Gemini {model_id} exhausted or failed for role {role}. Triggering relay...")
         if self._is_critical_role(role) and self.cerebras_client:
-            return self._generate_openai_compat(
+            result = self._generate_openai_compat(
                 self.cerebras_client,
                 settings.MODEL_META_REGIME,
                 system_prompt,
@@ -384,8 +436,14 @@ class AIClient:
                 None,
                 name="Groq(Relay)",
             )
+            if result:
+                return result
+            result = self._try_cloudflare_fallback(role, system_prompt, msg, max_tokens)
+            if result:
+                return result
+            return ""
 
-        return self._generate_openai_compat(
+        result = self._generate_openai_compat(
             self.groq_client,
             "llama-3.1-8b-instant",
             system_prompt,
@@ -395,6 +453,12 @@ class AIClient:
             None,
             name="Groq(Relay)",
         )
+        if result:
+            return result
+        result = self._try_cloudflare_fallback(role, system_prompt, msg, max_tokens)
+        if result:
+            return result
+        return ""
 
     def _handle_cerebras_backend(
         self,
@@ -422,7 +486,7 @@ class AIClient:
         logger.warning(f"Cerebras failed for {model_id}, falling back to Groq")
         fallback_model = self._cerebras_fallback_model(role)
         if self.groq_client:
-            return self._handle_groq_backend(
+            result = self._handle_groq_backend(
                 fallback_model,
                 role,
                 system_prompt,
@@ -431,6 +495,11 @@ class AIClient:
                 temperature,
                 None,
             )
+            if result:
+                return result
+        result = self._try_cloudflare_fallback(role, system_prompt, msg, max_tokens)
+        if result:
+            return result
         logger.warning("Groq client unavailable after Cerebras failure. Falling back to Gemini.")
         return self._generate_gemini(
             self._gemini_default,
@@ -496,6 +565,10 @@ class AIClient:
                 logger.success(f"Groq Relay SUCCEEDED for [{role}] with [{alt_model}]")
                 return result
 
+        result = self._try_cloudflare_fallback(role, system_prompt, msg, max_tokens)
+        if result:
+            return result
+
         if is_critical:
             logger.warning(f"All Groq models exhausted for critical role [{role}]. Trying Gemini fallback...")
             return self._generate_gemini(
@@ -509,7 +582,7 @@ class AIClient:
             )
 
         logger.warning(f"All Groq relay models failed for [{role}], falling back to basic providers")
-        return self._cf_generator.generate(system_prompt, msg, max_tokens) or self._generate_gemini(
+        return self._generate_gemini(
             self._gemini_default,
             self.default_model_id,
             system_prompt,

@@ -139,6 +139,7 @@ class Settings(BaseSettings):
 
     VOLATILITY_THRESHOLD: float = 3.0
     ANALYSIS_INTERVAL_HOURS: int = 4
+    DAILY_PRECISION_HOURS_UTC: str = "1,13"
     DAILY_PRECISION_HOUR_UTC: int = 1
     DAILY_PRECISION_MINUTE_UTC: int = 30
     DAILY_PRECISION_PROTECTION_MINUTES: int = 20
@@ -200,6 +201,30 @@ class Settings(BaseSettings):
     # 8. cloudflare_triage / cloudflare_rerank (CF infra)
     MODEL_CF_TRIAGE: str = "@cf/meta/llama-3-8b-instruct-awq"
     MODEL_CF_RERANK: str = "@cf/baai/bge-reranker-base"
+    MODEL_CF_POOL_DECISION: str = (
+        "@cf/openai/gpt-oss-120b,"
+        "@cf/mistralai/mistral-small-3.1-24b-instruct,"
+        "@cf/qwen/qwen3-30b-a3b-fp8,"
+        "@cf/zai-org/glm-4.7-flash"
+    )
+    MODEL_CF_POOL_STRATEGY: str = (
+        "@cf/qwen/qwen3-30b-a3b-fp8,"
+        "@cf/openai/gpt-oss-20b,"
+        "@cf/zai-org/glm-4.7-flash,"
+        "@cf/ibm-granite/granite-4.0-h-micro"
+    )
+    MODEL_CF_POOL_LIGHT: str = (
+        "@cf/ibm-granite/granite-4.0-h-micro,"
+        "@cf/zai-org/glm-4.7-flash,"
+        "@cf/meta/llama-4-scout-17b-16e-instruct,"
+        "@cf/qwen/qwen3-30b-a3b-fp8"
+    )
+    MODEL_CF_POOL_VISION: str = (
+        "@cf/mistralai/mistral-small-3.1-24b-instruct,"
+        "@cf/meta/llama-4-scout-17b-16e-instruct,"
+        "@cf/google/gemma-3-12b-it,"
+        "@cf/meta/llama-3.2-11b-vision-instruct"
+    )
 
     # 9. claude_standby Anthropic (reserved, not in default routing)
     MODEL_CLAUDE_STANDBY: str = "claude-sonnet-4-6"

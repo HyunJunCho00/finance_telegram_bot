@@ -25,6 +25,20 @@ import json
 from io import BytesIO
 import base64
 
+
+def _precision_schedule_labels_utc() -> str:
+    raw = str(getattr(settings, "DAILY_PRECISION_HOURS_UTC", "") or "").strip()
+    minute = int(getattr(settings, "DAILY_PRECISION_MINUTE_UTC", 30))
+    hours = []
+    if raw:
+        for chunk in raw.split(","):
+            chunk = chunk.strip()
+            if chunk.isdigit():
+                hours.append(int(chunk))
+    if not hours:
+        hours = [int(getattr(settings, "DAILY_PRECISION_HOUR_UTC", 0))]
+    return ", ".join(f"{hour:02d}:{minute:02d}" for hour in sorted(set(hours)))
+
 # --- 자연어 채팅 핸들러용 상수 ---
 
 _CHAT_SYSTEM = """당신은 독립형 트레이딩봇의 AI 어시스턴트입니다. 
@@ -899,7 +913,7 @@ class TradingBot:
                     "position": {"venue": "binance_spot_upbit", "direction": "long_only"},
                     "chart_enabled": settings.should_use_chart,
                     "primary_scheduler_utc": {
-                        "job_daily_precision": f"{int(getattr(settings, 'DAILY_PRECISION_HOUR_UTC', 0)):02d}:{int(getattr(settings, 'DAILY_PRECISION_MINUTE_UTC', 30)):02d}",
+                        "job_daily_precision": _precision_schedule_labels_utc(),
                         "job_hourly_monitor": "hh:15",
                         "job_routine_market_status": "hh:20",
                     },
