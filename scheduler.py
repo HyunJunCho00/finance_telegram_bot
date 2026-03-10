@@ -28,6 +28,7 @@ import sys
 import threading
 import json
 import base64
+import re
 from datetime import datetime, timezone, timedelta
 
 
@@ -315,6 +316,11 @@ def _build_mode_technical_snapshot(symbol: str, mode: TradingMode) -> dict:
         structure = analysis.get("structure", {}) or {}
         tq = analysis.get("trendline_quality", {}) or {}
         zones = (analysis.get("confluence_zones", []) or [])[:2]
+        scenario_engine = analysis.get("scenario_engine", {}) or {}
+        active_setup = scenario_engine.get("active_setup", {}) or {}
+        liquidity_map = scenario_engine.get("liquidity_map", {}) or {}
+        volume_profile = (analysis.get("volume_profile", {}) or {}).get(primary_tf, {}) or {}
+        fvg_primary = (analysis.get("fvg", {}) or {}).get(primary_tf, []) or []
 
         sup_line = structure.get(f"support_{primary_tf}")
         res_line = structure.get(f"resistance_{primary_tf}")
@@ -370,6 +376,49 @@ def _build_mode_technical_snapshot(symbol: str, mode: TradingMode) -> dict:
             },
             "realtime_pressure": _build_realtime_pressure(symbol, df),
             "confluence_zones": zones,
+            "philosophy_snapshot": {
+                "profile": scenario_engine.get("profile", getattr(settings, "PHILOSOPHY_PROFILE", "inbum_shipalnam")),
+                "higher_timeframe_bias": scenario_engine.get("higher_timeframe_bias"),
+                "execution_bias": scenario_engine.get("execution_bias"),
+                "scenario_revision_reason": scenario_engine.get("scenario_revision_reason"),
+                "active_setup": {
+                    "side": active_setup.get("side"),
+                    "trigger": active_setup.get("trigger"),
+                    "status": active_setup.get("status"),
+                    "entry_zone_low": active_setup.get("entry_zone_low"),
+                    "entry_zone_high": active_setup.get("entry_zone_high"),
+                    "entry_reference": active_setup.get("entry_reference"),
+                    "invalidation": active_setup.get("invalidation"),
+                    "tp1": active_setup.get("tp1"),
+                    "tp2": active_setup.get("tp2"),
+                    "risk_box_pct": active_setup.get("risk_box_pct"),
+                    "breakeven_rule": active_setup.get("breakeven_rule"),
+                    "split_entries": (active_setup.get("split_entries") or [])[:3],
+                    "trigger_conditions": (active_setup.get("trigger_conditions") or [])[:2],
+                    "invalidation_conditions": (active_setup.get("invalidation_conditions") or [])[:1],
+                },
+                "liquidity_map": {
+                    "liquidity_sweep": liquidity_map.get("liquidity_sweep", {}),
+                    "sr_flip": liquidity_map.get("sr_flip", {}),
+                    "bpr_zone": liquidity_map.get("bpr_zone", {}),
+                },
+                "confluence_count": len(zones),
+                "volume_profile": {
+                    "poc": volume_profile.get("poc"),
+                    "value_area_high": volume_profile.get("value_area_high"),
+                    "value_area_low": volume_profile.get("value_area_low"),
+                },
+                "fvg_summary": [
+                    {
+                        "type": gap.get("type"),
+                        "gap_low": gap.get("gap_low"),
+                        "gap_high": gap.get("gap_high"),
+                        "filled": gap.get("filled"),
+                    }
+                    for gap in fvg_primary[:2]
+                    if isinstance(gap, dict)
+                ],
+            },
         }
     except Exception as e:
         logger.warning(f"Failed to build {mode.value} technical snapshot for {symbol}: {e}")
@@ -437,6 +486,15 @@ def _get_latest_playbook_snapshot(symbol: str) -> dict:
     except Exception as e:
         logger.warning(f"Failed to load playbook snapshot for {symbol}: {e}")
         return {}
+
+
+def _looks_english_dominant(text: str) -> bool:
+    sample = str(text or "").strip()
+    if not sample:
+        return False
+    hangul_count = len(re.findall(r"[가-힣]", sample))
+    latin_count = len(re.findall(r"[A-Za-z]", sample))
+    return latin_count >= 40 and latin_count > max(10, hangul_count * 2)
 
 
 def _detect_technical_events(symbol: str, swing: dict, position: dict, funding: float | None,
@@ -959,6 +1017,28 @@ def job_routine_market_status():
                         max_tokens=900,
                         role="news_brief_final",
                     ) or "최근 1시간 내 주요 뉴스 없음"
+                if _looks_english_dominant(telegram_intel):
+                    logger.warning("news_brief_final returned English-dominant output, rewriting into Korean.")
+                    korean_rewrite_prompt = (
+                        "Rewrite the briefing into natural Korean.\n"
+                        "Output plain text only.\n"
+                        "Keep numbered lines.\n"
+                        "Do not include English lead-in sentences.\n"
+                        "Preserve only factual meaning from the source text."
+                    )
+                    rewritten = ai_client.generate_response(
+                        system_prompt="You are a Korean crypto market editor. Output Korean only.",
+                        user_message=(
+                            f"{korean_rewrite_prompt}\n\n"
+                            f"SOURCE_TEXT:\n{telegram_intel}\n\n"
+                            f"REFERENCE_JSON:\n{json.dumps(final_payload, ensure_ascii=False)}"
+                        ),
+                        temperature=0.1,
+                        max_tokens=900,
+                        role="news_summarize",
+                    ) or telegram_intel
+                    if rewritten.strip():
+                        telegram_intel = rewritten
             else:
                 telegram_intel = "최근 1시간 내 주요 뉴스 없음"
         except Exception as e:

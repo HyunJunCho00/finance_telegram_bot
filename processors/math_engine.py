@@ -177,10 +177,13 @@ class MathEngine:
             if 'low_time' in df.columns:
                 ts1 = df.iloc[x1]['low_time']
                 ts2 = df.iloc[x2]['low_time']
+                # GCS historical rows may have NaT for low_time — fall back to candle timestamp
+                if pd.isna(ts1): ts1 = df.iloc[x1]['timestamp']
+                if pd.isna(ts2): ts2 = df.iloc[x2]['timestamp']
             else:
                 ts1 = df.index[x1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x1]['timestamp']
                 ts2 = df.index[x2] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x2]['timestamp']
-            
+
             # In case timestamps are not datetime yet
             ts1 = pd.to_datetime(ts1, utc=True)
             ts2 = pd.to_datetime(ts2, utc=True)
@@ -220,10 +223,13 @@ class MathEngine:
             if 'high_time' in df.columns:
                 ts1 = df.iloc[x1]['high_time']
                 ts2 = df.iloc[x2]['high_time']
+                # GCS historical rows may have NaT for high_time — fall back to candle timestamp
+                if pd.isna(ts1): ts1 = df.iloc[x1]['timestamp']
+                if pd.isna(ts2): ts2 = df.iloc[x2]['timestamp']
             else:
                 ts1 = df.index[x1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x1]['timestamp']
                 ts2 = df.index[x2] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[x2]['timestamp']
-            
+
             # In case timestamps are not datetime yet
             ts1 = pd.to_datetime(ts1, utc=True)
             ts2 = pd.to_datetime(ts2, utc=True)
@@ -1614,9 +1620,11 @@ class MathEngine:
 
 
     def analyze_market_swing(self, df_1m: pd.DataFrame,
-                              df_1d: Optional[pd.DataFrame] = None) -> Dict:
+                              df_1d: Optional[pd.DataFrame] = None,
+                              df_4h: Optional[pd.DataFrame] = None) -> Dict:
         """SWING mode: 1h, 4h, 1d focus with Fibonacci + volume profile + FVG.
-        df_1d: pre-loaded from GCS if available (for EMA200 on 1d)."""
+        df_1d: pre-loaded from GCS if available (for EMA200 on 1d).
+        df_4h: pre-loaded from GCS if available (for 4h trendline TD points over full history)."""
 
         result = {
             'mode': 'swing',
@@ -1636,8 +1644,11 @@ class MathEngine:
 
         timeframes = {
             '1h': self.resample_to_timeframe(df_1m, '1h'),
-            '4h': self.resample_to_timeframe(df_1m, '4h'),
         }
+
+        # Merge GCS 4h data so TD point search covers full 12-month history
+        df_resampled_4h = self.resample_to_timeframe(df_1m, '4h')
+        timeframes['4h'] = self.merge_history(df_resampled_4h, df_4h)
 
         # Merge GCS 1d data with resampled 1m data for a unified continuum
         df_resampled_1d = self.resample_to_timeframe(df_1m, '1d')
@@ -1905,7 +1916,7 @@ class MathEngine:
         if mode == TradingMode.POSITION:
             result = self.analyze_market_position(df_1m, df_1d=df_1d, df_1w=df_1w)
         else:
-            result = self.analyze_market_swing(df_1m, df_1d=df_1d)
+            result = self.analyze_market_swing(df_1m, df_1d=df_1d, df_4h=df_4h)
             
         # 2. Add custom LTF data if requested (MTFA overlay)
         if timeframe and timeframe not in (None, 'auto'):

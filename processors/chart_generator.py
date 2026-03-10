@@ -995,66 +995,97 @@ class ChartGenerator:
     def _draw_diagonal_line(self, ax, chart_df: pd.DataFrame,
                              line_info: Optional[Dict], value_key: str, color: str,
                              theme: str = 'dark_premium', text_color: str = '#D1D4DC'):
-        """Draw diagonal support/resistance trendline as a straight screen-space segment."""
+        """Draw diagonal support/resistance trendline from first TD point to right edge.
+
+        Fix: The line starts at ts1's actual chart x-position (not always x=0).
+        When TD points are recent (few weeks), starting from x=0 (12 months ago)
+        caused massive backward extrapolation → wrong y values → clipped to chart
+        corner → visually broken steep lines.
+        """
         if not line_info or 'point1' not in line_info or 'point2' not in line_info:
             return
-        
+
         try:
             pt1 = line_info['point1']
             pt2 = line_info['point2']
-            
+
             ts1, y1 = pt1
             ts2, y2 = pt2
-            
-            # chart_df index is datetime
+
+            # chart_df index is a UTC-aware DatetimeIndex
             chart_start = chart_df.index[0]
-            chart_end = chart_df.index[-1]
-            
-            # Ensure both are timezone aware for subtraction
-            # pd.Timestamp.utcnow().tzinfo returns None in pandas 2.x → use tz_localize instead
+            chart_end   = chart_df.index[-1]
+
+            # Ensure all timestamps are timezone-aware (UTC)
             if ts1.tzinfo is None: ts1 = ts1.tz_localize('UTC')
             if ts2.tzinfo is None: ts2 = ts2.tz_localize('UTC')
-            
-            # Calculate slope in units of price per second
+            if chart_start.tzinfo is None: chart_start = chart_start.tz_localize('UTC')
+            if chart_end.tzinfo is None:   chart_end   = chart_end.tz_localize('UTC')
+
+            # Calculate slope in price-per-second
             dt = (ts2 - ts1).total_seconds()
             if dt == 0:
                 return
             slope_sec = (y2 - y1) / dt
-            
-            # Project line to the edges of the visible chart window
-            # Start point (left edge)
-            if chart_start.tzinfo is None: chart_start = chart_start.tz_localize('UTC')
-            dt_start = (chart_start - ts1).total_seconds()
-            y_start = y1 + slope_sec * dt_start
-            
-            # End point (right edge)
-            if chart_end.tzinfo is None: chart_end = chart_end.tz_localize('UTC')
-            dt_end = (chart_end - ts1).total_seconds()
-            y_end = y1 + slope_sec * dt_end
-            
-            y_lo = float(chart_df['low'].min())
-            y_hi = float(chart_df['high'].max())
+
+            # ── Find line start position ──────────────────────────────────────
+            # If ts1 is WITHIN the chart window, start the line at ts1's x-position.
+            # If ts1 is BEFORE chart_start, start at x=0 (left edge) with the
+            # correctly extrapolated y — same math as before, no change in that case.
+            chart_ts = chart_df.index
+            try:
+                # Normalize timezone for searchsorted comparison
+                tz = chart_ts.tz
+                ts1_cmp = ts1.tz_convert(tz) if (tz is not None and ts1.tzinfo is not None) else ts1
+                x_start = int(chart_ts.searchsorted(ts1_cmp, side='left'))
+                x_start = max(0, min(x_start, len(chart_df) - 1))
+            except Exception:
+                x_start = 0  # Fallback: left edge
+
+            # y value at x_start
+            ts_at_x_start = chart_ts[x_start]
+            if ts_at_x_start.tzinfo is None: ts_at_x_start = ts_at_x_start.tz_localize('UTC')
+            y_x_start = y1 + slope_sec * (ts_at_x_start - ts1).total_seconds()
+
+            # y value at right edge
+            y_end = y1 + slope_sec * (chart_end - ts1).total_seconds()
+
+            y_lo   = float(chart_df['low'].min())
+            y_hi   = float(chart_df['high'].max())
             margin = (y_hi - y_lo) * 0.05
-            
-            if max(y_start, y_end) < y_lo - margin or min(y_start, y_end) > y_hi + margin:
-                return # Out of bounds
-            
-            x_vals = np.array([0, len(chart_df) - 1], dtype=float)
-            y_plot = np.clip(np.array([y_start, y_end], dtype=float), y_lo - margin, y_hi + margin)
-            
-            kind = "SUP" if "support" in str(line_info.get('type', value_key)).lower() else "RES"
-            tf = str(line_info.get('timeframe') or '').upper()
+
+            # Discard if both endpoints are entirely outside the visible price range
+            if max(y_x_start, y_end) < y_lo - margin or min(y_x_start, y_end) > y_hi + margin:
+                return
+
+            x_vals = np.array([x_start, len(chart_df) - 1], dtype=float)
+            y_plot = np.clip(np.array([y_x_start, y_end], dtype=float),
+                             y_lo - margin, y_hi + margin)
+
+            kind       = "SUP" if "support" in str(line_info.get('type', value_key)).lower() else "RES"
+            tf         = str(line_info.get('timeframe') or '').upper()
             label_text = f"{tf} {kind} TREND".strip()
-            
-            # Solid line for strong visibility for VLM
+
+            # Solid line for strong VLM visibility
             ax.plot(x_vals, y_plot, color=color, linewidth=2.0,
                     linestyle='-', alpha=0.8, zorder=10)
-            
+
+            # Draw TD anchor dots at pt1 and pt2 so VLM can see the trendline origin
+            for ts_anchor, y_anchor in [(ts1, y1), (ts2, y2)]:
+                try:
+                    ts_cmp = ts_anchor.tz_convert(chart_ts.tz) if (chart_ts.tz is not None and ts_anchor.tzinfo is not None) else ts_anchor
+                    x_anchor = int(chart_ts.searchsorted(ts_cmp, side='left'))
+                    if 0 <= x_anchor < len(chart_df):
+                        ax.scatter([x_anchor], [y_anchor], color=color, s=20,
+                                   zorder=11, alpha=0.85, marker='o')
+                except Exception:
+                    pass
+
             ax.text(x_vals[-1] - 1.5, y_plot[-1], f' {label_text}', color=color,
                     fontsize=8, fontweight='bold', va='bottom', ha='right',
-                    bbox=dict(facecolor=text_color if theme == 'light_premium' else '#131722', 
+                    bbox=dict(facecolor=text_color if theme == 'light_premium' else '#131722',
                               alpha=0.7, edgecolor='none', pad=1))
-                    
+
         except Exception as e:
             logger.debug(f"Trendline draw error: {e}")
             return

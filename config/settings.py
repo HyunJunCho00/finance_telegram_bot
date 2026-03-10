@@ -180,6 +180,7 @@ class Settings(BaseSettings):
     # 7. monitor_hourly OpenRouter (free)
     MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
     MONITOR_SOFT_TRIGGER_THRESHOLD: float = 0.7
+    MARKET_STATUS_PREFER_DETERMINISTIC: bool = True
     ENABLE_SNAPSHOT_HOT_PATH_DAILY: bool = True
     ENABLE_SNAPSHOT_HOT_PATH_TRIGGER: bool = True
     # Judge post-processing gates (deterministic, no extra LLM call)

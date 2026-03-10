@@ -481,6 +481,10 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
 
     def summarize_current_status(self, indicators: dict) -> str:
         """Generate hourly Telegram market status with structured technical sections."""
+        deterministic_summary = self._build_fallback_summary(indicators)
+        if bool(getattr(settings, "MARKET_STATUS_PREFER_DETERMINISTIC", True)):
+            return deterministic_summary
+
         compact_indicators = self._build_summary_payload(indicators)
         system_prompt = (
             "You are a market monitor for swing traders.\n"
@@ -531,10 +535,10 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 return retry_resp
 
             logger.warning("MarketMonitorAgent.summarize retry failed; using deterministic fallback summary.")
-            return self._build_fallback_summary(indicators)
+            return deterministic_summary
         except Exception as e:
             logger.error(f"MarketMonitorAgent.summarize error: {e}")
-            return self._build_fallback_summary(indicators)
+            return deterministic_summary
 
     def _build_summary_payload(self, indicators: dict) -> dict:
         """Keep only the fields needed for the LLM summary to avoid route input truncation."""
@@ -692,6 +696,41 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             # backward compatibility
             return tech, {}, {}
 
+        def _philosophy_line(snapshot: dict, label: str) -> str:
+            if not isinstance(snapshot, dict) or not snapshot:
+                return f"{label}: N/A"
+            philos = snapshot.get("philosophy_snapshot", {}) if isinstance(snapshot.get("philosophy_snapshot"), dict) else {}
+            active = philos.get("active_setup", {}) if isinstance(philos.get("active_setup"), dict) else {}
+            volume_profile = philos.get("volume_profile", {}) if isinstance(philos.get("volume_profile"), dict) else {}
+            liq_map = philos.get("liquidity_map", {}) if isinstance(philos.get("liquidity_map"), dict) else {}
+            sweep = liq_map.get("liquidity_sweep", {}) if isinstance(liq_map.get("liquidity_sweep"), dict) else {}
+            sr_flip = liq_map.get("sr_flip", {}) if isinstance(liq_map.get("sr_flip"), dict) else {}
+            pieces = [
+                f"bias {philos.get('higher_timeframe_bias', 'N/A')}->{philos.get('execution_bias', 'N/A')}",
+                f"side {active.get('side', 'N/A')}",
+                f"trigger {active.get('trigger', 'N/A')}",
+            ]
+            if active.get("entry_zone_low") is not None or active.get("entry_zone_high") is not None:
+                pieces.append(f"zone {active.get('entry_zone_low')}~{active.get('entry_zone_high')}")
+            if active.get("invalidation") is not None:
+                pieces.append(f"invalid {active.get('invalidation')}")
+            if active.get("tp1") is not None:
+                pieces.append(f"tp1 {active.get('tp1')}")
+            if active.get("tp2") is not None:
+                pieces.append(f"tp2 {active.get('tp2')}")
+            if volume_profile.get("poc") is not None:
+                pieces.append(f"POC {volume_profile.get('poc')}")
+            if philos.get("confluence_count") is not None:
+                pieces.append(f"confluence {philos.get('confluence_count')}")
+            if sweep.get("confirmed"):
+                pieces.append(f"sweep {sweep.get('status', 'confirmed')}")
+            if sr_flip.get("confirmed"):
+                pieces.append(f"sr_flip {sr_flip.get('status', 'confirmed')}")
+            revision = str(philos.get("scenario_revision_reason") or "").strip()
+            if revision and revision != "No forced scenario revision.":
+                pieces.append(f"rev {revision}")
+            return f"{label}: " + " | ".join(str(piece) for piece in pieces if piece)
+
         def _line_for_mode(snapshot: dict, label: str) -> str:
             if not isinstance(snapshot, dict) or not snapshot:
                 return f"{label}: N/A"
@@ -750,26 +789,45 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
 
         lines.append("<b>📐 빗각·지지/저항</b>")
         for symbol, row in symbol_rows:
-            swing, _, _ = _mode_views(row)
+            swing, position, _ = _mode_views(row)
             tf = swing.get("primary_tf", "4h")
+            ptf = position.get("primary_tf", "1d")
             tr4h = swing.get(f"trendlines_{tf}", {}) or {}
             sw4h = swing.get(f"swing_levels_{tf}", {}) or {}
+            tr1d = position.get(f"trendlines_{ptf}", {}) or {}
+            sw1d = position.get(f"swing_levels_{ptf}", {}) or {}
             lines.append(
-                f"- <b>{symbol}</b> 빗각 S/R: "
-                f"{tr4h.get('diagonal_support', 'N/A')} / {tr4h.get('diagonal_resistance', 'N/A')} | "
-                f"수평 S/R: {sw4h.get('nearest_support', 'N/A')} / {sw4h.get('nearest_resistance', 'N/A')}"
+                f"- <b>{symbol}</b> SWING({tf}) 빗각 {tr4h.get('diagonal_support', 'N/A')} / {tr4h.get('diagonal_resistance', 'N/A')} | "
+                f"수평 {sw4h.get('nearest_support', 'N/A')} / {sw4h.get('nearest_resistance', 'N/A')}"
+            )
+            lines.append(
+                f"  - POSITION({ptf}) 빗각 {tr1d.get('diagonal_support', 'N/A')} / {tr1d.get('diagonal_resistance', 'N/A')} | "
+                f"수평 {sw1d.get('nearest_support', 'N/A')} / {sw1d.get('nearest_resistance', 'N/A')}"
             )
 
         lines.append("<b>🧮 피보나치/변곡</b>")
         for symbol, row in symbol_rows:
-            swing, _, _ = _mode_views(row)
+            swing, position, _ = _mode_views(row)
             tf = swing.get("primary_tf", "4h")
+            ptf = position.get("primary_tf", "1d")
             fib4h = swing.get(f"fibonacci_{tf}", {}) or {}
+            fib1d = position.get(f"fibonacci_{ptf}", {}) or {}
             lines.append(
-                f"- <b>{symbol}</b> fib={fib4h.get('nearest_fib', 'N/A')} "
+                f"- <b>{symbol}</b> SWING({tf}) fib={fib4h.get('nearest_fib', 'N/A')} "
                 f"(0.5={fib4h.get('fib_500', 'N/A')}, 0.618={fib4h.get('fib_618', 'N/A')}, "
                 f"0.705={fib4h.get('fib_705', 'N/A')}, 0.786={fib4h.get('fib_786', 'N/A')})"
             )
+            lines.append(
+                f"  - POSITION({ptf}) fib={fib1d.get('nearest_fib', 'N/A')} "
+                f"(0.5={fib1d.get('fib_500', 'N/A')}, 0.618={fib1d.get('fib_618', 'N/A')}, "
+                f"0.705={fib1d.get('fib_705', 'N/A')}, 0.786={fib1d.get('fib_786', 'N/A')})"
+            )
+
+        lines.append("<b>🧠 철학 체크</b>")
+        for symbol, row in symbol_rows:
+            swing, position, _ = _mode_views(row)
+            lines.append(f"- <b>{symbol}</b> { _philosophy_line(swing, 'SWING') }")
+            lines.append(f"  - { _philosophy_line(position, 'POSITION') }")
 
         lines.append("<b>⚠️ 파생 리스크</b>")
         for symbol, row in symbol_rows:
@@ -788,9 +846,10 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
 
         lines.append("<b>🧩 실행 레벨</b>")
         for symbol, row in symbol_rows:
-            swing, _, _ = _mode_views(row)
+            swing, _, events = _mode_views(row)
             tf = swing.get("primary_tf", "4h")
             sw4h = swing.get(f"swing_levels_{tf}", {}) or {}
+            pressure = swing.get("realtime_pressure", {}) or {}
             support = sw4h.get("nearest_support", "N/A")
             resistance = sw4h.get("nearest_resistance", "N/A")
             playbook = row.get("playbook_snapshot", {}) if isinstance(row.get("playbook_snapshot"), dict) else {}
@@ -800,10 +859,12 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             entry = ", ".join(position_pb.get("entry_conditions", [])[:1]) if isinstance(position_pb.get("entry_conditions"), list) else ""
             invalidation = ", ".join(position_pb.get("invalidation_conditions", [])[:1]) if isinstance(position_pb.get("invalidation_conditions"), list) else support
             alloc_txt = f"{allocation}%" if allocation is not None else "N/A"
+            pressure_txt = pressure.get("summary", "mixed")
+            event_count = events.get("event_count", 0) if isinstance(events, dict) else 0
             lines.append(
                 f"- <b>{symbol}</b> Bias {bias} | MaxAlloc {alloc_txt} | 지지 {support} | 저항 {resistance}"
                 + (f" | 진입 {entry}" if entry else "")
-                + f" | 무효화 {invalidation}"
+                + f" | 무효화 {invalidation} | 압력 {pressure_txt} | 이벤트 {event_count}"
             )
 
         lines.append("<b>🔎 이벤트 상세</b>")
