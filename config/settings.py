@@ -170,7 +170,7 @@ class Settings(BaseSettings):
     MODEL_RISK_EVAL_FALLBACK: str = "qwen/qwen3-32b"
 
     # 6. RAG extraction (Groq) + News summarize (Cerebras lightweight)
-    MODEL_RAG_EXTRACTION: str = "meta-llama/llama-4-maverick-17b-128e-instruct"
+    MODEL_RAG_EXTRACTION: str = "qwen/qwen3-32b"
     MODEL_NEWS_SUMMARIZE: str = "llama3.1-8b"
     MODEL_NEWS_CLUSTER: str = "qwen/qwen3-32b"
     MODEL_NEWS_FINAL: str = "openai/gpt-oss-120b"

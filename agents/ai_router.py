@@ -240,12 +240,11 @@ class AIClient:
 
         self._GROQ_REASONING_POOL = [
             "openai/gpt-oss-120b",
-            "llama-3.3-70b-versatile",
-            "meta-llama/llama-4-maverick-17b-128e-instruct",
             "qwen/qwen3-32b",
+            "llama-3.3-70b-versatile",
+            "meta-llama/llama-4-scout-17b-16e-instruct",
         ]
         self._GROQ_GENERAL_POOL = [
-            "meta-llama/llama-4-maverick-17b-128e-instruct",
             "qwen/qwen3-32b",
             "meta-llama/llama-4-scout-17b-16e-instruct",
             "openai/gpt-oss-20b",
@@ -412,7 +411,7 @@ class AIClient:
             return "qwen/qwen3-32b"
         if role == "risk_eval":
             return settings.MODEL_RISK_EVAL_FALLBACK
-        return "meta-llama/llama-4-maverick-17b-128e-instruct"
+        return settings.MODEL_RAG_EXTRACTION
 
     def _select_gemini_client(self, backend: str):
         if backend == "gemini_judge":
