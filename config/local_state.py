@@ -3,9 +3,9 @@ import os
 import threading
 from pathlib import Path
 from datetime import datetime, timezone
-import uuid
 from loguru import logger
 from typing import Dict, List, Optional
+from executors.execution_repository import DuplicateActiveIntentError, execution_repository
 
 # [FIX MEDIUM-16] 절대 경로 사용 — systemd WorkingDirectory와 무관하게 동작
 _BASE_DIR = Path(__file__).parent.parent
@@ -116,6 +116,41 @@ def init_db():
         )
     ''')
 
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS execution_outbox (
+            event_id      TEXT PRIMARY KEY,
+            event_type    TEXT NOT NULL,
+            idempotency_key TEXT,
+            payload_json  TEXT NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'PENDING',
+            attempts      INTEGER NOT NULL DEFAULT 0,
+            last_error    TEXT,
+            processing_started_at TEXT,
+            created_at    TEXT NOT NULL,
+            updated_at    TEXT NOT NULL,
+            published_at  TEXT
+        )
+    ''')
+
+    for col, col_def in [
+        ("idempotency_key", "TEXT"),
+        ("processing_started_at", "TEXT"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE execution_outbox ADD COLUMN {col} {col_def}")
+        except Exception:
+            pass
+
+    try:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_execution_outbox_status_created ON execution_outbox(status, created_at)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_execution_outbox_idempotency ON execution_outbox(idempotency_key) WHERE idempotency_key IS NOT NULL"
+        )
+    except Exception:
+        pass
+
     # Default configs
     cursor.execute(
         "INSERT OR IGNORE INTO system_config (key, value) VALUES ('enable_ai_analysis', 'true')"
@@ -190,13 +225,7 @@ class LocalStateManager:
 
     def set_system_config(self, key: str, value: str):
         """Generic setter for the system_config table."""
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute(
-                "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
-                (str(key), str(value)),
-            )
-            self.conn.commit()
+        execution_repository.set_system_config(str(key), str(value))
 
     def get_config(self, key: str, default: str = "") -> str:
         """Backward-compatible alias used by legacy callers."""
@@ -209,26 +238,14 @@ class LocalStateManager:
     def set_panic_mode(self, enabled: bool):
         """Set or clear the market panic (high-volatility) flag."""
         val = 'true' if enabled else 'false'
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute(
-                "INSERT OR REPLACE INTO system_config (key, value) VALUES ('panic_mode', ?)",
-                (val,)
-            )
-            self.conn.commit()
+        execution_repository.set_system_config("panic_mode", val)
         if enabled:
             logger.warning("System Config: Market Panic Mode ENABLED")
 
     def set_analysis_enabled(self, enabled: bool):
         """Enable or disable AI analysis/reporting."""
         val = 'true' if enabled else 'false'
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute(
-                "INSERT OR REPLACE INTO system_config (key, value) VALUES ('enable_ai_analysis', ?)",
-                (val,)
-            )
-            self.conn.commit()
+        execution_repository.set_system_config("enable_ai_analysis", val)
         logger.info(f"System Config: AI Analysis {'ENABLED' if enabled else 'DISABLED'}")
 
     def get_telegram_chat_id(self, default: str = "") -> str:
@@ -258,13 +275,7 @@ class LocalStateManager:
         mode = mode.lower().strip()
         if mode not in ('swing', 'position'):
             raise ValueError(f"Invalid trading mode: {mode}")
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute(
-                "INSERT OR REPLACE INTO system_config (key, value) VALUES ('trading_mode', ?)",
-                (mode,)
-            )
-            self.conn.commit()
+        execution_repository.set_system_config("trading_mode", mode)
         logger.info(f"System Config: Trading Mode set to {mode.upper()}")
 
 
@@ -292,52 +303,28 @@ class LocalStateManager:
         [FIX HIGH-8/9] leverage, tp_price, sl_price 저장 — _execute_chunk가
         올바른 레버리지로 마진 계산할 수 있도록 함.
         """
-        intent_id = str(uuid.uuid4())
-        now = datetime.now(timezone.utc)
-        expires = datetime.fromtimestamp(now.timestamp() + (ttl_hours * 3600), tz=timezone.utc)
-
-        with self._lock:
-            cursor = self.conn.cursor()
-            # Deduplicate pending/active intents for same symbol+exchange to avoid order overlap.
-            cursor.execute(
-                """
-                SELECT intent_id
-                FROM active_orders
-                WHERE symbol = ?
-                  AND exchange = ?
-                  AND status IN ('PENDING', 'ACTIVE')
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (symbol, exchange),
+        try:
+            intent_id = execution_repository.create_intent(
+                symbol=symbol,
+                direction=direction,
+                style=style,
+                amount=amount,
+                exchange=exchange,
+                ttl_hours=ttl_hours,
+                leverage=leverage,
+                tp_price=tp_price,
+                sl_price=sl_price,
+                tp2_price=tp2_price,
+                tp1_exit_pct=tp1_exit_pct,
+                playbook_id=str(playbook_id or ""),
+                source_decision=str(source_decision or ""),
+                strategy_version=str(strategy_version or ""),
+                trigger_reason=str(trigger_reason or ""),
+                thesis_id=str(thesis_id or ""),
             )
-            existing = cursor.fetchone()
-            if existing:
-                logger.warning(
-                    f"Duplicate intent blocked for {symbol} [{exchange}] "
-                    f"(existing={existing['intent_id'][:8]})"
-                )
-                return ""
-
-            cursor.execute('''
-                INSERT INTO active_orders
-                (intent_id, symbol, direction, execution_style,
-                 total_target_amount, remaining_amount, exchange,
-                 created_at, expires_at, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct,
-                 playbook_id, source_decision, strategy_version, trigger_reason, thesis_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                intent_id, symbol, direction, style,
-                amount, amount, exchange,
-                now.isoformat(), expires.isoformat(),
-                leverage, tp_price, sl_price, tp2_price, tp1_exit_pct,
-                str(playbook_id or ""),
-                str(source_decision or ""),
-                str(strategy_version or ""),
-                str(trigger_reason or ""),
-                str(thesis_id or ""),
-            ))
-            self.conn.commit()
+        except DuplicateActiveIntentError:
+            logger.warning(f"Duplicate intent blocked for {symbol} [{exchange}]")
+            return ""
 
         logger.info(
             f"Intent registered: {intent_id[:8]} | {direction} {symbol} "
@@ -374,44 +361,15 @@ class LocalStateManager:
             return [dict(row) for row in cursor.fetchall()]
 
     def update_order_fill(self, intent_id: str, filled_chunk: float):
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute('''
-                UPDATE active_orders
-                SET filled_amount    = filled_amount + ?,
-                    remaining_amount = remaining_amount - ?
-                WHERE intent_id = ?
-            ''', (filled_chunk, filled_chunk, intent_id))
-
-            cursor.execute(
-                "SELECT remaining_amount FROM active_orders WHERE intent_id = ?",
-                (intent_id,)
-            )
-            res = cursor.fetchone()
-            if res and res['remaining_amount'] <= 0.0001:
-                cursor.execute(
-                    "UPDATE active_orders SET status = 'COMPLETED' WHERE intent_id = ?",
-                    (intent_id,)
-                )
-            self.conn.commit()
+        execution_repository.update_order_fill(intent_id, filled_chunk)
 
     def update_status(self, intent_id: str, new_status: str):
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute(
-                "UPDATE active_orders SET status = ? WHERE intent_id = ?",
-                (new_status, intent_id)
-            )
-            self.conn.commit()
+        execution_repository.update_intent_status(intent_id, new_status)
 
     def flush_expired(self):
         """Delete orders that have passed their TTL."""
         now = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            cursor = self.conn.cursor()
-            cursor.execute("DELETE FROM active_orders WHERE expires_at < ?", (now,))
-            deleted = cursor.rowcount
-            self.conn.commit()
+        deleted = execution_repository.flush_expired_intents(now)["deleted"]
         if deleted > 0:
             logger.info(f"Local state TTL flush: Removed {deleted} stale intents.")
 

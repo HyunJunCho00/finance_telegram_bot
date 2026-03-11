@@ -113,10 +113,10 @@ class ExecutionDesk:
             tp2_price=tp2_price,
             tp1_exit_pct=tp1_exit_pct,
             lineage=lineage or {},
+            intent_id=intent_id,
         )
 
         if res.get("success"):
-            state_manager.update_order_fill(intent_id, amount)
             logger.info(f"ExecutionDesk filled ${amount:.2f} of {intent_id[:8]} via {exchange}")
         else:
             logger.error(f"ExecutionDesk fill failed: {res.get('error')}")

@@ -10,6 +10,8 @@ from loguru import logger
 import json
 import base64
 import re
+from executors.execution_repository import execution_repository
+from executors.outbox_dispatcher import outbox_dispatcher
 from utils.retry import api_retry
 
 
@@ -725,7 +727,6 @@ class ReportGenerator:
         notification_context: str = "analysis",
     ) -> None:
         try:
-            bot = Bot(token=self.bot_token)
             chat_id = self._get_target_chat_id()
             logger.info(
                 f"Telegram notify start: symbol={report.get('symbol')} mode={mode.value} "
@@ -734,8 +735,16 @@ class ReportGenerator:
             )
             payload = self._build_notification_payload(report, chart_bytes, mode, notification_context)
             self._save_report_replay_payload(payload)
-            await self._send_payload(bot, chat_id, payload)
-            logger.info(f"Telegram summary notification sent (ID: {payload.get('report_id')})")
+            execution_repository.enqueue_outbox_event(
+                "telegram_payload",
+                {
+                    "chat_id": chat_id,
+                    "payload": payload,
+                },
+                idempotency_key=f"telegram_payload:{payload.get('report_id') or report.get('id') or report.get('symbol')}:{notification_context}",
+            )
+            outbox_dispatcher.publish_pending(limit=20)
+            logger.info(f"Telegram summary notification queued (ID: {payload.get('report_id')})")
         except Exception as e:
             logger.error(f"Telegram notification error: {e}")
 

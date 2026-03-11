@@ -5,6 +5,8 @@ from config.settings import settings
 from config.database import db
 from config.local_state import state_manager
 from loguru import logger
+from executors.execution_repository import DuplicateActiveIntentError, execution_repository
+from executors.outbox_dispatcher import outbox_dispatcher
 
 
 class TradeExecutor:
@@ -126,33 +128,38 @@ class TradeExecutor:
                 if not ok_u:
                     return {"success": False, "note": msg_u}
 
-                intent_b = state_manager.add_intent(
-                    symbol=symbol,
-                    direction=direction,
-                    style=exec_style,
-                    amount=binance_notional,
-                    exchange=binance_exchange,
-                    leverage=split_lev,
-                    tp_price=tp_price,
-                    sl_price=sl_price,
-                    tp2_price=tp2_price,
-                    tp1_exit_pct=tp1_exit_pct,
-                    **lineage,
-                )
-                intent_u = state_manager.add_intent(
-                    symbol=symbol,
-                    direction=direction,
-                    style=exec_style,
-                    amount=upbit_notional,
-                    exchange="upbit",
-                    leverage=1,
-                    tp_price=tp_price,
-                    sl_price=sl_price,
-                    tp2_price=tp2_price,
-                    tp1_exit_pct=tp1_exit_pct,
-                    **lineage,
-                )
-                if not intent_b or not intent_u:
+                try:
+                    intent_b, intent_u = execution_repository.create_intents(
+                        [
+                            {
+                                "symbol": symbol,
+                                "direction": direction,
+                                "style": exec_style,
+                                "amount": binance_notional,
+                                "exchange": binance_exchange,
+                                "leverage": split_lev,
+                                "tp_price": tp_price,
+                                "sl_price": sl_price,
+                                "tp2_price": tp2_price,
+                                "tp1_exit_pct": tp1_exit_pct,
+                                **lineage,
+                            },
+                            {
+                                "symbol": symbol,
+                                "direction": direction,
+                                "style": exec_style,
+                                "amount": upbit_notional,
+                                "exchange": "upbit",
+                                "leverage": 1,
+                                "tp_price": tp_price,
+                                "sl_price": sl_price,
+                                "tp2_price": tp2_price,
+                                "tp1_exit_pct": tp1_exit_pct,
+                                **lineage,
+                            },
+                        ]
+                    )
+                except DuplicateActiveIntentError:
                     return {"success": False, "note": f"Duplicate intent blocked for {symbol} (split route)"}
 
                 receipts = [
@@ -195,20 +202,21 @@ class TradeExecutor:
                 if not ok_budget:
                     return {"success": False, "note": msg_budget}
 
-                intent_id = state_manager.add_intent(
-                    symbol=symbol,
-                    direction=direction,
-                    style=exec_style,
-                    amount=target_notional,
-                    exchange=target_exchange,
-                    leverage=lev_for_exchange,
-                    tp_price=tp_price,
-                    sl_price=sl_price,
-                    tp2_price=tp2_price,
-                    tp1_exit_pct=tp1_exit_pct,
-                    **lineage,
-                )
-                if not intent_id:
+                try:
+                    intent_id = execution_repository.create_intent(
+                        symbol=symbol,
+                        direction=direction,
+                        style=exec_style,
+                        amount=target_notional,
+                        exchange=target_exchange,
+                        leverage=lev_for_exchange,
+                        tp_price=tp_price,
+                        sl_price=sl_price,
+                        tp2_price=tp2_price,
+                        tp1_exit_pct=tp1_exit_pct,
+                        **lineage,
+                    )
+                except DuplicateActiveIntentError:
                     return {"success": False, "note": f"Duplicate intent blocked for {symbol} [{target_exchange}]"}
 
                 receipts = [
@@ -273,14 +281,46 @@ class TradeExecutor:
         tp2_price: float = 0.0,
         tp1_exit_pct: float = 50.0,
         lineage: Optional[dict] = None,
+        intent_id: Optional[str] = None,
     ) -> Dict:
         try:
             side = side.upper()
             exchange = exchange.lower()
+            execution_record_base = {
+                "note": f"PAPER/LIVE EXECUTION | Style: {style}",
+            }
+            if lineage:
+                execution_record_base.update({
+                    "playbook_id": str(lineage.get("playbook_id") or ""),
+                    "source_decision": str(lineage.get("source_decision") or ""),
+                    "strategy_version": str(lineage.get("strategy_version") or ""),
+                    "trigger_reason": str(lineage.get("trigger_reason") or ""),
+                    "thesis_id": str(lineage.get("thesis_id") or ""),
+                })
 
             # Default-safe path: no real order API call
             if settings.PAPER_TRADING_MODE:
-                result = self._simulate_order(symbol, side, amount, leverage, exchange, style, tp_price, sl_price, tp2_price, tp1_exit_pct)
+                if intent_id:
+                    price = self._get_reference_price(symbol, exchange)
+                    if not price:
+                        return {"success": False, "error": "Could not get reference price"}
+                    result = execution_repository.execute_paper_fill(
+                        intent_id=intent_id,
+                        exchange=exchange,
+                        symbol=symbol,
+                        direction=side,
+                        amount_usd=amount,
+                        leverage=leverage,
+                        style=style,
+                        raw_price=price,
+                        tp_price=tp_price,
+                        sl_price=sl_price,
+                        tp2_price=tp2_price,
+                        tp1_exit_pct=tp1_exit_pct,
+                        execution_record_base=execution_record_base,
+                    )
+                else:
+                    result = self._simulate_order(symbol, side, amount, leverage, exchange, style, tp_price, sl_price, tp2_price, tp1_exit_pct)
             else:
                 if exchange == 'binance':
                     result = self._execute_binance(symbol, side, amount, leverage)
@@ -306,6 +346,7 @@ class TradeExecutor:
                 })
 
             self._save_execution_record(result)
+            outbox_dispatcher.publish_pending(limit=20)
             return result
 
         except Exception as e:
@@ -345,10 +386,7 @@ class TradeExecutor:
         if not price:
             return {"success": False, "error": "Could not get reference price"}
 
-        # V7: Paper Exchange Engine provides realistic slippage and wallet deduction
-        from executors.paper_exchange import paper_engine
-        
-        sim_res = paper_engine.simulate_execution(
+        sim_res = execution_repository.open_paper_position(
             exchange=exchange,
             symbol=symbol,
             direction=side,
@@ -487,10 +525,17 @@ class TradeExecutor:
 
     def _save_execution_record(self, execution_result: Dict) -> None:
         try:
-            db.insert_trade_execution(execution_result)
-            logger.info("Trade execution record saved")
+            if execution_result.get("execution_outbox_enqueued"):
+                return
+            order_id = str(execution_result.get("order_id") or "")
+            execution_repository.enqueue_outbox_event(
+                "trade_execution_record",
+                execution_result,
+                idempotency_key=(f"trade_execution:{order_id}" if order_id else None),
+            )
+            logger.info("Trade execution outbox event enqueued")
         except Exception as e:
-            logger.error(f"Failed to save execution record: {e}")
+            logger.error(f"Failed to enqueue trade execution outbox event: {e}")
 
 
 trade_executor = TradeExecutor()

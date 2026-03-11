@@ -718,6 +718,16 @@ class DatabaseClient:
     def insert_trade_execution(self, data: Dict) -> Dict:
         return self.client.table("trade_executions").insert(data).execute()
 
+    def get_trade_execution_by_order_id(self, order_id: str) -> Optional[Dict]:
+        if not order_id:
+            return None
+        response = self.client.table("trade_executions")\
+            .select("*")\
+            .eq("order_id", order_id)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
     def get_position_status(self, symbol: str) -> Optional[Dict]:
         response = self.client.table("trade_executions")\
             .select("*")\

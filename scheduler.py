@@ -1049,40 +1049,56 @@ def job_routine_market_status():
         indicators["TELEGRAM_INTEL"] = telegram_intel
 
         # [FEATURE-3] Split reports for better readability
-        from bot.telegram_bot import trading_bot
-        if trading_bot:
-            import asyncio
-            target_chat_id = _get_target_chat_id()
-            
-            # Message 1: News Briefing (only if news exists)
-            if telegram_intel and "주요 뉴스 없음" not in telegram_intel:
-                news_header = "<b>📰 최근 1시간 뉴스 브리핑 (Synthesized)</b>"
-                try:
-                    asyncio.run(trading_bot.send_message(target_chat_id, f"{news_header}\n\n{telegram_intel}"))
-                except Exception as e:
-                    logger.warning(f"Routine news briefing send failed: {e}")
+        from executors.execution_repository import execution_repository
+        from executors.outbox_dispatcher import outbox_dispatcher
+        import hashlib
 
-                try:
-                    import html
-                    refs_text = _build_reference_message(final_payload.get("selected_news", [])[:6])
-                    refs_header = "<b>🔗 최근 1시간 뉴스 참고 링크</b>"
-                    asyncio.run(
-                        trading_bot.send_message(
-                            target_chat_id,
-                            f"{refs_header}\n\n{html.escape(refs_text)}",
-                        )
-                    )
-                except Exception as e:
-                    logger.warning(f"Routine news reference send failed: {e}")
-            
-            # Message 2: Market Status Summary (Indicators)
-            market_header = "<b>📊 주요 시장 지표 업데이트</b>"
-            summary = market_monitor_agent.summarize_current_status(indicators)
-            logger.success(f"Market Summary Generated:\n{summary}")
+        target_chat_id = _get_target_chat_id()
+
+        # Message 1: News Briefing (only if news exists)
+        if telegram_intel and "주요 뉴스 없음" not in telegram_intel:
+            news_header = "<b>📰 최근 1시간 뉴스 브리핑 (Synthesized)</b>"
             try:
-                asyncio.run(trading_bot.send_message(target_chat_id, f"{market_header}\n\n{summary}"))
+                execution_repository.enqueue_outbox_event(
+                    "telegram_message",
+                    {"chat_id": target_chat_id, "text": f"{news_header}\n\n{telegram_intel}", "parse_mode": "HTML"},
+                    idempotency_key="telegram:routine_news:"
+                    + hashlib.sha256(f"{news_header}\n\n{telegram_intel}".encode("utf-8")).hexdigest()[:24],
+                )
             except Exception as e:
-                logger.warning(f"Routine market status send failed: {e}")
+                logger.warning(f"Routine news briefing enqueue failed: {e}")
+
+            try:
+                import html
+                refs_text = _build_reference_message(final_payload.get("selected_news", [])[:6])
+                refs_header = "<b>🔗 최근 1시간 뉴스 참고 링크</b>"
+                execution_repository.enqueue_outbox_event(
+                    "telegram_message",
+                    {
+                        "chat_id": target_chat_id,
+                        "text": f"{refs_header}\n\n{html.escape(refs_text)}",
+                        "parse_mode": "HTML",
+                    },
+                    idempotency_key="telegram:routine_news_refs:"
+                    + hashlib.sha256(f"{refs_header}\n\n{refs_text}".encode("utf-8")).hexdigest()[:24],
+                )
+            except Exception as e:
+                logger.warning(f"Routine news reference enqueue failed: {e}")
+
+        # Message 2: Market Status Summary (Indicators)
+        market_header = "<b>📊 주요 시장 지표 업데이트</b>"
+        summary = market_monitor_agent.summarize_current_status(indicators)
+        logger.success(f"Market Summary Generated:\n{summary}")
+        try:
+            execution_repository.enqueue_outbox_event(
+                "telegram_message",
+                {"chat_id": target_chat_id, "text": f"{market_header}\n\n{summary}", "parse_mode": "HTML"},
+                idempotency_key="telegram:routine_market_summary:"
+                + hashlib.sha256(f"{market_header}\n\n{summary}".encode("utf-8")).hexdigest()[:24],
+            )
+            outbox_dispatcher.publish_pending(limit=20)
+        except Exception as e:
+            logger.warning(f"Routine market status enqueue failed: {e}")
 
 
     except Exception as e:
