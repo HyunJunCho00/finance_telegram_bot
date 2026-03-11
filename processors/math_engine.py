@@ -1426,6 +1426,30 @@ class MathEngine:
         if invalidation is None and entry_mid is not None:
             invalidation = entry_mid * (0.995 if side == "LONG" else 1.005)
 
+        if isinstance(entry_mid, (int, float)):
+            if side == "LONG" and isinstance(invalidation, (int, float)) and float(invalidation) >= float(entry_mid):
+                lower_supports = [
+                    float(v) for v in supports
+                    if isinstance(v, (int, float)) and float(v) < float(entry_mid)
+                ]
+                if lower_supports:
+                    invalidation = min(lower_supports)
+                elif isinstance(entry_zone, tuple) and len(entry_zone) == 2:
+                    invalidation = float(entry_zone[0]) * 0.995
+                else:
+                    invalidation = float(entry_mid) * 0.995
+            if side == "SHORT" and isinstance(invalidation, (int, float)) and float(invalidation) <= float(entry_mid):
+                upper_resistances = [
+                    float(v) for v in resistances
+                    if isinstance(v, (int, float)) and float(v) > float(entry_mid)
+                ]
+                if upper_resistances:
+                    invalidation = max(upper_resistances)
+                elif isinstance(entry_zone, tuple) and len(entry_zone) == 2:
+                    invalidation = float(entry_zone[1]) * 1.005
+                else:
+                    invalidation = float(entry_mid) * 1.005
+
         invalidation = round(float(invalidation), 2) if isinstance(invalidation, (int, float)) else None
         risk_pct = None
         if isinstance(entry_mid, (int, float)) and isinstance(invalidation, (int, float)) and entry_mid:

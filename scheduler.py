@@ -1090,7 +1090,7 @@ def job_routine_market_status():
 
 
 def job_hourly_swing_charts():
-    """Hourly Swing chart push for BTC/ETH to Telegram."""
+    """Hourly Swing + Position chart push for BTC/ETH to Telegram."""
     try:
         from bot.telegram_bot import trading_bot
         from config.local_state import state_manager
@@ -1106,28 +1106,40 @@ def job_hourly_swing_charts():
         if not target_symbols:
             target_symbols = settings.trading_symbols[:2]
 
-        for symbol in target_symbols:
-            try:
-                result = mcp_tools.get_chart_images(symbol, lane="swing")
-                if not isinstance(result, dict) or "charts" not in result:
-                    logger.warning(f"Hourly swing chart failed for {symbol}: {result.get('error') if isinstance(result, dict) else 'unknown error'}")
-                    continue
+        lane_profiles = [
+            ("swing", settings.SWING_HISTORY_MONTHS, "SWING", ["4h", "1d"]),
+            ("position", settings.POSITION_HISTORY_MONTHS, "POSITION", ["1w"]),
+        ]
 
-                charts = result.get("charts", [])
-                total = len(charts)
-                for idx, chart in enumerate(charts, start=1):
-                    chart_bytes = base64.b64decode(chart["chart_base64"])
-                    tf = str(chart.get("timeframe", "4h")).upper()
-                    caption = (
-                        f"📈 <b>{symbol} SWING 차트 (정기 1시간)</b>\n"
-                        f"Lane: <code>swing</code>\n"
-                        f"Timeframe: <code>{tf}</code>\n"
-                        f"Panel: <code>{idx}/{total}</code>\n"
-                        f"Lookback: <code>12M</code>"
-                    )
-                    asyncio.run(trading_bot.send_photo(target_chat_id, chart_bytes, caption))
-            except Exception as e:
-                logger.warning(f"Hourly swing chart send failed for {symbol}: {e}")
+        for symbol in target_symbols:
+            for lane, lookback_months, lane_label, allowed_timeframes in lane_profiles:
+                try:
+                    result = mcp_tools.get_chart_images(symbol, lane=lane)
+                    if not isinstance(result, dict) or "charts" not in result:
+                        logger.warning(
+                            f"Hourly {lane} chart failed for {symbol}: "
+                            f"{result.get('error') if isinstance(result, dict) else 'unknown error'}"
+                        )
+                        continue
+
+                    charts = [
+                        chart for chart in (result.get("charts", []) or [])
+                        if str(chart.get("timeframe", "")).lower() in allowed_timeframes
+                    ]
+                    total = len(charts)
+                    for idx, chart in enumerate(charts, start=1):
+                        chart_bytes = base64.b64decode(chart["chart_base64"])
+                        tf = str(chart.get("timeframe", "4h")).upper()
+                        caption = (
+                            f"📈 <b>{symbol} {lane_label} 차트 (정기 1시간)</b>\n"
+                            f"Lane: <code>{lane}</code>\n"
+                            f"Timeframe: <code>{tf}</code>\n"
+                            f"Panel: <code>{idx}/{total}</code>\n"
+                            f"Lookback: <code>{lookback_months}M</code>"
+                        )
+                        asyncio.run(trading_bot.send_photo(target_chat_id, chart_bytes, caption))
+                except Exception as e:
+                    logger.warning(f"Hourly {lane} chart send failed for {symbol}: {e}")
     except Exception as e:
         logger.error(f"Hourly swing charts job error: {e}")
 

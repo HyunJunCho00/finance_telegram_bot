@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Dict, Optional
 
 from config.settings import TradingMode, settings
@@ -9,6 +10,89 @@ from processors.flow_confirm_engine import flow_confirm_engine
 
 class PolicyEngine:
     """Human-defined trading policy. Final authority over trade approval."""
+
+    @staticmethod
+    def _has_meaningful_playbook(playbook: Optional[Dict]) -> bool:
+        if not isinstance(playbook, dict):
+            return False
+        entry = playbook.get("entry_conditions", [])
+        return isinstance(entry, list) and len(entry) > 0
+
+    def _fallback_playbook_from_active_setup(
+        self,
+        active_setup: Dict,
+        *,
+        allocation_pct: object = None,
+    ) -> Dict:
+        if not isinstance(active_setup, dict) or not active_setup:
+            return {}
+
+        entry_conditions = active_setup.get("trigger_conditions", [])
+        if not isinstance(entry_conditions, list):
+            entry_conditions = []
+
+        invalidation_conditions = active_setup.get("invalidation_conditions", [])
+        if not isinstance(invalidation_conditions, list):
+            invalidation_conditions = []
+
+        side = str(active_setup.get("side", "")).upper()
+        allowed_sides = [side] if side in ("LONG", "SHORT") else []
+
+        try:
+            max_allocation_pct = float(allocation_pct) if allocation_pct not in (None, "", "N/A") else None
+        except Exception:
+            max_allocation_pct = None
+
+        return {
+            "entry_conditions": entry_conditions,
+            "invalidation_conditions": invalidation_conditions,
+            "allowed_sides": allowed_sides,
+            "max_allocation_pct": max_allocation_pct if max_allocation_pct and max_allocation_pct > 0 else None,
+            "strategy_version": "daily_playbook_v1",
+        }
+
+    def _ensure_playbook_fallback(self, final: Dict, market_data: Dict, mode: TradingMode) -> None:
+        scenario_engine = market_data.get("scenario_engine", {}) if isinstance(market_data, dict) else {}
+        active_setup = scenario_engine.get("active_setup", {}) if isinstance(scenario_engine, dict) else {}
+        fallback = self._fallback_playbook_from_active_setup(
+            active_setup if isinstance(active_setup, dict) else {},
+            allocation_pct=final.get("allocation_pct"),
+        )
+        if not fallback:
+            return
+
+        monitoring = final.get("monitoring_playbook")
+        if not self._has_meaningful_playbook(monitoring):
+            final["monitoring_playbook"] = deepcopy(fallback)
+
+        dual_plan = final.get("daily_dual_plan")
+        if not isinstance(dual_plan, dict):
+            dual_plan = {}
+
+        lane_key = mode.value if mode in (TradingMode.SWING, TradingMode.POSITION) else "position"
+        canonical_lane_key = f"{lane_key}_plan"
+        primary_lane = dual_plan.get(canonical_lane_key) or dual_plan.get(lane_key)
+        if not self._has_meaningful_playbook(primary_lane):
+            primary_lane = deepcopy(
+                final.get("monitoring_playbook")
+                if self._has_meaningful_playbook(final.get("monitoring_playbook"))
+                else fallback
+            )
+            dual_plan[canonical_lane_key] = primary_lane
+            dual_plan[lane_key] = deepcopy(primary_lane)
+        else:
+            dual_plan[canonical_lane_key] = deepcopy(primary_lane)
+            dual_plan[lane_key] = deepcopy(primary_lane)
+
+        other_lane = "position" if lane_key == "swing" else "swing"
+        other_canonical_lane_key = f"{other_lane}_plan"
+        other_lane_plan = dual_plan.get(other_canonical_lane_key) or dual_plan.get(other_lane)
+        if not self._has_meaningful_playbook(other_lane_plan):
+            other_lane_plan = deepcopy(dual_plan.get(canonical_lane_key) or fallback)
+        dual_plan[other_canonical_lane_key] = deepcopy(other_lane_plan)
+        dual_plan[other_lane] = deepcopy(other_lane_plan)
+
+        final["daily_dual_plan"] = dual_plan
 
     @staticmethod
     def _safe_float(value, default: Optional[float] = None) -> Optional[float]:
@@ -218,6 +302,8 @@ class PolicyEngine:
         if not isinstance(reasoning, dict):
             reasoning = {"final_logic": str(reasoning or "")}
         reasoning.setdefault("final_logic", "")
+
+        self._ensure_playbook_fallback(final, market_data, mode)
 
         policy = {
             "status": "SKIPPED",
