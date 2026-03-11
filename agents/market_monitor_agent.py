@@ -16,6 +16,8 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
+import pandas as pd
+
 from agents.ai_router import ai_client
 from config.database import db
 from config.settings import settings, TradingMode
@@ -33,7 +35,7 @@ class MarketMonitorAgent:
 
 You will receive:
 1. DAILY PLAYBOOK: The strategy designed this morning (entry/exit/invalidation/risk conditions).
-2. LIVE INDICATORS: Current price, funding rate, OI divergence, MFI proxy, volatility.
+2. LIVE INDICATORS: Current price, funding rate, OI divergence, 4h/1d price change, MFI proxy, volatility.
 
 Output STRICT JSON | no extra text:
 {
@@ -81,12 +83,42 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         """Fetch minimal live indicators for trigger evaluation."""
         indicators = {}
         try:
-            df = db.get_latest_market_data(symbol, limit=12)
+            df = db.get_latest_market_data(symbol, limit=1800)
             if not df.empty:
                 indicators["price"] = float(df["close"].iloc[-1])
                 p_now = indicators["price"]
-                p_prev = float(df["close"].iloc[0])
-                indicators["price_chg_pct_1h"] = round((p_now - p_prev) / p_prev * 100, 3) if p_prev else 0
+                if "timestamp" in df.columns:
+                    tf_df = df[["timestamp", "close"]].copy()
+                    tf_df["timestamp"] = pd.to_datetime(tf_df["timestamp"], utc=True, errors="coerce")
+                    tf_df = tf_df.dropna(subset=["timestamp", "close"]).sort_values("timestamp")
+                    if not tf_df.empty:
+                        resampled = (
+                            tf_df.set_index("timestamp")["close"]
+                            .resample("1h")
+                            .last()
+                            .dropna()
+                        )
+                        if len(resampled) >= 2:
+                            last_1h_ref = float(resampled.iloc[-2])
+                            indicators["price_chg_pct_1h"] = (
+                                round((p_now - last_1h_ref) / last_1h_ref * 100, 3) if last_1h_ref else 0
+                            )
+                        if len(resampled) >= 5:
+                            last_4h_ref = float(resampled.iloc[-5])
+                            indicators["price_chg_pct_4h"] = (
+                                round((p_now - last_4h_ref) / last_4h_ref * 100, 3) if last_4h_ref else 0
+                            )
+                        if len(resampled) >= 25:
+                            last_1d_ref = float(resampled.iloc[-25])
+                            indicators["price_chg_pct_1d"] = (
+                                round((p_now - last_1d_ref) / last_1d_ref * 100, 3) if last_1d_ref else 0
+                            )
+                        returns = resampled.pct_change().dropna()
+                        if len(returns) >= 12:
+                            indicators["volatility"] = round(float(returns.tail(24).std() * 100), 3)
+                if "price_chg_pct_1h" not in indicators:
+                    p_prev = float(df["close"].iloc[max(len(df) - 60, 0)])
+                    indicators["price_chg_pct_1h"] = round((p_now - p_prev) / p_prev * 100, 3) if p_prev else 0
         except Exception:
             pass
         try:
@@ -115,7 +147,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 oi_now, oi_prev = oi_series[0], oi_series[-1]
                 oi_chg = ((oi_now - oi_prev) / oi_prev * 100) if oi_prev else 0
                 indicators["oi_chg_pct"] = round(oi_chg, 3)
-                price_chg = indicators.get("price_chg_pct_1h", 0)
+                price_chg = indicators.get("price_chg_pct_4h", indicators.get("price_chg_pct_1h", 0))
                 indicators["oi_divergence"] = (
                     "DIVERGENCE"
                     if (oi_chg > 1.5 and price_chg < -0.5) or (oi_chg < -1.5 and price_chg > 0.5)

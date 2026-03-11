@@ -1447,7 +1447,19 @@ class MathEngine:
             operator = ">=" if side == "LONG" and "reclaim" in trigger else "<=" if side == "SHORT" and "reject" in trigger else "<=" if side == "LONG" else ">="
             trigger_conditions.append({"metric": "price", "operator": operator, "value": float(entry_mid)})
         if liquidity_sweep.get("confirmed"):
-            trigger_conditions.append({"metric": "price_chg_pct_1h", "operator": ">=" if side == "LONG" else "<=", "value": 0.1 if side == "LONG" else -0.1})
+            timing_metric = f"price_chg_pct_{timeframe}"
+            timing_thresholds = {
+                "4h": 0.3,
+                "1d": 0.8,
+            }
+            threshold = timing_thresholds.get(str(timeframe).lower(), 0.3)
+            trigger_conditions.append(
+                {
+                    "metric": timing_metric,
+                    "operator": ">=" if side == "LONG" else "<=",
+                    "value": threshold if side == "LONG" else -threshold,
+                }
+            )
 
         invalidation_conditions = []
         if isinstance(invalidation, (int, float)):

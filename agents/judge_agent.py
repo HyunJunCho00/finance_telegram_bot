@@ -16,7 +16,7 @@ class JudgeAgent:
     BASE_PROMPT = """You are a senior crypto portfolio manager making {mode_upper} trading decisions.
 
 You receive ALL available data:
-1. Multi-timeframe indicators (1h, 4h, 1d) with Fibonacci levels
+1. Higher-timeframe indicators aligned to the mode (SWING: 4h/1d, POSITION: 1d/1w) with Fibonacci levels and timing context
 2. Structural analysis (support/resistance, divergences, volume profile)
 3. Funding rate + Global OI (Binance+Bybit+OKX) + OI Divergence + MFI (money flow index proxy)
 4. Perplexity market narrative (WHY price is moving)
@@ -35,11 +35,12 @@ CRITICAL V10 RULE - PLAYBOOK GENERATION:
 Regardless of your decision (even if HOLD), you MUST generate a `monitoring_playbook` that the Hourly Monitor can use. 
 - If your decision is LONG/SHORT, the `entry_conditions` should be the specific triggers that define your confirmed entry. 
 - If your decision is HOLD, the `entry_conditions` should be the "What needs to happen for me to enter?" scenario.
-- Use metrics: `price`, `funding_rate`, `oi_chg_pct`, `price_chg_pct_1h`, `volatility`.
+- Use metrics: `price`, `funding_rate`, `oi_chg_pct`, `price_chg_pct_4h`, `price_chg_pct_1d`, `volatility`.
 - Ensure operators are one of: `>`, `<`, `>=`, `<=`, `==`.
 
 CRITICAL EXECUTION RULE:
 - Prioritize evidence in this order: Higher-timeframe structure -> liquidity event / trap -> retest quality -> derivatives confirmation -> narrative.
+- Entry timing matters, but only after the higher-timeframe thesis is clear. Use execution-timeframe retests/reclaims, not low-timeframe noise, to time entries.
 - You MUST think in scenarios, not predictions. Always define:
   1. primary_scenario
   2. alternate_scenario
@@ -114,9 +115,10 @@ CRITICAL V5 RULE: You will be given a list of ACTIVE_ORDERS (e.g. pending DCA ch
 Be aware of your previous decision for consistency."""
 
     SWING_RULES = """Professional SWING trading principles you should consider:
-- Top-down analysis: 1d determines bias, 4h identifies setup, 1h confirms entry
+- Top-down analysis: 1d determines bias, 4h defines the setup and confirms the entry
 - Fibonacci 38.2%/50%/61.8% are key retracement entry zones
 - Invalidation is more important than precise entry. If invalidation is unclear, choose HOLD.
+- Good timing matters, but timing must come from 4h reclaim/retest quality near key levels, not from chasing short-term candles.
 - Respect liquidity events: sweep -> reclaim/reject -> retest is stronger than raw breakout chasing.
 - Prefer scenario wording such as "if reclaimed", "if retest holds", "if sweep fails" over unconditional directional claims.
 - Extreme funding rates are contrarian signals (high positive = potential top)
@@ -137,6 +139,7 @@ Be aware of your previous decision for consistency."""
     POSITION_RULES = """Professional POSITION trading principles you should consider:
 - Top-down analysis: 1w determines macro bias, 1d identifies structural shifts
 - Invalidation is more important than precise entry. If invalidation is unclear, choose HOLD.
+- Entry timing still matters, but it should come from 1d structure confirmation or pullback acceptance, not from intraday noise.
 - Prefer structure confirmation and liquidity sweep reversals over forcing continuation entries.
 - Macro cycles and previous All-Time Highs (ATH) act as absolute boundaries
 - Fundamental shifts and narrative multi-month trends are more important than daily orderbook noise
@@ -192,6 +195,7 @@ Return strict JSON only:
 Rules:
 - If the playbook source direction is LONG, you cannot output SHORT logic.
 - If the playbook source direction is SHORT, you cannot output LONG logic.
+- Focus on whether price is entering the planned zone with confirmation on the execution timeframe. Do not overreact to small intraday fluctuations.
 - If context is stale or thesis-breaking, prefer REPLAN over inventing the opposite side.
 - Use Korean for reasoning and replan_reason.
 - Output exactly one JSON object only.
