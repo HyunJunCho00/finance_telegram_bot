@@ -253,6 +253,11 @@ def run_snapshot_analysis_hot_path(
             mode=mode,
             notification_context=notification_context,
         )
+    else:
+        logger.error(
+            f"Hot path report generation returned empty payload for {symbol}/{mode.value} "
+            f"context={notification_context}"
+        )
     total_latency_ms = (time.perf_counter() - started) * 1000.0
     performance_telemetry.log_hot_path_run(
         symbol=symbol,

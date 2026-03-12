@@ -1831,6 +1831,64 @@ class Orchestrator:
     def is_daily_precision_running(self) -> bool:
         return self._daily_precision_active.is_set()
 
+    @staticmethod
+    def _daily_precision_summary_key() -> str:
+        return "daily_precision_last_summary"
+
+    def _persist_daily_precision_summary(self, summary: Dict) -> None:
+        try:
+            state_manager.set_system_config(
+                self._daily_precision_summary_key(),
+                json.dumps(summary, ensure_ascii=False),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to persist daily precision summary: {e}")
+
+    def _notify_daily_precision_failures(self, summary: Dict) -> None:
+        try:
+            results = summary.get("results", []) if isinstance(summary, dict) else []
+            failures = [item for item in results if str(item.get("status", "")).upper() != "SUCCESS"]
+            if not failures:
+                return
+
+            from executors.execution_repository import execution_repository
+            from executors.outbox_dispatcher import outbox_dispatcher
+
+            started_at = str(summary.get("run_started_at", "") or "")
+            lines = [
+                "<b>Daily Precision Partial Failure</b>",
+                f"Started: <code>{started_at[:16].replace('T', ' ') if started_at else 'N/A'} UTC</code>",
+            ]
+            for item in results:
+                symbol = str(item.get("symbol", "?") or "?")
+                mode = str(item.get("mode", "?") or "?").upper()
+                status = str(item.get("status", "UNKNOWN") or "UNKNOWN").upper()
+                report_id = str(item.get("report_id", "") or "-")
+                decision = str(item.get("decision", "") or "-")
+                error = str(item.get("error", "") or "").strip()
+                line = (
+                    f"- <b>{symbol} {mode}</b> | status=<code>{status}</code> "
+                    f"| decision=<code>{decision}</code> | report_id=<code>{report_id}</code>"
+                )
+                if error:
+                    safe_error = error[:240].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                    line += f"\n  error: <code>{safe_error}</code>"
+                lines.append(line)
+
+            target_chat_id = state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
+            execution_repository.enqueue_outbox_event(
+                "telegram_message",
+                {
+                    "chat_id": target_chat_id,
+                    "text": "\n".join(lines),
+                    "parse_mode": "HTML",
+                },
+                idempotency_key=f"telegram:daily_precision_summary:{started_at}",
+            )
+            outbox_dispatcher.publish_pending(limit=20)
+        except Exception as e:
+            logger.warning(f"Failed to notify daily precision failures: {e}")
+
     def run_analysis(
         self,
         symbol: str,
@@ -2246,10 +2304,13 @@ class Orchestrator:
         ]
         logger.info("=== Daily Precision Run ===")
         self._daily_precision_active.set()
+        run_started_at = datetime.now(timezone.utc).isoformat()
+        daily_results = []
         try:
             use_snapshot_hot_path = bool(getattr(settings, "ENABLE_SNAPSHOT_HOT_PATH_DAILY", True))
             inter_symbol_gap_minutes = max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
             for i, (symbol, mode) in enumerate(schedule):
+                symbol_started_at = datetime.now(timezone.utc).isoformat()
                 if i > 0 and inter_symbol_gap_minutes > 0:
                     logger.info(
                         f"Sleeping {inter_symbol_gap_minutes}m before {symbol}/{mode.value} "
@@ -2282,6 +2343,7 @@ class Orchestrator:
                             ),
                         }
                     elif self.graph:
+                        hot_result = {}
                         logger.info(f"[Daily] {symbol} {mode.value.upper()} running LangGraph path...")
                         state = self._run_with_langgraph(
                             symbol,
@@ -2292,6 +2354,7 @@ class Orchestrator:
                             notification_context="scheduled_daily",
                         )
                     else:
+                        hot_result = {}
                         logger.info(f"[Daily] {symbol} {mode.value.upper()} running sequential path...")
                         state = self._run_sequential(
                             symbol,
@@ -2302,6 +2365,7 @@ class Orchestrator:
                             notification_context="scheduled_daily",
                         )
 
+                    report_payload = hot_result.get("report", {}) if isinstance(hot_result, dict) else {}
                     playbook_decision = state if isinstance(state, dict) else {}
                     if isinstance(state, dict) and isinstance(state.get("final_decision"), dict):
                         playbook_decision = state.get("final_decision", {}) or {}
@@ -2318,8 +2382,43 @@ class Orchestrator:
                         "daily_dual_plan": playbook_dual_plan,
                     })
                     logger.info(f"[Daily] {symbol} {mode.value.upper()} done.")
-                except Exception as e:
-                    logger.error(f"Daily playbook error {symbol}/{mode.value}: {e}")
+                    report_id = ""
+                    if isinstance(report_payload, dict):
+                        report_id = str(report_payload.get("report_id") or report_payload.get("id") or "")
+                    decision_name = ""
+                    if isinstance(playbook_decision, dict):
+                        decision_name = str(playbook_decision.get("decision", "") or "")
+                    daily_results.append({
+                        "symbol": symbol,
+                        "mode": mode.value,
+                        "status": "SUCCESS" if report_payload else "NO_REPORT",
+                        "report_id": report_id,
+                        "decision": decision_name,
+                        "started_at": symbol_started_at,
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                except Exception:
+                    import traceback
+
+                    daily_results.append({
+                        "symbol": symbol,
+                        "mode": mode.value,
+                        "status": "FAILED",
+                        "report_id": "",
+                        "decision": "",
+                        "started_at": symbol_started_at,
+                        "finished_at": datetime.now(timezone.utc).isoformat(),
+                        "error": traceback.format_exc(limit=4),
+                    })
+                    logger.exception(f"Daily playbook error {symbol}/{mode.value}")
+            summary = {
+                "run_started_at": run_started_at,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "results": daily_results,
+            }
+            logger.info(f"Daily precision summary: {json.dumps(summary, ensure_ascii=False)}")
+            self._persist_daily_precision_summary(summary)
+            self._notify_daily_precision_failures(summary)
         finally:
             self._daily_precision_active.clear()
 

@@ -734,18 +734,33 @@ class ReportGenerator:
             )
             payload = self._build_notification_payload(report, chart_bytes, mode, notification_context)
             self._save_report_replay_payload(payload)
-            execution_repository.enqueue_outbox_event(
+            report_identity = (
+                payload.get("report_id")
+                or report.get("id")
+                or f"{report.get('symbol')}:{report.get('timestamp') or datetime.now(timezone.utc).isoformat()}"
+            )
+            enqueue_result = execution_repository.enqueue_outbox_event(
                 "telegram_payload",
                 {
                     "chat_id": chat_id,
                     "payload": payload,
                 },
-                idempotency_key=f"telegram_payload:{payload.get('report_id') or report.get('id') or report.get('symbol')}:{notification_context}",
+                idempotency_key=f"telegram_payload:{report_identity}:{notification_context}",
             )
+            if enqueue_result.get("deduped"):
+                logger.warning(
+                    f"Telegram payload deduped for {report.get('symbol')} "
+                    f"context={notification_context} report_identity={report_identity}"
+                )
             dispatch_result = outbox_dispatcher.publish_pending(limit=20)
             if dispatch_result.get("failed"):
                 logger.warning(
                     f"Telegram summary notification dispatch had failures: {dispatch_result.get('errors')}"
+                )
+            else:
+                logger.info(
+                    f"Telegram summary dispatch result: processed={dispatch_result.get('processed', 0)} "
+                    f"published={dispatch_result.get('published', 0)} deduped={bool(enqueue_result.get('deduped'))}"
                 )
             logger.info(f"Telegram summary notification queued (ID: {payload.get('report_id')})")
         except Exception as e:
