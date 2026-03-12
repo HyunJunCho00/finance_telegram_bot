@@ -147,6 +147,15 @@ class Settings(BaseSettings):
     DAILY_PRECISION_MINUTE_UTC: int = 30
     DAILY_PRECISION_PROTECTION_MINUTES: int = 20
     DAILY_PRECISION_SYMBOL_GAP_MINUTES: int = 10
+    STATS_ADAPTIVE_STD_WINDOW_HOURS: int = 24
+    STATS_ADAPTIVE_STD_MIN_PERIODS: int = 12
+    STATS_ADAPTIVE_STD_MIN_ROLLING_SAMPLES: int = 24
+    STATS_ADAPTIVE_STD_FLOOR_QUANTILE: float = 0.20
+    STATS_LIQ_MIN_STD_BTC_USD: float = 1500000.0
+    STATS_LIQ_MIN_STD_ETH_USD: float = 600000.0
+    STATS_LIQ_MIN_STD_DEFAULT_USD: float = 500000.0
+    STATS_DVOL_MIN_STD: float = 0.8
+    STATS_PCR_MIN_STD: float = 0.01
 
     # ===== AI Models (role API model single policy table) =====
     MODEL_ENDPOINT: str = "gemini-3.1-pro-preview"

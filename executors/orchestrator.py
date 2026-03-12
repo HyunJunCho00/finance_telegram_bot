@@ -47,6 +47,7 @@ from executors.performance_telemetry import performance_telemetry
 from executors.report_hot_path import run_report_hot_path, run_snapshot_analysis_hot_path
 from executors.post_mortem import write_post_mortem
 from executors.data_synthesizer import synthesize_training_data
+from executors.stats_thresholds import adaptive_std_floor, symbol_liq_min_std_usd
 from utils.cooldown import is_on_cooldown, set_cooldown
 from loguru import logger
 import numpy as np
@@ -456,21 +457,19 @@ def node_context_gathering(state: AnalysisState) -> dict:
         return db_updates
 
     def fetch_stats_context():
-        """Z-Score 계산용 역사적 통계 수집 (7일 청산, 마이크로스트럭처, 7일 DVOL).
+        """Z-Score 계산용 역사적 통계 수집.
 
-        기관급 기준:
-          - Liq  : 7일 hourly resample (168개). std < $5M이면 데이터 희박 → static fallback
-          - Micro: 7일 hourly snapshot (168개). 유효 샘플 >= 30 필요
-          - DVOL : 7일 hourly (168개). std < 2.0 이면 flat → static fallback
-                   (VIX 유사 지표: 7일 이하 lookback은 regime 변화 감지 불가)
+        고정 임계값 대신 최근 7일 시계열 내부의 rolling std 분포를 사용해
+        asset/regime 별로 adaptive floor를 계산한다.
         """
         stats = {}
         currency = symbol[:-4] if symbol.endswith("USDT") else symbol
-
-        # 기관 최소 std 기준: 이 이하면 rolling 창이 너무 좁거나 데이터 희박
-        MIN_LIQ_STD_USD = 5_000_000   # $5M  — 이하이면 z-score 신뢰 불가
-        MIN_DVOL_STD    = 2.0          # 2pt  — 7일간 DVOL이 2pt도 안 움직이면 flat
-        MIN_PCR_STD     = 0.05         # 0.05 — PCR이 5bp도 안 움직이면 flat
+        adaptive_kwargs = {
+            "rolling_window": int(getattr(settings, "STATS_ADAPTIVE_STD_WINDOW_HOURS", 24)),
+            "rolling_quantile": float(getattr(settings, "STATS_ADAPTIVE_STD_FLOOR_QUANTILE", 0.20)),
+            "min_periods": int(getattr(settings, "STATS_ADAPTIVE_STD_MIN_PERIODS", 12)),
+            "min_rolling_samples": int(getattr(settings, "STATS_ADAPTIVE_STD_MIN_ROLLING_SAMPLES", 24)),
+        }
 
         # ── 1. Liquidation 7-day hourly stats ─────────────────────────────
         try:
@@ -490,13 +489,31 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 stats["liq_p99"] = float(hourly["total"].quantile(0.99))
                 stats["liq_median"] = liq_median
                 stats["liq_mad"] = liq_mad
-                if liq_std >= MIN_LIQ_STD_USD:
+                liq_floor_meta = adaptive_std_floor(
+                    hourly["total"].tolist(),
+                    base_floor=symbol_liq_min_std_usd(
+                        symbol,
+                        btc_floor=float(getattr(settings, "STATS_LIQ_MIN_STD_BTC_USD", 1_500_000.0)),
+                        eth_floor=float(getattr(settings, "STATS_LIQ_MIN_STD_ETH_USD", 600_000.0)),
+                        default_floor=float(getattr(settings, "STATS_LIQ_MIN_STD_DEFAULT_USD", 500_000.0)),
+                    ),
+                    **adaptive_kwargs,
+                )
+                liq_floor = float(liq_floor_meta["floor"])
+                stats["liq_std_floor"] = liq_floor
+                stats["liq_std_floor_base"] = float(liq_floor_meta["base_floor"])
+                stats["liq_std_floor_rolling"] = float(liq_floor_meta["rolling_floor"])
+                if liq_std >= liq_floor:
                     stats["liq_mean"] = liq_mean
                     stats["liq_std"]  = liq_std
-                    logger.debug(f"[Stats] liq mean=${liq_mean:,.0f} std=${liq_std:,.0f}")
+                    logger.debug(
+                        f"[Stats] liq mean=${liq_mean:,.0f} std=${liq_std:,.0f} "
+                        f"floor=${liq_floor:,.0f}"
+                    )
                 else:
                     logger.warning(
-                        f"[Stats] liq_std ${liq_std:,.0f} < ${MIN_LIQ_STD_USD:,.0f} "
+                        f"[Stats] liq_std ${liq_std:,.0f} < adaptive floor ${liq_floor:,.0f} "
+                        f"(base=${liq_floor_meta['base_floor']:,.0f}, rolling={liq_floor_meta['rolling_floor']:,.0f}) "
                         f"— 데이터 희박, static fallback 사용"
                     )
         except Exception as e:
@@ -543,23 +560,39 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 if dvols:
                     dvol_mean = float(np.mean(dvols))
                     dvol_std  = float(np.std(dvols))
-                    if dvol_std >= MIN_DVOL_STD:
+                    dvol_floor_meta = adaptive_std_floor(
+                        dvols,
+                        base_floor=float(getattr(settings, "STATS_DVOL_MIN_STD", 0.8)),
+                        **adaptive_kwargs,
+                    )
+                    dvol_floor = float(dvol_floor_meta["floor"])
+                    stats["dvol_std_floor"] = dvol_floor
+                    if dvol_std >= dvol_floor:
                         stats["dvol_mean"] = dvol_mean
                         stats["dvol_std"]  = dvol_std
                     else:
                         logger.warning(
-                            f"[Stats] dvol_std={dvol_std:.2f} < {MIN_DVOL_STD} "
+                            f"[Stats] dvol_std={dvol_std:.2f} < adaptive floor {dvol_floor:.2f} "
+                            f"(base={dvol_floor_meta['base_floor']:.2f}, rolling={dvol_floor_meta['rolling_floor']:.2f}) "
                             f"— DVOL flat, static fallback"
                         )
                 if pcrs:
                     pcr_mean = float(np.mean(pcrs))
                     pcr_std  = float(np.std(pcrs))
-                    if pcr_std >= MIN_PCR_STD:
+                    pcr_floor_meta = adaptive_std_floor(
+                        pcrs,
+                        base_floor=float(getattr(settings, "STATS_PCR_MIN_STD", 0.01)),
+                        **adaptive_kwargs,
+                    )
+                    pcr_floor = float(pcr_floor_meta["floor"])
+                    stats["pcr_std_floor"] = pcr_floor
+                    if pcr_std >= pcr_floor:
                         stats["pcr_mean"] = pcr_mean
                         stats["pcr_std"]  = pcr_std
                     else:
                         logger.warning(
-                            f"[Stats] pcr_std={pcr_std:.4f} < {MIN_PCR_STD} "
+                            f"[Stats] pcr_std={pcr_std:.4f} < adaptive floor {pcr_floor:.4f} "
+                            f"(base={pcr_floor_meta['base_floor']:.4f}, rolling={pcr_floor_meta['rolling_floor']:.4f}) "
                             f"— PCR flat, static fallback"
                         )
             elif rows.data:
