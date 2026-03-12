@@ -31,6 +31,9 @@ import base64
 import re
 from datetime import datetime, timezone, timedelta
 
+_daily_precision_prepare_lock = threading.Lock()
+_daily_precision_prepare_bucket = ""
+
 
 def _daily_precision_schedule_hours_utc() -> list[int]:
     raw = str(getattr(settings, "DAILY_PRECISION_HOURS_UTC", "") or "").strip()
@@ -60,23 +63,49 @@ def _daily_precision_label_utc() -> str:
     return ", ".join(f"{hour:02d}:{minute:02d}" for hour in _daily_precision_schedule_hours_utc())
 
 
+def _daily_precision_schedule_slots_utc(offset_minutes: int = 0) -> list[tuple[int, int]]:
+    minute = int(getattr(settings, "DAILY_PRECISION_MINUTE_UTC", 30))
+    slots: list[tuple[int, int]] = []
+    for hour in _daily_precision_schedule_hours_utc():
+        total_minutes = ((hour * 60) + minute + int(offset_minutes)) % (24 * 60)
+        slots.append((total_minutes // 60, total_minutes % 60))
+    return sorted(set(slots))
+
+
+def _daily_precision_symbol_label_utc(symbol_index: int) -> str:
+    gap = max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
+    slots = _daily_precision_schedule_slots_utc(offset_minutes=symbol_index * gap)
+    return ", ".join(f"{hour:02d}:{minute:02d}" for hour, minute in slots)
+
+
+def _daily_precision_all_labels_utc() -> str:
+    labels = []
+    for idx, symbol in enumerate(settings.trading_symbols):
+        labels.append(f"{symbol}={_daily_precision_symbol_label_utc(idx)}")
+    return " | ".join(labels) if labels else _daily_precision_label_utc()
+
+
 def _daily_precision_protection_window_minutes() -> int:
     return max(0, int(getattr(settings, "DAILY_PRECISION_PROTECTION_MINUTES", 20)))
 
 
 def _is_daily_precision_protection_window(now_utc: datetime | None = None) -> bool:
     now = now_utc or datetime.now(timezone.utc)
-    minute = int(getattr(settings, "DAILY_PRECISION_MINUTE_UTC", 30))
     protection_minutes = _daily_precision_protection_window_minutes()
     base_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    slot_offsets = [
+        idx * max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
+        for idx, _ in enumerate(settings.trading_symbols)
+    ] or [0]
     for day_offset in (-1, 0, 1):
         day_anchor = base_day + timedelta(days=day_offset)
-        for hour in _daily_precision_schedule_hours_utc():
-            scheduled = day_anchor.replace(hour=hour, minute=minute)
-            window_start = scheduled - timedelta(minutes=protection_minutes // 2)
-            window_end = scheduled + timedelta(minutes=protection_minutes)
-            if window_start <= now <= window_end:
-                return True
+        for offset in slot_offsets:
+            for hour, minute in _daily_precision_schedule_slots_utc(offset_minutes=offset):
+                scheduled = day_anchor.replace(hour=hour, minute=minute)
+                window_start = scheduled - timedelta(minutes=protection_minutes // 2)
+                window_end = scheduled + timedelta(minutes=protection_minutes)
+                if window_start <= now <= window_end:
+                    return True
     return False
 
 
@@ -86,7 +115,7 @@ def _should_defer_heavy_job(job_name: str) -> bool:
         return True
     if _is_daily_precision_protection_window():
         logger.info(
-            f"{job_name} skipped (inside daily precision protection window around {_daily_precision_label_utc()} UTC)"
+            f"{job_name} skipped (inside daily precision protection window around {_daily_precision_all_labels_utc()} UTC)"
         )
         return True
     return False
@@ -1255,6 +1284,35 @@ def job_daily_safe_cleanup():
 
 
 
+def _daily_precision_prep_bucket(now_utc: datetime | None = None) -> str:
+    now = now_utc or datetime.now(timezone.utc)
+    candidates = []
+    base_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    base_minute = int(getattr(settings, "DAILY_PRECISION_MINUTE_UTC", 30))
+    for day_offset in (-1, 0, 1):
+        day_anchor = base_day + timedelta(days=day_offset)
+        for hour in _daily_precision_schedule_hours_utc():
+            candidates.append(day_anchor.replace(hour=hour, minute=base_minute))
+    latest = max((item for item in candidates if item <= now), default=None)
+    if latest is None:
+        latest = min(candidates) if candidates else now
+    return latest.isoformat(timespec="minutes")
+
+
+def job_daily_precision_prepare_shared() -> None:
+    global _daily_precision_prepare_bucket
+
+    bucket = _daily_precision_prep_bucket()
+    with _daily_precision_prepare_lock:
+        if bucket == _daily_precision_prepare_bucket:
+            logger.info(f"Daily precision shared prep already completed for bucket={bucket}")
+            return
+        logger.info(f"Running daily precision shared prep for bucket={bucket}")
+        job_daily_coinmetrics()
+        macro_collector.run()
+        _daily_precision_prepare_bucket = bucket
+
+
 def job_daily_precision():
     """Daily UTC serial: BTC POSITION -> ETH POSITION.
     Runs high-quality analysis once per symbol and persists dual-lane playbooks.
@@ -1264,11 +1322,25 @@ def job_daily_precision():
         if not state_manager.is_analysis_enabled():
             logger.info("Daily precision skipped (analysis disabled)")
             return
-        job_daily_coinmetrics()
-        macro_collector.run()
+        job_daily_precision_prepare_shared()
         orchestrator.run_daily_playbook()
     except Exception as e:
         logger.error(f"Daily precision job error: {e}")
+
+
+def job_daily_precision_symbol(symbol: str):
+    """Daily UTC single-symbol precision runner."""
+    try:
+        from config.local_state import state_manager
+        normalized_symbol = str(symbol or "").upper()
+        if not state_manager.is_analysis_enabled():
+            logger.info(f"Daily precision skipped for {normalized_symbol} (analysis disabled)")
+            return
+        job_daily_precision_prepare_shared()
+        result = orchestrator.run_daily_playbook_for_symbol(normalized_symbol, TradingMode.POSITION)
+        logger.info(f"Daily precision result for {normalized_symbol}: {result}")
+    except Exception as e:
+        logger.error(f"Daily precision job error for {symbol}: {e}")
 
 
 def job_hourly_monitor():
@@ -1291,7 +1363,7 @@ def main():
 
     logger.info(f"Starting Trading System (mode={mode.value})")
     logger.info(
-        f"  Primary analysis cadence (UTC): daily_precision={_daily_precision_label_utc()} | "
+        f"  Primary analysis cadence (UTC): daily_precision={_daily_precision_all_labels_utc()} | "
         "hourly_monitor=hh:15 | market_status=hh:20"
     )
     logger.info(f"  Timeframes: {settings.analysis_timeframes}")
@@ -1443,16 +1515,17 @@ def main():
         max_instances=1,
     )
 
-    # ✨✨ Daily Precision (UTC-configurable) [BTC/ETH] SWING/POSITION Playbook generation ✨✨
-    scheduler_config.scheduler.add_job(
-        job_daily_precision,
-        CronTrigger(
-            hour=_daily_precision_schedule_hours_expr_utc(),
-            minute=int(getattr(settings, "DAILY_PRECISION_MINUTE_UTC", 30)),
-        ),
-        id='job_daily_precision',
-        max_instances=1,
-    )
+    # ✨✨ Daily Precision (UTC-configurable) independent symbol jobs ✨✨
+    daily_gap_minutes = max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
+    for symbol_index, symbol in enumerate(settings.trading_symbols):
+        slot_offset = symbol_index * daily_gap_minutes
+        for hour, minute in _daily_precision_schedule_slots_utc(offset_minutes=slot_offset):
+            scheduler_config.scheduler.add_job(
+                lambda _symbol=symbol: job_daily_precision_symbol(_symbol),
+                CronTrigger(hour=hour, minute=minute),
+                id=f"job_daily_precision_{symbol.lower()}_{hour:02d}{minute:02d}",
+                max_instances=1,
+            )
 
     # Async-DAG snapshot prewarm for fast report hot path
     scheduler_config.scheduler.add_job(
@@ -1538,7 +1611,7 @@ def main():
     scheduler_config.scheduler.start()
     logger.info("Scheduler started.")
     logger.info(
-        f"Cadence(UTC): daily_precision={_daily_precision_label_utc()} | snapshot_fast=hh:*/5 | "
+        f"Cadence(UTC): daily_precision={_daily_precision_all_labels_utc()} | snapshot_fast=hh:*/5 | "
         "snapshot_narrative=hh:02,32 | telegram_batch=hh:05 | crypto_news=hh:10 | hourly_monitor=hh:15 | market_status=hh:20 | daily_rollup=00:40 | "
         "hourly_eval=hh:45 | gcs_archive=01:00 | safe_cleanup=01:20"
     )

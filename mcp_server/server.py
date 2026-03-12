@@ -17,7 +17,15 @@ def _precision_schedule_labels_utc() -> str:
                 hours.append(int(chunk))
     if not hours:
         hours = [int(getattr(settings, "DAILY_PRECISION_HOUR_UTC", 0))]
-    return ", ".join(f"{hour:02d}:{minute:02d}" for hour in sorted(set(hours)))
+    gap = max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
+    labels = []
+    for idx, symbol in enumerate(settings.trading_symbols):
+        slots = []
+        for hour in sorted(set(hours)):
+            total_minutes = ((hour * 60) + minute + (idx * gap)) % (24 * 60)
+            slots.append(f"{total_minutes // 60:02d}:{total_minutes % 60:02d}")
+        labels.append(f"{symbol}={', '.join(slots)}")
+    return " | ".join(labels)
 
 
 def _direct_trade_blocked(reason: str) -> dict:

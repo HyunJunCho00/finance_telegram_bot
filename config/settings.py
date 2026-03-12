@@ -156,6 +156,9 @@ class Settings(BaseSettings):
     STATS_LIQ_MIN_STD_DEFAULT_USD: float = 500000.0
     STATS_DVOL_MIN_STD: float = 0.8
     STATS_PCR_MIN_STD: float = 0.01
+    STATS_MAX_LIQ_STALE_HOURS: float = 6.0
+    STATS_MAX_MICRO_STALE_HOURS: float = 3.0
+    STATS_MAX_DERIBIT_STALE_HOURS: float = 6.0
 
     # ===== AI Models (role API model single policy table) =====
     MODEL_ENDPOINT: str = "gemini-3.1-pro-preview"

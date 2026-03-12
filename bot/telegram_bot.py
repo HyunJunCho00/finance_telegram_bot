@@ -7,6 +7,7 @@ Commands:
 /evaluate  - Show recent realtime-pressure evaluation summary
 /mode      - Show fixed dual-mode policy
 /report    - Resend latest analysis report
+/daily_status - Show latest scheduled daily result per symbol
 /onchain   - Show latest on-chain snapshot
 /chart     - Generate premium technical chart
 /report_on - Resume automated AI analysis
@@ -37,7 +38,15 @@ def _precision_schedule_labels_utc() -> str:
                 hours.append(int(chunk))
     if not hours:
         hours = [int(getattr(settings, "DAILY_PRECISION_HOUR_UTC", 0))]
-    return ", ".join(f"{hour:02d}:{minute:02d}" for hour in sorted(set(hours)))
+    gap = max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
+    labels = []
+    for idx, symbol in enumerate(settings.trading_symbols):
+        slots = []
+        for hour in sorted(set(hours)):
+            total_minutes = ((hour * 60) + minute + (idx * gap)) % (24 * 60)
+            slots.append(f"{total_minutes // 60:02d}:{total_minutes % 60:02d}")
+        labels.append(f"{symbol}={', '.join(slots)}")
+    return " | ".join(labels)
 
 # --- 자연어 채팅 핸들러용 상수 ---
 
@@ -351,6 +360,7 @@ class TradingBot:
             f"/chart   - Generate HD technical chart\n"
             f"/mode    - Show fixed policy\n"
             f"/report  - Resend last scheduled report\n"
+            f"/daily_status - Latest scheduled daily status\n"
             f"/report_off - Pause AI (Save $)\n"
             f"/report_on  - Resume AI\n"
             f"/help    - Show all commands"
@@ -367,6 +377,7 @@ class TradingBot:
             "/onchain [BTC|ETH] - Show latest on-chain snapshot and MVRV\n"
             "/chart [BTC|ETH] [swing|position] - Generate premium HD chart\n"
             "/report - Resend last scheduled report\n"
+            "/daily_status - Latest scheduled daily status for BTC/ETH\n"
             "/mode - Show fixed dual-mode policy (change disabled)\n"
             "/report_off - PAUSE AI automation (Save cost)\n"
             "/report_on  - RESUME AI automation\n"
@@ -479,6 +490,67 @@ class TradingBot:
             if details:
                 line += " | " + " | ".join(details)
             lines.append(line)
+
+        return "\n".join(lines)
+
+    @staticmethod
+    def _load_daily_precision_summary() -> Dict[str, Any]:
+        from config.local_state import state_manager
+
+        raw = state_manager.get_system_config("daily_precision_last_summary", "")
+        default = {"updated_at": "", "symbols": {}}
+        if not raw:
+            return dict(default)
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            return dict(default)
+        if not isinstance(payload, dict):
+            return dict(default)
+        if isinstance(payload.get("symbols"), dict):
+            return payload
+        if isinstance(payload.get("results"), list):
+            return {
+                "updated_at": str(payload.get("finished_at", "") or ""),
+                "symbols": {
+                    str(item.get("symbol")): item
+                    for item in payload.get("results", [])
+                    if isinstance(item, dict) and item.get("symbol")
+                },
+            }
+        return dict(default)
+
+    @staticmethod
+    def _format_daily_precision_status(summary: Dict[str, Any]) -> str:
+        symbols = (summary.get("symbols", {}) if isinstance(summary, dict) else {}) or {}
+        updated_at = str((summary or {}).get("updated_at", "") or "")
+        lines = [
+            "<b>Daily Precision Status</b>",
+            f"Schedule (UTC): <code>{_precision_schedule_labels_utc()}</code>",
+        ]
+        if updated_at:
+            lines.append(f"Updated: <code>{updated_at[:16].replace('T', ' ')} UTC</code>")
+
+        for symbol in settings.trading_symbols:
+            item = symbols.get(symbol)
+            if not isinstance(item, dict):
+                lines.append(f"- <b>{symbol}</b> | status=<code>NO_RECORD</code>")
+                continue
+            status = str(item.get("status", "UNKNOWN") or "UNKNOWN").upper()
+            decision = str(item.get("decision", "") or "-")
+            report_id = str(item.get("report_id", "") or "-")
+            finished_at = str(item.get("finished_at", "") or "")
+            line = (
+                f"- <b>{symbol}</b> | status=<code>{status}</code> "
+                f"| decision=<code>{decision}</code> | report_id=<code>{report_id}</code>"
+            )
+            if finished_at:
+                line += f" | at <code>{finished_at[:16].replace('T', ' ')}</code>"
+            lines.append(line)
+            error = str(item.get("error", "") or "").strip()
+            if error and status != "SUCCESS":
+                safe_error = error[:180].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                lines.append(f"  error: <code>{safe_error}</code>")
 
         return "\n".join(lines)
 
@@ -662,6 +734,17 @@ class TradingBot:
             "- POSITION: spot accumulation lane (LONG only)\n"
             "Both lanes run together every cycle."
         )
+
+    async def cmd_daily_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        try:
+            summary = await asyncio.to_thread(self._load_daily_precision_summary)
+            await update.message.reply_text(
+                self._format_daily_precision_status(summary),
+                parse_mode='HTML',
+            )
+        except Exception as e:
+            logger.error(f"Daily status command error: {e}")
+            await update.message.reply_text(f"Error: {e}")
 
     async def cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
@@ -1153,6 +1236,7 @@ class TradingBot:
         app.add_handler(CommandHandler("evaluate", self.cmd_evaluate))
         app.add_handler(CommandHandler("mode", self.cmd_mode))
         app.add_handler(CommandHandler("report", self.cmd_report))
+        app.add_handler(CommandHandler("daily_status", self.cmd_daily_status))
         app.add_handler(CommandHandler("onchain", self.cmd_onchain))
         app.add_handler(CommandHandler("report_on", self.cmd_report_on))
         app.add_handler(CommandHandler("report_off", self.cmd_report_off))

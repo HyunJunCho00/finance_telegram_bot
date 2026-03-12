@@ -471,10 +471,28 @@ def node_context_gathering(state: AnalysisState) -> dict:
             "min_rolling_samples": int(getattr(settings, "STATS_ADAPTIVE_STD_MIN_ROLLING_SAMPLES", 24)),
         }
 
+        def _age_hours(value) -> float | None:
+            try:
+                ts = pd.to_datetime(value, utc=True, errors="coerce")
+                if pd.isna(ts):
+                    return None
+                return float((pd.Timestamp.now(tz="UTC") - ts).total_seconds() / 3600.0)
+            except Exception:
+                return None
+
         # ── 1. Liquidation 7-day hourly stats ─────────────────────────────
         try:
             liq_df_wide = db.get_liquidation_data(symbol, limit=10080)  # 7d × 1440
             if not liq_df_wide.empty and "timestamp" in liq_df_wide.columns:
+                liq_ts = pd.to_datetime(liq_df_wide["timestamp"], utc=True, errors="coerce")
+                latest_liq_ts = liq_ts.max()
+                liq_age_hours = _age_hours(latest_liq_ts)
+                liq_is_stale = (
+                    liq_age_hours is not None
+                    and liq_age_hours > float(getattr(settings, "STATS_MAX_LIQ_STALE_HOURS", 6.0))
+                )
+                stats["liq_data_age_hours"] = liq_age_hours
+                stats["liq_data_stale"] = bool(liq_is_stale)
                 hourly = (
                     liq_df_wide.set_index("timestamp")[["long_liq_usd", "short_liq_usd"]]
                     .resample("1h").sum()
@@ -503,7 +521,12 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 stats["liq_std_floor"] = liq_floor
                 stats["liq_std_floor_base"] = float(liq_floor_meta["base_floor"])
                 stats["liq_std_floor_rolling"] = float(liq_floor_meta["rolling_floor"])
-                if liq_std >= liq_floor:
+                if liq_is_stale:
+                    logger.warning(
+                        f"[Stats] liquidation data stale age={liq_age_hours:.2f}h "
+                        f"> {float(getattr(settings, 'STATS_MAX_LIQ_STALE_HOURS', 6.0)):.2f}h — static fallback"
+                    )
+                elif liq_std >= liq_floor:
                     stats["liq_mean"] = liq_mean
                     stats["liq_std"]  = liq_std
                     logger.debug(
@@ -523,19 +546,33 @@ def node_context_gathering(state: AnalysisState) -> dict:
         try:
             rows = (
                 db.client.table("microstructure_data")
-                .select("spread_bps,orderbook_imbalance")
+                .select("spread_bps,orderbook_imbalance,timestamp")
                 .eq("symbol", symbol)
                 .order("timestamp", desc=True)
                 .limit(168)
                 .execute()
             )
             if rows.data and len(rows.data) >= 30:  # 30개 미만이면 std 불안정
+                latest_micro_ts = max((r.get("timestamp") for r in rows.data if r.get("timestamp")), default=None)
+                micro_age_hours = _age_hours(latest_micro_ts)
+                micro_is_stale = (
+                    micro_age_hours is not None
+                    and micro_age_hours > float(getattr(settings, "STATS_MAX_MICRO_STALE_HOURS", 3.0))
+                )
+                stats["micro_data_age_hours"] = micro_age_hours
+                stats["micro_data_stale"] = bool(micro_is_stale)
                 imbs    = [abs(float(r.get("orderbook_imbalance") or 0)) for r in rows.data]
                 spreads = [float(r.get("spread_bps") or 0) for r in rows.data]
-                stats["imbalance_mean"] = float(np.mean(imbs))
-                stats["imbalance_std"]  = float(np.std(imbs))
-                stats["spread_mean"]    = float(np.mean(spreads))
-                stats["spread_std"]     = float(np.std(spreads))
+                if micro_is_stale:
+                    logger.warning(
+                        f"[Stats] microstructure data stale age={micro_age_hours:.2f}h "
+                        f"> {float(getattr(settings, 'STATS_MAX_MICRO_STALE_HOURS', 3.0)):.2f}h — static fallback"
+                    )
+                else:
+                    stats["imbalance_mean"] = float(np.mean(imbs))
+                    stats["imbalance_std"]  = float(np.std(imbs))
+                    stats["spread_mean"]    = float(np.mean(spreads))
+                    stats["spread_std"]     = float(np.std(spreads))
             elif rows.data:
                 logger.warning(
                     f"[Stats] micro samples={len(rows.data)} < 30 — std 불안정, static fallback"
@@ -548,16 +585,29 @@ def node_context_gathering(state: AnalysisState) -> dict:
         try:
             rows = (
                 db.client.table("deribit_data")
-                .select("dvol,pcr_oi")
+                .select("dvol,pcr_oi,timestamp")
                 .eq("symbol", currency)
                 .order("timestamp", desc=True)
                 .limit(168)   # 7일 × 24h (기관 표준 최단 lookback)
                 .execute()
             )
             if rows.data and len(rows.data) >= 24:  # 최소 1일치 hourly 필요
+                latest_deribit_ts = max((r.get("timestamp") for r in rows.data if r.get("timestamp")), default=None)
+                deribit_age_hours = _age_hours(latest_deribit_ts)
+                deribit_is_stale = (
+                    deribit_age_hours is not None
+                    and deribit_age_hours > float(getattr(settings, "STATS_MAX_DERIBIT_STALE_HOURS", 6.0))
+                )
+                stats["deribit_data_age_hours"] = deribit_age_hours
+                stats["deribit_data_stale"] = bool(deribit_is_stale)
                 dvols = [float(r["dvol"])   for r in rows.data if r.get("dvol")]
                 pcrs  = [float(r["pcr_oi"]) for r in rows.data if r.get("pcr_oi")]
-                if dvols:
+                if deribit_is_stale:
+                    logger.warning(
+                        f"[Stats] deribit data stale age={deribit_age_hours:.2f}h "
+                        f"> {float(getattr(settings, 'STATS_MAX_DERIBIT_STALE_HOURS', 6.0)):.2f}h — static fallback"
+                    )
+                elif dvols:
                     dvol_mean = float(np.mean(dvols))
                     dvol_std  = float(np.std(dvols))
                     dvol_floor_meta = adaptive_std_floor(
@@ -576,7 +626,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
                             f"(base={dvol_floor_meta['base_floor']:.2f}, rolling={dvol_floor_meta['rolling_floor']:.2f}) "
                             f"— DVOL flat, static fallback"
                         )
-                if pcrs:
+                if not deribit_is_stale and pcrs:
                     pcr_mean = float(np.mean(pcrs))
                     pcr_std  = float(np.std(pcrs))
                     pcr_floor_meta = adaptive_std_floor(
@@ -1843,7 +1893,8 @@ class Orchestrator:
         self.symbols = settings.trading_symbols
         self._graph = None
         self._analysis_locks: Dict[str, threading.Lock] = {}
-        self._daily_precision_active = threading.Event()
+        self._daily_precision_active_count = 0
+        self._daily_precision_state_lock = threading.Lock()
         ensure_registered()
 
     @property
@@ -1862,11 +1913,49 @@ class Orchestrator:
         return self._graph
 
     def is_daily_precision_running(self) -> bool:
-        return self._daily_precision_active.is_set()
+        with self._daily_precision_state_lock:
+            return self._daily_precision_active_count > 0
+
+    def _enter_daily_precision_run(self) -> None:
+        with self._daily_precision_state_lock:
+            self._daily_precision_active_count += 1
+
+    def _exit_daily_precision_run(self) -> None:
+        with self._daily_precision_state_lock:
+            self._daily_precision_active_count = max(0, self._daily_precision_active_count - 1)
 
     @staticmethod
     def _daily_precision_summary_key() -> str:
         return "daily_precision_last_summary"
+
+    def get_last_daily_precision_summary(self) -> Dict:
+        default = {"updated_at": "", "symbols": {}}
+        try:
+            raw = state_manager.get_system_config(self._daily_precision_summary_key(), "")
+            if not raw:
+                return dict(default)
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                return dict(default)
+            symbols = payload.get("symbols")
+            if isinstance(symbols, dict):
+                return {
+                    "updated_at": str(payload.get("updated_at", "") or ""),
+                    "symbols": symbols,
+                }
+            results = payload.get("results")
+            if isinstance(results, list):
+                converted = {}
+                for item in results:
+                    if isinstance(item, dict) and item.get("symbol"):
+                        converted[str(item["symbol"])] = item
+                return {
+                    "updated_at": str(payload.get("finished_at", "") or payload.get("updated_at", "") or ""),
+                    "symbols": converted,
+                }
+        except Exception as e:
+            logger.warning(f"Failed to load daily precision summary: {e}")
+        return dict(default)
 
     def _persist_daily_precision_summary(self, summary: Dict) -> None:
         try:
@@ -1877,22 +1966,33 @@ class Orchestrator:
         except Exception as e:
             logger.warning(f"Failed to persist daily precision summary: {e}")
 
-    def _notify_daily_precision_failures(self, summary: Dict) -> None:
+    def _update_daily_precision_summary(self, result: Dict) -> Dict:
+        summary = self.get_last_daily_precision_summary()
+        symbols = summary.setdefault("symbols", {})
+        symbols[str(result.get("symbol", "") or "")] = dict(result or {})
+        summary["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._persist_daily_precision_summary(summary)
+        return summary
+
+    def _notify_daily_precision_failure(self, result: Dict, summary: Dict) -> None:
         try:
-            results = summary.get("results", []) if isinstance(summary, dict) else []
-            failures = [item for item in results if str(item.get("status", "")).upper() != "SUCCESS"]
-            if not failures:
+            if str((result or {}).get("status", "")).upper() == "SUCCESS":
                 return
 
             from executors.execution_repository import execution_repository
             from executors.outbox_dispatcher import outbox_dispatcher
 
-            started_at = str(summary.get("run_started_at", "") or "")
+            started_at = str((result or {}).get("started_at", "") or "")
             lines = [
                 "<b>Daily Precision Partial Failure</b>",
                 f"Started: <code>{started_at[:16].replace('T', ' ') if started_at else 'N/A'} UTC</code>",
             ]
-            for item in results:
+            symbol_rows = (summary.get("symbols", {}) if isinstance(summary, dict) else {}) or {}
+            ordered_symbols = list(settings.trading_symbols) or list(symbol_rows.keys())
+            for symbol_key in ordered_symbols:
+                item = symbol_rows.get(symbol_key)
+                if not isinstance(item, dict):
+                    continue
                 symbol = str(item.get("symbol", "?") or "?")
                 mode = str(item.get("mode", "?") or "?").upper()
                 status = str(item.get("status", "UNKNOWN") or "UNKNOWN").upper()
@@ -1916,7 +2016,7 @@ class Orchestrator:
                     "text": "\n".join(lines),
                     "parse_mode": "HTML",
                 },
-                idempotency_key=f"telegram:daily_precision_summary:{started_at}",
+                idempotency_key=f"telegram:daily_precision_summary:{result.get('symbol')}:{started_at}:{result.get('status')}",
             )
             outbox_dispatcher.publish_pending(limit=20)
         except Exception as e:
@@ -2322,138 +2422,164 @@ class Orchestrator:
         )
 
 
+    def _execute_daily_playbook_for_symbol(self, symbol: str, mode: TradingMode) -> Dict:
+        symbol_started_at = datetime.now(timezone.utc).isoformat()
+        result = {
+            "symbol": symbol,
+            "mode": mode.value,
+            "status": "FAILED",
+            "report_id": "",
+            "decision": "",
+            "started_at": symbol_started_at,
+            "finished_at": symbol_started_at,
+        }
+        use_snapshot_hot_path = bool(getattr(settings, "ENABLE_SNAPSHOT_HOT_PATH_DAILY", True))
+        try:
+            logger.info(f"[Daily] {symbol} {mode.value.upper()} starting...")
+            _clear_symbol_mode_caches(symbol, mode)
+
+            if use_snapshot_hot_path:
+                logger.info(f"[Daily] {symbol} {mode.value.upper()} refreshing snapshot + hot path...")
+                hot_result = self.run_snapshot_analysis_with_mode(
+                    symbol,
+                    mode,
+                    allow_perplexity=True,
+                    wait_budget_s=5.0,
+                    notification_context="scheduled_daily",
+                )
+                logger.info(f"[Daily] {symbol} {mode.value.upper()} hot path returned.")
+                final_decision = hot_result.get("final_decision", {}) if isinstance(hot_result, dict) else {}
+                state = {
+                    "symbol": symbol,
+                    "mode": mode.value,
+                    "final_decision": final_decision,
+                    "daily_dual_plan": (
+                        final_decision.get("daily_dual_plan", {})
+                        if isinstance(final_decision, dict)
+                        else {}
+                    ),
+                }
+            elif self.graph:
+                hot_result = {}
+                logger.info(f"[Daily] {symbol} {mode.value.upper()} running LangGraph path...")
+                state = self._run_with_langgraph(
+                    symbol,
+                    mode,
+                    is_emergency=False,
+                    execute_trades=True,
+                    allow_perplexity=True,
+                    notification_context="scheduled_daily",
+                )
+            else:
+                hot_result = {}
+                logger.info(f"[Daily] {symbol} {mode.value.upper()} running sequential path...")
+                state = self._run_sequential(
+                    symbol,
+                    mode,
+                    is_emergency=False,
+                    execute_trades=True,
+                    allow_perplexity=True,
+                    notification_context="scheduled_daily",
+                )
+
+            report_payload = hot_result.get("report", {}) if isinstance(hot_result, dict) else {}
+            playbook_decision = state if isinstance(state, dict) else {}
+            if isinstance(state, dict) and isinstance(state.get("final_decision"), dict):
+                playbook_decision = state.get("final_decision", {}) or {}
+            playbook_dual_plan = {}
+            if isinstance(state, dict):
+                playbook_dual_plan = state.get("daily_dual_plan", {}) or {}
+            if not playbook_dual_plan and isinstance(playbook_decision, dict):
+                playbook_dual_plan = playbook_decision.get("daily_dual_plan", {}) or {}
+            logger.info(f"[Daily] {symbol} {mode.value.upper()} persisting playbook...")
+            node_generate_playbook({
+                "symbol": symbol,
+                "mode": mode.value,
+                "final_decision": playbook_decision,
+                "daily_dual_plan": playbook_dual_plan,
+            })
+            logger.info(f"[Daily] {symbol} {mode.value.upper()} done.")
+            report_id = ""
+            if isinstance(report_payload, dict):
+                report_id = str(report_payload.get("report_id") or report_payload.get("id") or "")
+            decision_name = ""
+            if isinstance(playbook_decision, dict):
+                decision_name = str(playbook_decision.get("decision", "") or "")
+            result.update({
+                "status": "SUCCESS" if report_payload else "NO_REPORT",
+                "report_id": report_id,
+                "decision": decision_name,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            })
+            return result
+        except Exception:
+            import traceback
+
+            result.update({
+                "status": "FAILED",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "error": traceback.format_exc(limit=4),
+            })
+            logger.exception(f"Daily playbook error {symbol}/{mode.value}")
+            return result
+
+    def run_daily_playbook_for_symbol(self, symbol: str, mode: TradingMode = TradingMode.POSITION) -> Dict:
+        lock_key = f"daily_precision:{str(symbol).upper()}:{mode.value}"
+        lock = self._analysis_locks.setdefault(lock_key, threading.Lock())
+        if not lock.acquire(blocking=False):
+            logger.warning(f"Daily Precision Run already active for {symbol}/{mode.value}; skipping duplicate request.")
+            return {
+                "symbol": str(symbol).upper(),
+                "mode": mode.value,
+                "status": "SKIPPED_LOCK",
+                "report_id": "",
+                "decision": "",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+        self._enter_daily_precision_run()
+        try:
+            result = self._execute_daily_playbook_for_symbol(str(symbol).upper(), mode)
+            summary = self._update_daily_precision_summary(result)
+            logger.info(f"Daily precision summary: {json.dumps(summary, ensure_ascii=False)}")
+            self._notify_daily_precision_failure(result, summary)
+            return result
+        finally:
+            self._exit_daily_precision_run()
+            lock.release()
+
     def run_daily_playbook(self) -> None:
-        """00:00 UTC serial: one high-quality run per symbol, dual-lane playbook save.
-        BTC POSITION -> ETH POSITION. Each run should include daily_dual_plan from Judge.
-        """
+        """Legacy serial runner kept for compatibility and manual invocations."""
         import time as _time
-        if self._daily_precision_active.is_set():
+
+        if self.is_daily_precision_running():
             logger.warning("Daily Precision Run already active; skipping duplicate request.")
             return
 
-        schedule = [
-            ("BTCUSDT", TradingMode.POSITION),
-            ("ETHUSDT", TradingMode.POSITION),
-        ]
+        schedule = [(symbol, TradingMode.POSITION) for symbol in settings.trading_symbols]
         logger.info("=== Daily Precision Run ===")
-        self._daily_precision_active.set()
-        run_started_at = datetime.now(timezone.utc).isoformat()
+        self._enter_daily_precision_run()
         daily_results = []
         try:
-            use_snapshot_hot_path = bool(getattr(settings, "ENABLE_SNAPSHOT_HOT_PATH_DAILY", True))
             inter_symbol_gap_minutes = max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
             for i, (symbol, mode) in enumerate(schedule):
-                symbol_started_at = datetime.now(timezone.utc).isoformat()
                 if i > 0 and inter_symbol_gap_minutes > 0:
                     logger.info(
                         f"Sleeping {inter_symbol_gap_minutes}m before {symbol}/{mode.value} "
                         "to stagger daily precision load..."
                     )
                     _time.sleep(inter_symbol_gap_minutes * 60)
-                try:
-                    logger.info(f"[Daily] {symbol} {mode.value.upper()} starting...")
-                    _clear_symbol_mode_caches(symbol, mode)
-
-                    if use_snapshot_hot_path:
-                        logger.info(f"[Daily] {symbol} {mode.value.upper()} refreshing snapshot + hot path...")
-                        hot_result = self.run_snapshot_analysis_with_mode(
-                            symbol,
-                            mode,
-                            allow_perplexity=True,
-                            wait_budget_s=5.0,
-                            notification_context="scheduled_daily",
-                        )
-                        logger.info(f"[Daily] {symbol} {mode.value.upper()} hot path returned.")
-                        final_decision = hot_result.get("final_decision", {}) if isinstance(hot_result, dict) else {}
-                        state = {
-                            "symbol": symbol,
-                            "mode": mode.value,
-                            "final_decision": final_decision,
-                            "daily_dual_plan": (
-                                final_decision.get("daily_dual_plan", {})
-                                if isinstance(final_decision, dict)
-                                else {}
-                            ),
-                        }
-                    elif self.graph:
-                        hot_result = {}
-                        logger.info(f"[Daily] {symbol} {mode.value.upper()} running LangGraph path...")
-                        state = self._run_with_langgraph(
-                            symbol,
-                            mode,
-                            is_emergency=False,
-                            execute_trades=True,
-                            allow_perplexity=True,
-                            notification_context="scheduled_daily",
-                        )
-                    else:
-                        hot_result = {}
-                        logger.info(f"[Daily] {symbol} {mode.value.upper()} running sequential path...")
-                        state = self._run_sequential(
-                            symbol,
-                            mode,
-                            is_emergency=False,
-                            execute_trades=True,
-                            allow_perplexity=True,
-                            notification_context="scheduled_daily",
-                        )
-
-                    report_payload = hot_result.get("report", {}) if isinstance(hot_result, dict) else {}
-                    playbook_decision = state if isinstance(state, dict) else {}
-                    if isinstance(state, dict) and isinstance(state.get("final_decision"), dict):
-                        playbook_decision = state.get("final_decision", {}) or {}
-                    playbook_dual_plan = {}
-                    if isinstance(state, dict):
-                        playbook_dual_plan = state.get("daily_dual_plan", {}) or {}
-                    if not playbook_dual_plan and isinstance(playbook_decision, dict):
-                        playbook_dual_plan = playbook_decision.get("daily_dual_plan", {}) or {}
-                    logger.info(f"[Daily] {symbol} {mode.value.upper()} persisting playbook...")
-                    node_generate_playbook({
-                        "symbol": symbol,
-                        "mode": mode.value,
-                        "final_decision": playbook_decision,
-                        "daily_dual_plan": playbook_dual_plan,
-                    })
-                    logger.info(f"[Daily] {symbol} {mode.value.upper()} done.")
-                    report_id = ""
-                    if isinstance(report_payload, dict):
-                        report_id = str(report_payload.get("report_id") or report_payload.get("id") or "")
-                    decision_name = ""
-                    if isinstance(playbook_decision, dict):
-                        decision_name = str(playbook_decision.get("decision", "") or "")
-                    daily_results.append({
-                        "symbol": symbol,
-                        "mode": mode.value,
-                        "status": "SUCCESS" if report_payload else "NO_REPORT",
-                        "report_id": report_id,
-                        "decision": decision_name,
-                        "started_at": symbol_started_at,
-                        "finished_at": datetime.now(timezone.utc).isoformat(),
-                    })
-                except Exception:
-                    import traceback
-
-                    daily_results.append({
-                        "symbol": symbol,
-                        "mode": mode.value,
-                        "status": "FAILED",
-                        "report_id": "",
-                        "decision": "",
-                        "started_at": symbol_started_at,
-                        "finished_at": datetime.now(timezone.utc).isoformat(),
-                        "error": traceback.format_exc(limit=4),
-                    })
-                    logger.exception(f"Daily playbook error {symbol}/{mode.value}")
-            summary = {
-                "run_started_at": run_started_at,
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "results": daily_results,
-            }
-            logger.info(f"Daily precision summary: {json.dumps(summary, ensure_ascii=False)}")
-            self._persist_daily_precision_summary(summary)
-            self._notify_daily_precision_failures(summary)
+                result = self._execute_daily_playbook_for_symbol(symbol, mode)
+                daily_results.append(result)
+                summary = self._update_daily_precision_summary(result)
+                self._notify_daily_precision_failure(result, summary)
+            logger.info(
+                f"Daily precision batch summary: "
+                f"{json.dumps({'results': daily_results}, ensure_ascii=False)}"
+            )
         finally:
-            self._daily_precision_active.clear()
+            self._exit_daily_precision_run()
 
     def run_hourly_monitor(self) -> None:
         """Hourly: evaluate each symbol/mode against its Daily Playbook.
