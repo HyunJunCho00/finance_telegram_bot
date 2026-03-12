@@ -4,7 +4,6 @@ from config.database import db
 from config.settings import settings, TradingMode
 from telegram import Bot
 from io import BytesIO
-import asyncio
 import threading
 from loguru import logger
 import json
@@ -719,7 +718,7 @@ class ReportGenerator:
         return True
 
     @api_retry(max_attempts=3, delay_seconds=10)
-    async def send_telegram_notification(
+    def send_telegram_notification(
         self,
         report: Dict,
         chart_bytes: Optional[bytes] = None,
@@ -743,7 +742,11 @@ class ReportGenerator:
                 },
                 idempotency_key=f"telegram_payload:{payload.get('report_id') or report.get('id') or report.get('symbol')}:{notification_context}",
             )
-            outbox_dispatcher.publish_pending(limit=20)
+            dispatch_result = outbox_dispatcher.publish_pending(limit=20)
+            if dispatch_result.get("failed"):
+                logger.warning(
+                    f"Telegram summary notification dispatch had failures: {dispatch_result.get('errors')}"
+                )
             logger.info(f"Telegram summary notification queued (ID: {payload.get('report_id')})")
         except Exception as e:
             logger.error(f"Telegram notification error: {e}")
@@ -756,9 +759,7 @@ class ReportGenerator:
         notification_context: str = "analysis",
     ) -> None:
         threading.Thread(
-            target=lambda: asyncio.run(
-                self.send_telegram_notification(report, chart_bytes, mode, notification_context)
-            ),
+            target=lambda: self.send_telegram_notification(report, chart_bytes, mode, notification_context),
             daemon=True,
         ).start()
 
