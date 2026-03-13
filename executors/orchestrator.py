@@ -1,3 +1,4 @@
+# -*- coding: cp949 -*-
 """Orchestrator: LangGraph StateGraph multi-agent analysis pipeline.
 
 Architecture:

@@ -1,3 +1,4 @@
+# -*- coding: cp949 -*-
 from apscheduler.triggers.cron import CronTrigger
 from collectors.price_collector import collector
 from collectors.funding_collector import funding_collector

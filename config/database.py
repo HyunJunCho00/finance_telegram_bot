@@ -1,3 +1,4 @@
+# -*- coding: cp1252 -*-
 import functools
 import httpx
 from supabase import create_client, Client, ClientOptions
