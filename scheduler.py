@@ -1,4 +1,4 @@
-ï»¿from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.cron import CronTrigger
 from collectors.price_collector import collector
 from collectors.funding_collector import funding_collector
 from collectors.volatility_monitor import volatility_monitor
@@ -23,6 +23,7 @@ from config.database import db
 from executors.order_manager import execution_desk
 from executors.evaluator_daemon import EvaluatorDaemon
 from executors.paper_exchange import paper_engine
+from executors.cascade_warning_engine import cascade_warning_engine
 from loguru import logger
 import sys
 import threading
@@ -270,17 +271,17 @@ def _build_realtime_pressure(symbol: str, df) -> dict:
 
         details = []
         if price_up:
-            details.append("3-5ë¶„ ê°€ê²© ìƒë°© ê°€ì†")
+            details.append("3-5ºĞ °¡°İ »ó¹æ °¡¼Ó")
         elif price_down:
-            details.append("3-5ë¶„ ê°€ê²© í•˜ë°© ê°€ì†")
+            details.append("3-5ºĞ °¡°İ ÇÏ¹æ °¡¼Ó")
         if flow_up:
-            details.append("CVDÂ·whale ìˆœë§¤ìˆ˜ ìš°ì„¸")
+            details.append("CVD¡¤whale ¼ø¸Å¼ö ¿ì¼¼")
         elif flow_down:
-            details.append("CVDÂ·whale ìˆœë§¤ë„ ìš°ì„¸")
+            details.append("CVD¡¤whale ¼ø¸Åµµ ¿ì¼¼")
         if squeeze_up:
-            details.append("ìˆ ì²­ì‚° ìš°ì„¸")
+            details.append("¼ô Ã»»ê ¿ì¼¼")
         elif squeeze_down:
-            details.append("ë¡± ì²­ì‚° ìš°ì„¸")
+            details.append("·Õ Ã»»ê ¿ì¼¼")
 
         if price_up and flow_up and squeeze_up:
             signal = "bullish"
@@ -523,7 +524,7 @@ def _looks_english_dominant(text: str) -> bool:
     sample = str(text or "").strip()
     if not sample:
         return False
-    hangul_count = len(re.findall(r"[ê°€-í£]", sample))
+    hangul_count = len(re.findall(r"[°¡-ÆR]", sample))
     latin_count = len(re.findall(r"[A-Za-z]", sample))
     return latin_count >= 40 and latin_count > max(10, hangul_count * 2)
 
@@ -580,9 +581,9 @@ def _detect_technical_events(symbol: str, swing: dict, position: dict, funding: 
         fib = snapshot.get(f"fibonacci_{primary_tf}", {}) or {}
 
         if ms.get("choch"):
-            events.append(f"{mode_name.upper()}: CHoCH ê°ì§€ ({primary_tf})")
+            events.append(f"{mode_name.upper()}: CHoCH °¨Áö ({primary_tf})")
         if ms.get("msb"):
-            events.append(f"{mode_name.upper()}: MSB ê°ì§€ ({primary_tf})")
+            events.append(f"{mode_name.upper()}: MSB °¨Áö ({primary_tf})")
 
         for label, level, th in [
             (f"{mode_name.upper()} nearest_support", sw.get("nearest_support"), thresholds["level_touch_pct"]),
@@ -594,15 +595,15 @@ def _detect_technical_events(symbol: str, swing: dict, position: dict, funding: 
         ]:
             d = _distance_pct(price, level)
             if isinstance(d, (int, float)) and d <= th:
-                events.append(f"{label} ê·¼ì ‘ ({d:.2f}%)")
+                events.append(f"{label} ±ÙÁ¢ ({d:.2f}%)")
 
     _scan_mode(swing, "swing")
     _scan_mode(position, "position")
 
     if isinstance(funding, (int, float)) and abs(funding) >= thresholds["funding_abs_pct"]:
-        events.append(f"í€ë”© ê·¹ë‹¨ì¹˜ ({funding:+.5f}%)")
+        events.append(f"Æİµù ±Ø´ÜÄ¡ ({funding:+.5f}%)")
     if isinstance(volatility, (int, float)) and abs(volatility) >= thresholds["volatility_abs_pct"]:
-        events.append(f"ë³€ë™ì„± ì´ë²¤íŠ¸ ({volatility:+.2f}%)")
+        events.append(f"º¯µ¿¼º ÀÌº¥Æ® ({volatility:+.2f}%)")
 
     return {
         "regime": regime,
@@ -662,6 +663,16 @@ def job_1min_execution():
             
     except Exception as e:
         logger.error(f"1-minute execution job error: {e}")
+
+
+def job_liquidation_cascade_monitor():
+    """Score liquidation cascade risk and emit Telegram alerts when thresholds are met."""
+    try:
+        result = cascade_warning_engine.run_all()
+        if result:
+            logger.info(f"Liquidation cascade monitor alerts: {list(result.keys())}")
+    except Exception as e:
+        logger.error(f"Liquidation cascade monitor job error: {e}")
 
 
 def job_15min_dune():
@@ -744,7 +755,7 @@ def job_routine_market_status():
         def _build_reference_message(selected_news: list[dict]) -> str:
             lines = []
             for idx, item in enumerate(selected_news[:6], start=1):
-                headline = str(item.get("headline") or f"ë‰´ìŠ¤ {idx}").strip()
+                headline = str(item.get("headline") or f"´º½º {idx}").strip()
                 lines.append(f"{idx}. {headline}")
 
                 raw_sources = item.get("sources", [])
@@ -843,7 +854,7 @@ def job_routine_market_status():
                 logger.warning(f"market_status_events insert skipped for {symbol}: {e}")
                 
         # News Intel (Last 1 hour): Telegram + external crypto news synthesized by LLM
-        telegram_intel = "ìµœê·¼ 1ì‹œê°„ ë‚´ ì£¼ìš” ë‰´ìŠ¤ ì—†ìŒ"
+        telegram_intel = "ÃÖ±Ù 1½Ã°£ ³» ÁÖ¿ä ´º½º ¾øÀ½"
         try:
             from agents.ai_router import ai_client
             import time as _time
@@ -1007,8 +1018,8 @@ def job_routine_market_status():
 
                 if not normalized_items:
                     normalized_items = [{
-                        "headline": "ìµœê·¼ 1ì‹œê°„ ì£¼ìš” ë‰´ìŠ¤ ì—†ìŒ",
-                        "claim": "ìœ ì˜ë¯¸í•œ ì‹ ê·œ ì´ë²¤íŠ¸ê°€ í™•ì¸ë˜ì§€ ì•Šì•˜ìŠµë‹ˆë‹¤.",
+                        "headline": "ÃÖ±Ù 1½Ã°£ ÁÖ¿ä ´º½º ¾øÀ½",
+                        "claim": "À¯ÀÇ¹ÌÇÑ ½Å±Ô ÀÌº¥Æ®°¡ È®ÀÎµÇÁö ¾Ê¾Ò½À´Ï´Ù.",
                         "impact": 1,
                         "why": "",
                         "sources": [],
@@ -1037,7 +1048,7 @@ def job_routine_market_status():
                     role="news_brief_final",
                 ) or ""
 
-                bad_ending = ("ì—ì„œ", "ë°", "ë˜ëŠ”", "-", ":", "(", "[", "{", "/", ",")
+                bad_ending = ("¿¡¼­", "¹×", "¶Ç´Â", "-", ":", "(", "[", "{", "/", ",")
                 if not telegram_intel.strip() or telegram_intel.strip().endswith(bad_ending):
                     logger.warning("news_brief_final returned empty/partial text, retrying once.")
                     _time.sleep(1.0)
@@ -1047,7 +1058,7 @@ def job_routine_market_status():
                         temperature=0.1,
                         max_tokens=900,
                         role="news_brief_final",
-                    ) or "ìµœê·¼ 1ì‹œê°„ ë‚´ ì£¼ìš” ë‰´ìŠ¤ ì—†ìŒ"
+                    ) or "ÃÖ±Ù 1½Ã°£ ³» ÁÖ¿ä ´º½º ¾øÀ½"
                 if _looks_english_dominant(telegram_intel):
                     logger.warning("news_brief_final returned English-dominant output, rewriting into Korean.")
                     korean_rewrite_prompt = (
@@ -1071,7 +1082,7 @@ def job_routine_market_status():
                     if rewritten.strip():
                         telegram_intel = rewritten
             else:
-                telegram_intel = "ìµœê·¼ 1ì‹œê°„ ë‚´ ì£¼ìš” ë‰´ìŠ¤ ì—†ìŒ"
+                telegram_intel = "ÃÖ±Ù 1½Ã°£ ³» ÁÖ¿ä ´º½º ¾øÀ½"
         except Exception as e:
             logger.warning(f"Failed to synthesize market news intel: {e}")
             
@@ -1085,8 +1096,8 @@ def job_routine_market_status():
         target_chat_id = _get_target_chat_id()
 
         # Message 1: News Briefing (only if news exists)
-        if telegram_intel and "ì£¼ìš” ë‰´ìŠ¤ ì—†ìŒ" not in telegram_intel:
-            news_header = "<b>ğŸ“° ìµœê·¼ 1ì‹œê°„ ë‰´ìŠ¤ ë¸Œë¦¬í•‘ (Synthesized)</b>"
+        if telegram_intel and "ÁÖ¿ä ´º½º ¾øÀ½" not in telegram_intel:
+            news_header = "<b>?? ÃÖ±Ù 1½Ã°£ ´º½º ºê¸®ÇÎ (Synthesized)</b>"
             try:
                 execution_repository.enqueue_outbox_event(
                     "telegram_message",
@@ -1100,7 +1111,7 @@ def job_routine_market_status():
             try:
                 import html
                 refs_text = _build_reference_message(final_payload.get("selected_news", [])[:6])
-                refs_header = "<b>ğŸ”— ìµœê·¼ 1ì‹œê°„ ë‰´ìŠ¤ ì°¸ê³  ë§í¬</b>"
+                refs_header = "<b>?? ÃÖ±Ù 1½Ã°£ ´º½º Âü°í ¸µÅ©</b>"
                 execution_repository.enqueue_outbox_event(
                     "telegram_message",
                     {
@@ -1115,7 +1126,7 @@ def job_routine_market_status():
                 logger.warning(f"Routine news reference enqueue failed: {e}")
 
         # Message 2: Market Status Summary (Indicators)
-        market_header = "<b>ğŸ“Š ì£¼ìš” ì‹œì¥ ì§€í‘œ ì—…ë°ì´íŠ¸</b>"
+        market_header = "<b>?? ÁÖ¿ä ½ÃÀå ÁöÇ¥ ¾÷µ¥ÀÌÆ®</b>"
         summary = market_monitor_agent.summarize_current_status(indicators)
         logger.success(f"Market Summary Generated:\n{summary}")
         try:
@@ -1176,7 +1187,7 @@ def job_hourly_swing_charts():
                         chart_bytes = base64.b64decode(chart["chart_base64"])
                         tf = str(chart.get("timeframe", "4h")).upper()
                         caption = (
-                            f"ğŸ“ˆ <b>{symbol} {lane_label} ì°¨íŠ¸ (ì •ê¸° 1ì‹œê°„)</b>\n"
+                            f"?? <b>{symbol} {lane_label} Â÷Æ® (Á¤±â 1½Ã°£)</b>\n"
                             f"Lane: <code>{lane}</code>\n"
                             f"Timeframe: <code>{tf}</code>\n"
                             f"Panel: <code>{idx}/{total}</code>\n"
@@ -1449,6 +1460,14 @@ def main():
         max_instances=1
     )
 
+    scheduler_config.scheduler.add_job(
+        job_liquidation_cascade_monitor,
+        'interval',
+        minutes=1,
+        id='job_liquidation_cascade_monitor',
+        max_instances=1
+    )
+
     # 15-minute Dune
     scheduler_config.scheduler.add_job(
         job_15min_dune,
@@ -1515,7 +1534,7 @@ def main():
         max_instances=1,
     )
 
-    # âœ¨âœ¨ Daily Precision (UTC-configurable) independent symbol jobs âœ¨âœ¨
+    # ?? Daily Precision (UTC-configurable) independent symbol jobs ??
     daily_gap_minutes = max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
     for symbol_index, symbol in enumerate(settings.trading_symbols):
         slot_offset = symbol_index * daily_gap_minutes
@@ -1543,7 +1562,7 @@ def main():
         max_instances=1,
     )
 
-    # âœ¨âœ¨ Hourly Monitor [NO_ACTION / WATCH / TRIGGER] against Daily Playbook âœ¨âœ¨
+    # ?? Hourly Monitor [NO_ACTION / WATCH / TRIGGER] against Daily Playbook ??
     scheduler_config.scheduler.add_job(
         job_hourly_monitor,
         CronTrigger(minute=15),
@@ -1643,9 +1662,9 @@ def main():
     for name, fn in _initial_collectors:
         try:
             fn()
-            logger.info(f"  âœ… {name} collected")
+            logger.info(f"  ? {name} collected")
         except Exception as e:
-            logger.warning(f"  âš ï¸ {name} collection failed (non-fatal): {e}")
+            logger.warning(f"  ?? {name} collection failed (non-fatal): {e}")
 
     # Main thread: keep alive + graceful shutdown
     try:
@@ -1683,3 +1702,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+

@@ -195,10 +195,27 @@ class Settings(BaseSettings):
     MARKET_STATUS_PREFER_DETERMINISTIC: bool = True
     ENABLE_SNAPSHOT_HOT_PATH_DAILY: bool = True
     ENABLE_SNAPSHOT_HOT_PATH_TRIGGER: bool = True
+    ENABLE_LIQUIDATION_CASCADE_ALERTS: bool = True
+    LIQUIDATION_CASCADE_ARTIFACT_DIR: str = "data/models/liquidation_cascade"
+    LIQUIDATION_CASCADE_LOOKBACK_DAYS: int = 1
+    LIQUIDATION_CASCADE_LOOKBACK_MINUTES: int = 360
+    LIQUIDATION_CASCADE_HORIZON_MINUTES: int = 5
+    LIQUIDATION_CASCADE_WATCH_PROB: float = 0.45
+    LIQUIDATION_CASCADE_WARN_PROB: float = 0.60
+    LIQUIDATION_CASCADE_CONFIRM_PROB: float = 0.75
+    LIQUIDATION_CASCADE_VULNERABILITY_PCT: float = 0.90
+    LIQUIDATION_CASCADE_IGNITION_PCT: float = 0.97
+    LIQUIDATION_CASCADE_SLOPE_PCT: float = 0.80
+    LIQUIDATION_CASCADE_R2_PCT: float = 0.70
+    ORCHESTRATOR_LIQ_STATS_LIMIT: int = 2880
+    ORCHESTRATOR_MARKET_FALLBACK_LIMIT: int = 2880
+    ORCHESTRATOR_FUNDING_BRIDGE_LIMIT: int = 5000
+    TELEGRAM_RECENT_MESSAGES_LIMIT: int = 200
+    TELEGRAM_RAG_MESSAGES_LIMIT: int = 500
     # Judge post-processing gates (deterministic, no extra LLM call)
     # JUDGE_MIN_WIN_PROB_PCT: 52% barely exceeds coin-flip; after fees/slippage ~0 edge.
     #   Raised to 55% for meaningful statistical edge.
-    # JUDGE_MIN_RR_FOR_ENTRY: Was 1.35 — contradicted POLICY_MIN_RR=2.0. Aligned to 1.9
+    # JUDGE_MIN_RR_FOR_ENTRY: Was 1.35 - contradicted POLICY_MIN_RR=2.0. Aligned to 1.9
     #   (slight tolerance below 2.0 for LLM rounding; hard floor is effectively the policy).
     JUDGE_MIN_WIN_PROB_PCT: float = 55.0
     JUDGE_MIN_RR_FOR_ENTRY: float = 1.9
@@ -300,7 +317,7 @@ class Settings(BaseSettings):
     # PostgreSQL(Supabase): 통계용 데이터만 보존 (30일)
     # Neo4j/Milvus: 지식/그래프 데이터 영구 보존 (cleanup 없음)
     RETENTION_MARKET_DATA_DAYS: int = 30
-    RETENTION_TELEGRAM_DAYS: int = 90  # 원본 텍스트 (Neo4j/Milvus에도 저장됨)
+    RETENTION_TELEGRAM_DAYS: int = 20  # 원본 텍스트 (Neo4j/Milvus에도 저장됨)
     RETENTION_REPORTS_DAYS: int = 365  # AI 리포트 (영구히 가깝게)
     RETENTION_CVD_DAYS: int = 30
     RETENTION_EXECUTIONS_DAYS: int = 365
@@ -541,3 +558,4 @@ class _LazySettingsProxy:
 
 
 settings = _LazySettingsProxy()
+

@@ -8,7 +8,7 @@ for LightRAG graph node extraction.
 - BTC_ETH_ONCHAIN:     Pure on-chain BTC/ETH intelligence (highest signal density)
 - SMART_MONEY_FLOW:    Large capital movements into/out of BTC & ETH
 - MARKET_INTELLIGENCE: Structural market events affecting BTC/ETH thesis (Asia focus)
-- BREAKING_FILTER:     High-noise news — filtered for BTC/ETH relevance before ingest
+- BREAKING_FILTER:     High-noise news ??filtered for BTC/ETH relevance before ingest
 
 Design principle: all prompts frame signals through "how does this affect BTC or ETH?"
 Unrelated altcoin noise is explicitly discarded at the category level.
@@ -37,16 +37,16 @@ class TelegramBatcher:
     # BTC/ETH signal-centric channel grouping
     # Each tier has a different signal value and extraction strategy
     CATEGORIES = {
-        # Tier 1: Pure BTC/ETH on-chain intelligence — highest signal for positioning
+        # Tier 1: Pure BTC/ETH on-chain intelligence ??highest signal for positioning
         "BTC_ETH_ONCHAIN": ["CryptoQuant", "Glassnode", "Lookonchain"],
 
-        # Tier 2: Large capital movements — whale/institutional flows into/out of BTC & ETH
+        # Tier 2: Large capital movements ??whale/institutional flows into/out of BTC & ETH
         "SMART_MONEY_FLOW": ["Whale_Alert", "Arkham_Alerter", "DeFi_Million"],
 
-        # Tier 3: Market structure — regulatory, protocol events, Asia institutional activity
+        # Tier 3: Market structure ??regulatory, protocol events, Asia institutional activity
         "MARKET_INTELLIGENCE": ["Wu_Blockchain", "Unfolded", "PeckShield"],
 
-        # Tier 4: Noisy news stream — filter for BTC/ETH relevance before ingesting
+        # Tier 4: Noisy news stream ??filter for BTC/ETH relevance before ingesting
         "BREAKING_FILTER": [
             "WalterBloomberg", "Tree_News", "Watcher_Guru",
             "Cointelegraph", "Binance_Announcements",
@@ -74,9 +74,9 @@ Input: Whale transfer alerts, labeled wallet tracking, and large DeFi movements.
 Task: Determine the NET capital flow direction for BTC and ETH.
 
 Focus ONLY on:
-- BTC and ETH transfers to/from major exchanges (Binance, Coinbase, Kraken) — inflows = sell pressure
+- BTC and ETH transfers to/from major exchanges (Binance, Coinbase, Kraken) ??inflows = sell pressure
 - Labeled wallet activity: known funds (Jump Crypto, a16z, Grayscale, BlackRock) moving BTC or ETH
-- Stablecoin (USDT/USDC) large minting or movements → potential BTC/ETH buying powder
+- Stablecoin (USDT/USDC) large minting or movements ??potential BTC/ETH buying powder
 - Cross-chain bridges moving large ETH amounts
 
 Discard: altcoin whale moves unrelated to ETH/BTC, NFT transactions, transfers under $10M equivalent.
@@ -99,7 +99,7 @@ Discard: altcoin regulatory issues unless they set precedent for BTC/ETH, DeFi e
 Output: A single dense paragraph. Start with "MARKET STRUCTURE: [BULLISH/BEARISH/NEUTRAL] for BTC/ETH" then explain the 1-2 most important structural developments. Suitable for Knowledge Graph entity extraction.""",
 
         "BREAKING_FILTER": """You are a News Filter for a Bitcoin and Ethereum trader.
-Input: Mixed news headlines — macro, crypto, regulation, markets.
+Input: Mixed news headlines ??macro, crypto, regulation, markets.
 Task: DISCARD everything not directly relevant to Bitcoin or Ethereum price. Then synthesize what remains.
 
 Keep ONLY news where:
@@ -139,8 +139,10 @@ If relevant content exists, output a single dense paragraph starting with "NEWS 
         try:
             res = (
                 db.client.table("telegram_messages")
-                .select("*")
+                .select("channel,text,timestamp,created_at,message_id")
                 .gte("timestamp", cutoff.isoformat())
+                .order("timestamp", desc=True)
+                .limit(int(getattr(settings, "TELEGRAM_RAG_MESSAGES_LIMIT", 500)))
                 .execute()
             )
             messages = res.data or []
@@ -152,7 +154,7 @@ If relevant content exists, output a single dense paragraph starting with "NEWS 
             logger.info("No new telegram messages to process.")
             return
 
-        # Group by category — drop empty text
+        # Group by category ??drop empty text
         grouped: Dict[str, List[str]] = {cat: [] for cat in self.PROMPTS.keys()}
         for msg in messages:
             cat = self.get_category(msg.get("channel", ""))
@@ -162,7 +164,7 @@ If relevant content exists, output a single dense paragraph starting with "NEWS 
 
         total = sum(len(v) for v in grouped.values())
         logger.info(
-            f"TelegramBatcher: {total} messages grouped → "
+            f"TelegramBatcher: {total} messages grouped ??"
             + " | ".join(f"{cat}:{len(v)}" for cat, v in grouped.items())
         )
 
@@ -202,7 +204,7 @@ If relevant content exists, output a single dense paragraph starting with "NEWS 
                     if cat == "BREAKING_FILTER" and self.NO_SIGNAL_SENTINEL in summary:
                         logger.info(
                             f"[BREAKING_FILTER] Chunk {chunk_idx + 1}: "
-                            "No BTC/ETH signal found — skipping LightRAG ingest"
+                            "No BTC/ETH signal found ??skipping LightRAG ingest"
                         )
                         continue
 
@@ -225,3 +227,8 @@ If relevant content exists, output a single dense paragraph starting with "NEWS 
 
 
 telegram_batcher = TelegramBatcher()
+
+
+
+
+

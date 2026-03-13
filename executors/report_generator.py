@@ -734,11 +734,15 @@ class ReportGenerator:
             )
             payload = self._build_notification_payload(report, chart_bytes, mode, notification_context)
             self._save_report_replay_payload(payload)
-            report_identity = (
+            symbol_identity = str(payload.get("symbol") or report.get("symbol") or "UNKNOWN")
+            mode_identity = str(mode.value or "unknown")
+            base_identity = (
                 payload.get("report_id")
                 or report.get("id")
-                or f"{report.get('symbol')}:{report.get('timestamp') or datetime.now(timezone.utc).isoformat()}"
+                or report.get("timestamp")
+                or datetime.now(timezone.utc).isoformat()
             )
+            report_identity = f"{symbol_identity}:{mode_identity}:{base_identity}"
             enqueue_result = execution_repository.enqueue_outbox_event(
                 "telegram_payload",
                 {

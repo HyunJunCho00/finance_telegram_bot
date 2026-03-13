@@ -1,4 +1,4 @@
-Ôªø"""Orchestrator: LangGraph StateGraph multi-agent analysis pipeline.
+"""Orchestrator: LangGraph StateGraph multi-agent analysis pipeline.
 
 Architecture:
   LangGraph StateGraph manages the analysis flow as a directed graph.
@@ -266,7 +266,7 @@ class AnalysisState(TypedDict):
     policy_snapshot: dict
     report: Optional[Dict]
 
-    # Z-Score ÎèôÏ†Å ÏûÑÍ≥ÑÍ∞íÏö© Ïó≠ÏÇ¨Ï†Å ÌÜµÍ≥Ñ (context_gatheringÏóêÏÑú ÏàòÏßë)
+    # Z-Score µø¿˚ ¿”∞Ë∞™øÎ ø™ªÁ¿˚ ≈Î∞Ë (context_gatheringø°º≠ ºˆ¡˝)
     stats_context: dict  # {liq_mean, liq_std, imbalance_mean, ..., dvol_mean, dvol_std, ...}
 
     # Error tracking
@@ -457,10 +457,10 @@ def node_context_gathering(state: AnalysisState) -> dict:
         return db_updates
 
     def fetch_stats_context():
-        """Z-Score Í≥ÑÏÇ∞Ïö© Ïó≠ÏÇ¨Ï†Å ÌÜµÍ≥Ñ ÏàòÏßë.
+        """Z-Score ∞ËªÍøÎ ø™ªÁ¿˚ ≈Î∞Ë ºˆ¡˝.
 
-        Í≥†Ï†ï ÏûÑÍ≥ÑÍ∞í ÎåÄÏã† ÏµúÍ∑º 7Ïùº ÏãúÍ≥ÑÏó¥ ÎÇ¥Î∂ÄÏùò rolling std Î∂ÑÌè¨Î•º ÏÇ¨Ïö©Ìï¥
-        asset/regime Î≥ÑÎ°ú adaptive floorÎ•º Í≥ÑÏÇ∞ÌïúÎã§.
+        ∞Ì¡§ ¿”∞Ë∞™ ¥ÎΩ≈ √÷±Ÿ 7¿œ Ω√∞Ëø≠ ≥ª∫Œ¿« rolling std ∫–∆˜∏¶ ªÁøÎ«ÿ
+        asset/regime ∫∞∑Œ adaptive floor∏¶ ∞ËªÍ«—¥Ÿ.
         """
         stats = {}
         currency = symbol[:-4] if symbol.endswith("USDT") else symbol
@@ -480,9 +480,13 @@ def node_context_gathering(state: AnalysisState) -> dict:
             except Exception:
                 return None
 
-        # ‚îÄ‚îÄ 1. Liquidation 7-day hourly stats ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+        # ¶°¶° 1. Liquidation 7-day hourly stats ¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°
         try:
-            liq_df_wide = db.get_liquidation_data(symbol, limit=10080)  # 7d √ó 1440
+            liq_df_wide = db.get_liquidation_data(
+                symbol,
+                limit=int(getattr(settings, "ORCHESTRATOR_LIQ_STATS_LIMIT", 2880)),
+                columns="timestamp,long_liq_usd,short_liq_usd",
+            )
             if not liq_df_wide.empty and "timestamp" in liq_df_wide.columns:
                 liq_ts = pd.to_datetime(liq_df_wide["timestamp"], utc=True, errors="coerce")
                 latest_liq_ts = liq_ts.max()
@@ -524,7 +528,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 if liq_is_stale:
                     logger.warning(
                         f"[Stats] liquidation data stale age={liq_age_hours:.2f}h "
-                        f"> {float(getattr(settings, 'STATS_MAX_LIQ_STALE_HOURS', 6.0)):.2f}h ‚Äî static fallback"
+                        f"> {float(getattr(settings, 'STATS_MAX_LIQ_STALE_HOURS', 6.0)):.2f}h ? static fallback"
                     )
                 elif liq_std >= liq_floor:
                     stats["liq_mean"] = liq_mean
@@ -537,12 +541,12 @@ def node_context_gathering(state: AnalysisState) -> dict:
                     logger.warning(
                         f"[Stats] liq_std ${liq_std:,.0f} < adaptive floor ${liq_floor:,.0f} "
                         f"(base=${liq_floor_meta['base_floor']:,.0f}, rolling={liq_floor_meta['rolling_floor']:,.0f}) "
-                        f"‚Äî Îç∞Ïù¥ÌÑ∞ Ìù¨Î∞ï, static fallback ÏÇ¨Ïö©"
+                        f"? µ•¿Ã≈Õ »Òπ⁄, static fallback ªÁøÎ"
                     )
         except Exception as e:
             logger.warning(f"[Stats] liq error: {e}")
 
-        # ‚îÄ‚îÄ 2. Microstructure 7-day stats (ÏµúÏÜå 30Í∞ú hourly snapshot) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+        # ¶°¶° 2. Microstructure 7-day stats (√÷º“ 30∞≥ hourly snapshot) ¶°¶°¶°¶°¶°
         try:
             rows = (
                 db.client.table("microstructure_data")
@@ -552,7 +556,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 .limit(168)
                 .execute()
             )
-            if rows.data and len(rows.data) >= 30:  # 30Í∞ú ÎØ∏ÎßåÏù¥Î©¥ std Î∂àÏïàÏ†ï
+            if rows.data and len(rows.data) >= 30:  # 30∞≥ πÃ∏∏¿Ã∏È std ∫“æ»¡§
                 latest_micro_ts = max((r.get("timestamp") for r in rows.data if r.get("timestamp")), default=None)
                 micro_age_hours = _age_hours(latest_micro_ts)
                 micro_is_stale = (
@@ -566,7 +570,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 if micro_is_stale:
                     logger.warning(
                         f"[Stats] microstructure data stale age={micro_age_hours:.2f}h "
-                        f"> {float(getattr(settings, 'STATS_MAX_MICRO_STALE_HOURS', 3.0)):.2f}h ‚Äî static fallback"
+                        f"> {float(getattr(settings, 'STATS_MAX_MICRO_STALE_HOURS', 3.0)):.2f}h ? static fallback"
                     )
                 else:
                     stats["imbalance_mean"] = float(np.mean(imbs))
@@ -575,23 +579,23 @@ def node_context_gathering(state: AnalysisState) -> dict:
                     stats["spread_std"]     = float(np.std(spreads))
             elif rows.data:
                 logger.warning(
-                    f"[Stats] micro samples={len(rows.data)} < 30 ‚Äî std Î∂àÏïàÏ†ï, static fallback"
+                    f"[Stats] micro samples={len(rows.data)} < 30 ? std ∫“æ»¡§, static fallback"
                 )
         except Exception as e:
             logger.warning(f"[Stats] micro error: {e}")
 
-        # ‚îÄ‚îÄ 3. DVOL/PCR 7-day hourly stats (Í∏∞Í¥Ä ÌëúÏ§Ä: 7~30Ïùº lookback) ‚îÄ‚îÄ‚îÄ
-        # 24h lookbackÏùÄ Ïû•Ï§ë ÎÖ∏Ïù¥Ï¶àÎßå Ìè¨Ï∞© ‚Üí regime Î≥ÄÌôî Í∞êÏßÄ Î∂àÍ∞Ä
+        # ¶°¶° 3. DVOL/PCR 7-day hourly stats (±‚∞¸ «•¡ÿ: 7~30¿œ lookback) ¶°¶°¶°
+        # 24h lookback¿∫ ¿Â¡ﬂ ≥Î¿Ã¡Ó∏∏ ∆˜¬¯ °Ê regime ∫Ø»≠ ∞®¡ˆ ∫“∞°
         try:
             rows = (
                 db.client.table("deribit_data")
                 .select("dvol,pcr_oi,timestamp")
                 .eq("symbol", currency)
                 .order("timestamp", desc=True)
-                .limit(168)   # 7Ïùº √ó 24h (Í∏∞Í¥Ä ÌëúÏ§Ä ÏµúÎã® lookback)
+                .limit(168)   # 7¿œ °ø 24h (±‚∞¸ «•¡ÿ √÷¥‹ lookback)
                 .execute()
             )
-            if rows.data and len(rows.data) >= 24:  # ÏµúÏÜå 1ÏùºÏπò hourly ÌïÑÏöî
+            if rows.data and len(rows.data) >= 24:  # √÷º“ 1¿œƒ° hourly « ø‰
                 latest_deribit_ts = max((r.get("timestamp") for r in rows.data if r.get("timestamp")), default=None)
                 deribit_age_hours = _age_hours(latest_deribit_ts)
                 deribit_is_stale = (
@@ -605,7 +609,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 if deribit_is_stale:
                     logger.warning(
                         f"[Stats] deribit data stale age={deribit_age_hours:.2f}h "
-                        f"> {float(getattr(settings, 'STATS_MAX_DERIBIT_STALE_HOURS', 6.0)):.2f}h ‚Äî static fallback"
+                        f"> {float(getattr(settings, 'STATS_MAX_DERIBIT_STALE_HOURS', 6.0)):.2f}h ? static fallback"
                     )
                 elif dvols:
                     dvol_mean = float(np.mean(dvols))
@@ -624,7 +628,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
                         logger.warning(
                             f"[Stats] dvol_std={dvol_std:.2f} < adaptive floor {dvol_floor:.2f} "
                             f"(base={dvol_floor_meta['base_floor']:.2f}, rolling={dvol_floor_meta['rolling_floor']:.2f}) "
-                            f"‚Äî DVOL flat, static fallback"
+                            f"? DVOL flat, static fallback"
                         )
                 if not deribit_is_stale and pcrs:
                     pcr_mean = float(np.mean(pcrs))
@@ -643,11 +647,11 @@ def node_context_gathering(state: AnalysisState) -> dict:
                         logger.warning(
                             f"[Stats] pcr_std={pcr_std:.4f} < adaptive floor {pcr_floor:.4f} "
                             f"(base={pcr_floor_meta['base_floor']:.4f}, rolling={pcr_floor_meta['rolling_floor']:.4f}) "
-                            f"‚Äî PCR flat, static fallback"
+                            f"? PCR flat, static fallback"
                         )
             elif rows.data:
                 logger.warning(
-                    f"[Stats] deribit samples={len(rows.data)} < 24 ‚Äî static fallback"
+                    f"[Stats] deribit samples={len(rows.data)} < 24 ? static fallback"
                 )
         except Exception as e:
             logger.warning(f"[Stats] dvol error: {e}")
@@ -726,7 +730,11 @@ def node_triage(state: AnalysisState) -> dict:
         # [FIX CRASH-2] Use cached DataFrame from node_collect_data
         df = _df_cache.get(cache_key)
         if df is None:
-            df = db.get_latest_market_data(symbol, limit=4320)  # fallback if cache miss
+            df = db.get_latest_market_data(
+                symbol,
+                limit=int(getattr(settings, "ORCHESTRATOR_MARKET_FALLBACK_LIMIT", 2880)),
+                columns="timestamp,open,high,low,close,volume",
+            )  # fallback if cache miss
         if not df.empty:
             df_1h = df.resample('1h', on='timestamp').agg({
                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
@@ -777,10 +785,10 @@ def node_triage(state: AnalysisState) -> dict:
     except Exception as e:
         logger.error(f"Triage volatility math error: {e}")
 
-    # ‚îÄ‚îÄ Z-Score Enhanced Agent Checks (2, 3, 4) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+    # ¶°¶° Z-Score Enhanced Agent Checks (2, 3, 4) ¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°¶°
     _stats = state.get("stats_context") or {}
 
-    # 2. Liquidity Agent (Z-Score Í∏∞Î∞ò Ï≤≠ÏÇ∞ Ïù¥ÏÉÅ ÌÉêÏßÄ)
+    # 2. Liquidity Agent (Z-Score ±‚π› √ªªÍ ¿ÃªÛ ≈Ω¡ˆ)
     try:
         _liq_stats = None
         if any(
@@ -821,7 +829,7 @@ def node_triage(state: AnalysisState) -> dict:
     except Exception as e:
         logger.error(f"Triage liquidity agent error: {e}")
 
-    # 3. Microstructure Agent (Z-Score Í∏∞Î∞ò Ïò§ÎçîÎ∂Å Ïù¥ÏÉÅ ÌÉêÏßÄ)
+    # 3. Microstructure Agent (Z-Score ±‚π› ø¿¥ı∫œ ¿ÃªÛ ≈Ω¡ˆ)
     try:
         _micro_stats = None
         _micro_keys = ("imbalance_mean", "imbalance_std", "spread_mean", "spread_std")
@@ -844,7 +852,7 @@ def node_triage(state: AnalysisState) -> dict:
     except Exception as e:
         logger.error(f"Triage microstructure agent error: {e}")
 
-    # 4. Macro Options Agent (Z-Score Í∏∞Î∞ò DVOL/PCR Í≥µÌô© ÌÉêÏßÄ)
+    # 4. Macro Options Agent (Z-Score ±‚π› DVOL/PCR ∞¯»≤ ≈Ω¡ˆ)
     try:
         _opts_stats = None
         _opts_keys = ("dvol_mean", "dvol_std")
@@ -1119,7 +1127,12 @@ def node_generate_chart(state: AnalysisState) -> dict:
                         })
                         hist_fnd['timestamp'] = pd.to_datetime(hist_fnd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
                         since_fnd = hist_fnd['timestamp'].max()
-                        bridge_fnd = db.get_funding_history(symbol, limit=50000, since=since_fnd)
+                        bridge_fnd = db.get_funding_history(
+                            symbol,
+                            limit=int(getattr(settings, "ORCHESTRATOR_FUNDING_BRIDGE_LIMIT", 5000)),
+                            since=since_fnd,
+                            columns="timestamp,funding_rate,open_interest,open_interest_value,oi_binance,oi_bybit,oi_okx,basis_pct,long_short_ratio",
+                        )
                         
                         dfs = [hist_fnd]
                         if bridge_fnd is not None and not bridge_fnd.empty:
@@ -1268,7 +1281,7 @@ def node_judge_agent(state: AnalysisState) -> dict:
             decision["reasoning"]["final_logic"] = (
                 f"[ENTRY VETO] {'; '.join(failed)}. " + decision["reasoning"].get("final_logic", "")
             )
-            decision["key_factors"].append("EV/RR/ÏäπÎ•† Í≤åÏù¥Ìä∏ ÎØ∏Ï∂©Ï°±ÏúºÎ°ú ÏßÑÏûÖ Î≥¥Î•ò")
+            decision["key_factors"].append("EV/RR/Ω¬∑¸ ∞‘¿Ã∆Æ πÃ√Ê¡∑¿∏∑Œ ¡¯¿‘ ∫∏∑˘")
 
     # Promote HOLD to small-size entry only when edge is mathematically strong
     direction = str(decision.get("decision", "HOLD")).upper()
@@ -1300,7 +1313,7 @@ def node_judge_agent(state: AnalysisState) -> dict:
                 f"[HOLD OVERRIDE] EV={ev:.2f}, WinProb={win_prob_pct:.1f}%, RR={rr:.2f} >= gates. "
                 + decision["reasoning"].get("final_logic", "")
             )
-            decision["key_factors"].append("ÏàòÌïôÏ†Å Ïó£ÏßÄ(EV/ÏäπÎ•†/RR) Ï∂©Ï°±ÏúºÎ°ú ÏÜåÍ∑úÎ™® ÏßÑÏûÖ")
+            decision["key_factors"].append("ºˆ«–¿˚ øß¡ˆ(EV/Ω¬∑¸/RR) √Ê¡∑¿∏∑Œ º“±‘∏ ¡¯¿‘")
 
     # Scale allocation by Meta risk budget
     risk_budget = _to_float(regime_ctx.get("risk_budget_pct", 100), 100.0)
@@ -1713,7 +1726,7 @@ def _build_full_context(state: AnalysisState) -> str:
 
 
 
-# ‚ú® Daily Playbook Generation ‚ú®
+# ? Daily Playbook Generation ?
 
 def node_generate_playbook(state) -> dict:
     """Persist Daily Playbook(s) from Judge output without extra LLM calls."""
@@ -2321,7 +2334,7 @@ class Orchestrator:
             "current_bias": "neutral", "scenario_revision_reason": "", "active_setup": {},
         }
 
-        # Run each node sequentially ‚Äî mirrors the LangGraph DAG order.
+        # Run each node sequentially ? mirrors the LangGraph DAG order.
         # node_context_gathering consolidates: perplexity, RAG ingest, funding, CVD,
         # liquidation, RAG query, telegram news, microstructure,
         # macro, deribit, and fear&greed context in a single function.
@@ -2361,7 +2374,7 @@ class Orchestrator:
             logger.error(f"Judge error: {e}")
             state["final_decision"] = {"decision": "HOLD", "reasoning": str(e), "confidence": 0}
 
-        # [FIX CRASH-1] Risk Manager (CRO) ‚Äî was completely missing from sequential fallback
+        # [FIX CRASH-1] Risk Manager (CRO) ? was completely missing from sequential fallback
         try:
             state.update(node_risk_manager(state))
         except Exception as e:
@@ -2372,7 +2385,7 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Leverage Guard error (sequential): {e}")
 
-        # [FIX CRASH-1] Trade Execution ‚Äî was missing, so Judge decisions were never executed
+        # [FIX CRASH-1] Trade Execution ? was missing, so Judge decisions were never executed
         try:
             state.update(node_execute_trade(state))
         except Exception as e:
@@ -2583,7 +2596,7 @@ class Orchestrator:
 
     def run_hourly_monitor(self) -> None:
         """Hourly: evaluate each symbol/mode against its Daily Playbook.
-        If TRIGGER ‚Äî run analysis and allow order execution.
+        If TRIGGER ? run analysis and allow order execution.
         Daily entry count capped at DAILY_MAX_ENTRIES per symbol.
         """
         from agents.market_monitor_agent import market_monitor_agent
@@ -2666,7 +2679,7 @@ class Orchestrator:
                                 )
                                 result["status"] = "WATCH"
                                 result["reasoning"] = (
-                                    f"{result.get('reasoning', '')} Ï†ÄÎπÑÏö© LLM Î≥¥Î•ò: {veto_gate.get('reason', '')}"
+                                    f"{result.get('reasoning', '')} ¿˙∫ÒøÎ LLM ∫∏∑˘: {veto_gate.get('reason', '')}"
                                 ).strip()
                                 lane_results[mode.value.upper()] = result
                                 continue
@@ -2676,7 +2689,7 @@ class Orchestrator:
                                     f"{veto_gate.get('reason', '')}"
                                 )
                                 result["reasoning"] = (
-                                    f"{result.get('reasoning', '')} Ï†ÄÎπÑÏö© LLM Í∞êÏï° Ï£ºÏùò: {veto_gate.get('reason', '')}"
+                                    f"{result.get('reasoning', '')} ¿˙∫ÒøÎ LLM ∞®æ◊ ¡÷¿«: {veto_gate.get('reason', '')}"
                                 ).strip()
 
                             logger.info(f"[Monitor] TRIGGER! Running analysis for {symbol}/{mode.value}")
@@ -2739,7 +2752,7 @@ class Orchestrator:
                                         chart_bytes = base64.b64decode(chart["chart_base64"])
                                         tf = str(chart.get("timeframe", "-")).upper()
                                         caption = (
-                                            f"üìä <b>{symbol} {lane.upper()} Chart - {status}</b>\n"
+                                            f"?? <b>{symbol} {lane.upper()} Chart - {status}</b>\n"
                                             f"Timeframe: <code>{tf}</code>\n"
                                             f"Panel: <code>{idx}/{total}</code>\n"
                                             f"Lookback: <code>{lookback_label}</code>"
@@ -2752,6 +2765,8 @@ class Orchestrator:
 
 
 orchestrator = Orchestrator()
+
+
 
 
 
