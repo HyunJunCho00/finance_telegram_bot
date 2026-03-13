@@ -1663,9 +1663,9 @@ def main():
     for name, fn in _initial_collectors:
         try:
             fn()
-            logger.info(f"  ? {name} collected")
+            logger.info(f"  [OK] {name} collected")
         except Exception as e:
-            logger.warning(f"  ?? {name} collection failed (non-fatal): {e}")
+            logger.warning(f"  [WARN] {name} collection failed (non-fatal): {e}")
 
     # Main thread: keep alive + graceful shutdown
     try:

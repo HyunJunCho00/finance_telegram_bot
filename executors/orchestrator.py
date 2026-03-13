@@ -571,7 +571,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 if micro_is_stale:
                     logger.warning(
                         f"[Stats] microstructure data stale age={micro_age_hours:.2f}h "
-                        f"> {float(getattr(settings, 'STATS_MAX_MICRO_STALE_HOURS', 3.0)):.2f}h ? static fallback"
+                        f"> {float(getattr(settings, 'STATS_MAX_MICRO_STALE_HOURS', 3.0)):.2f}h - static fallback"
                     )
                 else:
                     stats["imbalance_mean"] = float(np.mean(imbs))
@@ -610,7 +610,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 if deribit_is_stale:
                     logger.warning(
                         f"[Stats] deribit data stale age={deribit_age_hours:.2f}h "
-                        f"> {float(getattr(settings, 'STATS_MAX_DERIBIT_STALE_HOURS', 6.0)):.2f}h ? static fallback"
+                        f"> {float(getattr(settings, 'STATS_MAX_DERIBIT_STALE_HOURS', 6.0)):.2f}h - static fallback"
                     )
                 elif dvols:
                     dvol_mean = float(np.mean(dvols))
@@ -629,7 +629,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
                         logger.warning(
                             f"[Stats] dvol_std={dvol_std:.2f} < adaptive floor {dvol_floor:.2f} "
                             f"(base={dvol_floor_meta['base_floor']:.2f}, rolling={dvol_floor_meta['rolling_floor']:.2f}) "
-                            f"? DVOL flat, static fallback"
+                            f"- DVOL flat, static fallback"
                         )
                 if not deribit_is_stale and pcrs:
                     pcr_mean = float(np.mean(pcrs))
@@ -648,11 +648,11 @@ def node_context_gathering(state: AnalysisState) -> dict:
                         logger.warning(
                             f"[Stats] pcr_std={pcr_std:.4f} < adaptive floor {pcr_floor:.4f} "
                             f"(base={pcr_floor_meta['base_floor']:.4f}, rolling={pcr_floor_meta['rolling_floor']:.4f}) "
-                            f"? PCR flat, static fallback"
+                            f"- PCR flat, static fallback"
                         )
             elif rows.data:
                 logger.warning(
-                    f"[Stats] deribit samples={len(rows.data)} < 24 ? static fallback"
+                    f"[Stats] deribit samples={len(rows.data)} < 24 - static fallback"
                 )
         except Exception as e:
             logger.warning(f"[Stats] dvol error: {e}")
