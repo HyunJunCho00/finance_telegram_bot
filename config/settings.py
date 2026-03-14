@@ -1,561 +1,561 @@
-﻿from pydantic_settings import BaseSettings, SettingsConfigDict
-from functools import lru_cache
-from typing import List
-from enum import Enum
-import os
-import json
-from dotenv import load_dotenv
-
-# Ensure .env is loaded into environment variables early
-load_dotenv()
-
-
-class TradingMode(str, Enum):
-    """Two trading modes with distinct timeframes and analysis intervals.
-    SWING: days~2weeks, 4h analysis cycle
-    POSITION: weeks~months, 1d analysis cycle
-    """
-    SWING = "swing"
-    POSITION = "position"
-
-
-class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=True,
-        extra="allow"
-    )
-
-    PROJECT_ID: str = ""
-    REGION: str = "asia-northeast3"          # VM 인프라 리전 (서울)
-    VERTEX_REGION: str = "global"            # 모델 호출 리전 (Gemini + Claude)
-    VERTEX_REGION_GEMINI: str = "global"     # Gemini 전용 (하위호환)
-
-    SUPABASE_URL: str = ""
-    SUPABASE_KEY: str = ""
-
-    # ===== Direct AI API Keys (Multi-LLM) =====
-    ANTHROPIC_API_KEY: str = ""
-    OPENAI_API_KEY: str = ""
-    VOYAGE_API_KEY: str = ""
-    GEMINI_API_KEY: str = ""          # default Gemini key
-    GEMINI_API_KEY_JUDGE: str = ""    # Project A -- Judge (gemini-3.1-pro-preview)
-    GEMINI_API_KEY_VLM: str = ""      # Project B -- VLM Geometric (gemini-3-flash-preview)
-    GROQ_API_KEY: str = ""
-    CEREBRAS_API_KEY: str = ""        # Cerebras -> meta_regime + risk_eval (gpt-oss-120b)
-    OPENROUTER_API_KEY: str = ""      # OpenRouter -> hourly monitor (free tier)
-    OPEN_ROUTER_API_KEY: str = ""     # .env alias for OPENROUTER_API_KEY
-
-    BINANCE_API_KEY: str = ""
-    BINANCE_API_SECRET: str = ""
-
-    UPBIT_ACCESS_KEY: str = ""
-    UPBIT_SECRET_KEY: str = ""
-
-    TELEGRAM_API_ID: str = ""
-    TELEGRAM_API_HASH: str = ""
-    TELEGRAM_PHONE: str = ""
-    TELEGRAM_BOT_TOKEN: str = ""
-    TELEGRAM_CHAT_ID: str = ""
-
-    # Perplexity API for market narrative search
-    PERPLEXITY_API_KEY: str = ""
-    PERPLEXITY_MODEL_NARRATIVE: str = "sonar-pro"
-    PERPLEXITY_MODEL_TARGETED: str = "sonar"
-    TAVILY_API_KEY: str = ""
-    SERPER_API_KEY: str = ""
-    EXA_API_KEY: str = ""
-    TRIANGULATION_MAX_ATTEMPTS: int = 2
-
-    # FRED API for macro regime data
-    FRED_API_KEY: str = ""
-
-    # Neo4j Aura Free (Knowledge Graph)
-    NEO4J_URI: str = ""  # e.g. neo4j+s://xxxxxx.databases.neo4j.io
-    NEO4J_URL: str = ""  # Alias to support user's .env naming
-    NEO4J_USER: str = "neo4j"
-    NEO4J_USERNAME: str = ""  # Alias to support user's credential file
-    NEO4J_PASSWORD: str = ""
-
-    # Zilliz Cloud Free (Milvus vector DB)
-    MILVUS_URI: str = ""  # e.g. https://in03-xxxxxx.api.gcp-us-west1.zillizcloud.com
-    MILVUS_TOKEN: str = ""
-
-    # Cloudflare Workers AI (bge-reranker-base - Free tier: 10,000 neurons/day)
-    # Used as borderline-zone cross-encoder in LightRAG dedup pipeline.
-    CLOUDFLARE_ACCOUNT_ID: str = ""
-    CLOUDFLARE_AI_API_KEY: str = ""
-    CLOUDFLARE_AI_TIMEOUT_SECONDS: float = 25.0
-    CLOUDFLARE_AI_TIMEOUT_EXHAUST_SECONDS: int = 180
-    CLOUDFLARE_AI_RATE_LIMIT_EXHAUST_SECONDS: int = 1800
-
-
-    # ===== Trading Symbols (single source of truth) =====
-    # Comma-separated, Binance Futures format (no slashes).
-    # Adding a symbol here automatically propagates to ALL collectors.
-    # Upbit KRW pairs and Deribit currencies are auto-derived.
-    TRADING_SYMBOLS: str = "BTCUSDT,ETHUSDT"
-
-    # Deribit public options data (DVOL, PCR, IV Term Structure, 25d Skew)
-    # No API key required - free public REST API
-    DERIBIT_ENABLED: bool = True
-
-    # Dune API (on-chain/DEX macro signals)
-    DUNE_API_KEY: str = ""
-    DUNE_ENABLED: bool = True
-    # Cost guardrails for free-tier Dune credits (monthly 2500 credits)
-    # Keep scheduler cadence unchanged, but throttle collector execution internally.
-    DUNE_BUDGET_GUARD: bool = True
-    DUNE_GLOBAL_MIN_INTERVAL_MINUTES: int = 60  # at most once per 1h globally
-    DUNE_MAX_QUERY_RUNS_PER_DAY: int = 24
-    DUNE_MAX_QUERIES_PER_RUN: int = 5
-    DUNE_PRIORITY_QUERY_IDS: List[int] = [6638261, 3378085, 21689, 4319, 3383110]
-
-    # Optional low-cost long-term archive on GCS
-    ENABLE_GCS_ARCHIVE: bool = False
-    GCS_ARCHIVE_BUCKET: str = ""
-
-    # Coin Metrics Community API (daily on-chain regime overlay)
-    COINMETRICS_ENABLED: bool = True
-    COINMETRICS_BASE_URL: str = "https://community-api.coinmetrics.io/v4"
-    COINMETRICS_TIMEOUT_SECONDS: int = 20
-    COINMETRICS_LOOKBACK_DAYS: int = 90
-
-
-    # ===== Paper trading / sandbox safety =====
-    PAPER_TRADING_MODE: bool = True  # default safe mode (no real orders)
-    PAPER_TRADING_PRICE_SOURCE: str = "ticker"  # ticker | last_report
-    ENABLE_DIRECT_MCP_TRADING: bool = False
-    BINANCE_USE_TESTNET: bool = False
-    UPBIT_PAPER_ONLY: bool = True
-    
-    # ===== V8: Retail Multi-Exchange Execution Limits =====
-    # Hardcoded by User Request for Retail Scale limits
-    BINANCE_PAPER_BALANCE_USD: float = 2000.0
-    UPBIT_PAPER_BALANCE_KRW: float = 2000000.0
-    UPBIT_PAPER_BALANCE_USD: float = 1500.0   # 약 2,000,000 KRW; paper engine은 USD 단위로 통합
-    MAX_LEVERAGE: int = 3
-    
-    COINBASE_API_KEY: str = ""
-    COINBASE_API_SECRET: str = ""
-
-    VOLATILITY_THRESHOLD: float = 3.0
-    ANALYSIS_INTERVAL_HOURS: int = 4
-    DAILY_PRECISION_HOURS_UTC: str = "1,13"
-    DAILY_PRECISION_HOUR_UTC: int = 1
-    DAILY_PRECISION_MINUTE_UTC: int = 30
-    DAILY_PRECISION_PROTECTION_MINUTES: int = 20
-    DAILY_PRECISION_SYMBOL_GAP_MINUTES: int = 10
-    STATS_ADAPTIVE_STD_WINDOW_HOURS: int = 24
-    STATS_ADAPTIVE_STD_MIN_PERIODS: int = 12
-    STATS_ADAPTIVE_STD_MIN_ROLLING_SAMPLES: int = 24
-    STATS_ADAPTIVE_STD_FLOOR_QUANTILE: float = 0.20
-    STATS_LIQ_MIN_STD_BTC_USD: float = 1500000.0
-    STATS_LIQ_MIN_STD_ETH_USD: float = 600000.0
-    STATS_LIQ_MIN_STD_DEFAULT_USD: float = 500000.0
-    STATS_DVOL_MIN_STD: float = 0.8
-    STATS_PCR_MIN_STD: float = 0.01
-    STATS_MAX_LIQ_STALE_HOURS: float = 6.0
-    STATS_MAX_MICRO_STALE_HOURS: float = 3.0
-    STATS_MAX_DERIBIT_STALE_HOURS: float = 6.0
-
-    # ===== AI Models (role API model single policy table) =====
-    MODEL_ENDPOINT: str = "gemini-3.1-pro-preview"
-
-    # 1. judge Google AI Studio Project A
-    MODEL_JUDGE: str = "gemini-3.1-pro-preview"
-    MODEL_JUDGE_FALLBACK: str = "gemini-3-flash-preview"
-    MODEL_SELF_CORRECTION: str = "gemini-3.1-pro-preview"
-
-    # 2. vlm_geometric / vlm_telegram_chart -- Lightweight Flash for Vision efficiency
-    MODEL_VLM_GEOMETRIC: str = "gemini-3-flash-preview"
-    MODEL_VLM_TELEGRAM_CHART: str = "gemini-3-flash-preview"
-
-    # 3. meta_regime Cerebras
-    MODEL_META_REGIME: str = "gpt-oss-120b"
-
-    # 4. risk_eval Cerebras
-    MODEL_RISK_EVAL: str = "gpt-oss-120b"
-
-    # 5. risk_eval_fallback Groq
-    MODEL_RISK_EVAL_FALLBACK: str = "qwen/qwen3-32b"
-
-    # 6. RAG extraction (Groq) + News summarize (Cerebras lightweight)
-    MODEL_RAG_EXTRACTION: str = "qwen/qwen3-32b"
-    MODEL_NEWS_SUMMARIZE: str = "llama3.1-8b"
-    MODEL_NEWS_CLUSTER: str = "qwen/qwen3-32b"
-    MODEL_NEWS_FINAL: str = "openai/gpt-oss-120b"
-    MODEL_NEWS_FINAL_FALLBACK: str = "qwen/qwen3-32b"
-    MODEL_TRIGGER_VETO: str = "llama3.1-8b"
-
-    # 7. monitor_hourly OpenRouter (free)
-    MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
-    MONITOR_SOFT_TRIGGER_THRESHOLD: float = 0.7
-    MARKET_STATUS_PREFER_DETERMINISTIC: bool = True
-    ENABLE_SNAPSHOT_HOT_PATH_DAILY: bool = True
-    ENABLE_SNAPSHOT_HOT_PATH_TRIGGER: bool = True
-    ENABLE_LIQUIDATION_CASCADE_ALERTS: bool = True
-    LIQUIDATION_CASCADE_ARTIFACT_DIR: str = "data/models/liquidation_cascade"
-    LIQUIDATION_CASCADE_LOOKBACK_DAYS: int = 1
-    LIQUIDATION_CASCADE_LOOKBACK_MINUTES: int = 360
-    LIQUIDATION_CASCADE_HORIZON_MINUTES: int = 5
-    LIQUIDATION_CASCADE_WATCH_PROB: float = 0.45
-    LIQUIDATION_CASCADE_WARN_PROB: float = 0.60
-    LIQUIDATION_CASCADE_CONFIRM_PROB: float = 0.75
-    LIQUIDATION_CASCADE_VULNERABILITY_PCT: float = 0.90
-    LIQUIDATION_CASCADE_IGNITION_PCT: float = 0.97
-    LIQUIDATION_CASCADE_SLOPE_PCT: float = 0.80
-    LIQUIDATION_CASCADE_R2_PCT: float = 0.70
-    ORCHESTRATOR_LIQ_STATS_LIMIT: int = 2880
-    ORCHESTRATOR_MARKET_FALLBACK_LIMIT: int = 2880
-    ORCHESTRATOR_FUNDING_BRIDGE_LIMIT: int = 5000
-    TELEGRAM_RECENT_MESSAGES_LIMIT: int = 200
-    TELEGRAM_RAG_MESSAGES_LIMIT: int = 500
-    # Judge post-processing gates (deterministic, no extra LLM call)
-    # JUDGE_MIN_WIN_PROB_PCT: 52% barely exceeds coin-flip; after fees/slippage ~0 edge.
-    #   Raised to 55% for meaningful statistical edge.
-    # JUDGE_MIN_RR_FOR_ENTRY: Was 1.35 - contradicted POLICY_MIN_RR=2.0. Aligned to 1.9
-    #   (slight tolerance below 2.0 for LLM rounding; hard floor is effectively the policy).
-    JUDGE_MIN_WIN_PROB_PCT: float = 55.0
-    JUDGE_MIN_RR_FOR_ENTRY: float = 1.9
-    JUDGE_MIN_EV_FOR_ENTRY_PCT: float = 0.20
-    JUDGE_ENABLE_HOLD_OVERRIDE: bool = True
-    JUDGE_OVERRIDE_ALLOC_SWING_PCT: float = 8.0
-    JUDGE_OVERRIDE_ALLOC_POSITION_PCT: float = 5.0
-
-    # ===== Policy Engine: human-defined strategy constitution =====
-    POLICY_MAX_RISK_PER_TRADE_PCT: float = 1.0
-    POLICY_MIN_RR: float = 2.0
-    POLICY_TP1_R_MULTIPLE: float = 2.0
-    POLICY_TP1_EXIT_PCT: float = 50.0
-    POLICY_ATR_BUFFER_MULTIPLIER: float = 0.5
-    POLICY_REQUIRE_CONFIRMATION_SIGNALS: int = 1
-    POLICY_ZONE_TOLERANCE_PCT: float = 0.8
-    POLICY_ENABLE_LLM_VETO_ONLY: bool = True
-    POLICY_MAX_SPLIT_ALLOCATION_PCT: float = 100.0
-
-    # 8. cloudflare_triage / cloudflare_rerank (CF infra)
-    MODEL_CF_TRIAGE: str = "@cf/meta/llama-3-8b-instruct-awq"
-    MODEL_CF_RERANK: str = "@cf/baai/bge-reranker-base"
-    MODEL_CF_POOL_DECISION: str = (
-        "@cf/openai/gpt-oss-120b,"
-        "@cf/mistralai/mistral-small-3.1-24b-instruct,"
-        "@cf/qwen/qwen3-30b-a3b-fp8,"
-        "@cf/zai-org/glm-4.7-flash"
-    )
-    MODEL_CF_POOL_STRATEGY: str = (
-        "@cf/qwen/qwen3-30b-a3b-fp8,"
-        "@cf/openai/gpt-oss-20b,"
-        "@cf/zai-org/glm-4.7-flash,"
-        "@cf/ibm-granite/granite-4.0-h-micro"
-    )
-    MODEL_CF_POOL_LIGHT: str = (
-        "@cf/ibm-granite/granite-4.0-h-micro,"
-        "@cf/zai-org/glm-4.7-flash,"
-        "@cf/meta/llama-4-scout-17b-16e-instruct,"
-        "@cf/qwen/qwen3-30b-a3b-fp8"
-    )
-    MODEL_CF_POOL_VISION: str = (
-        "@cf/mistralai/mistral-small-3.1-24b-instruct,"
-        "@cf/meta/llama-4-scout-17b-16e-instruct,"
-        "@cf/google/gemma-3-12b-it,"
-        "@cf/meta/llama-3.2-11b-vision-instruct"
-    )
-
-    # 9. claude_standby Anthropic (reserved, not in default routing)
-    MODEL_CLAUDE_STANDBY: str = "claude-sonnet-4-6"
-
-    # 10. Chat model
-    MODEL_CHAT: str = "gemini-3-flash-preview"
-    # Soft input caps (character-based) to improve token efficiency
-    MAX_INPUT_CHARS_MACRO: int = 15000
-    MAX_INPUT_CHARS_JUDGE: int = 25000
-    MAX_INPUT_CHARS_SELF_CORRECTION: int = 10000
-    MAX_INPUT_CHARS_RAG_EXTRACTION: int = 5000
-    MAX_INPUT_CHARS_VLM_TELEGRAM_CHART: int = 1000  # caption only, short
-    MAX_INPUT_CHARS_TRIGGER_VETO: int = 6000
-
-    # ===== Trading Mode =====
-    # "swing"       = multi-day (days~2weeks), 4h analysis cycle
-    # "position"    = long-term (weeks~months), 1d analysis cycle
-    TRADING_MODE: str = "swing"
-    PHILOSOPHY_PROFILE: str = "inbum_shipalnam"
-
-    # ===== Chart Image / VLM Cost Control =====
-    # Smart image strategy:
-    #   SWING mode: chart sent to Judge only (1280x800, ~2048 tokens)
-    #   SCALP mode: no images (text-only, pure speed)
-    USE_CHART_IMAGES: bool = True
-    CHART_LOW_RES: bool = False  # Set to False for premium quality
-    CHART_IMAGE_WIDTH: int = 1280
-    CHART_IMAGE_HEIGHT: int = 800
-    CHART_IMAGE_DPI: int = 150
-    CHART_THEME: str = "dark_premium"  # [NEW] dark_premium | light_premium
-    # Derivative panel toggles (visual quality-first defaults)
-    CHART_SHOW_OI_PANEL: bool = False
-    CHART_SHOW_FUNDING_PANEL: bool = False
-    # Legacy CVD toggles (optional mode; OFF by default)
-    CHART_SHOW_CVD_PANEL: bool = False
-    CHART_SHOW_CVD_OVERLAY: bool = False
-
-    # ===== Candle Limits per Mode (1m candles needed from DB) =====
-    # SWING: 14400 (10 days) for 1h/4h + needs 1d from GCS
-    # POSITION: 10080 (7 days) for 4h + needs 1d/1w from GCS
-    # SWING: 10000 (approx 1 year of 1h)
-    # POSITION: 60000 (approx 6-7 years of 1h)
-    SWING_CANDLE_LIMIT: int = 10000 
-    POSITION_CANDLE_LIMIT: int = 60000
-
-    # ===== Historical Window per Mode (for chart/context loading from GCS) =====
-    # SWING: 12 months
-    # POSITION: 60 months (5 years)
-    SWING_HISTORY_MONTHS: int = 12
-    POSITION_HISTORY_MONTHS: int = 60
-
-    # ===== Data Retention (days) =====
-    # PostgreSQL(Supabase): 통계용 데이터만 보존 (30일)
-    # Neo4j/Milvus: 지식/그래프 데이터 영구 보존 (cleanup 없음)
-    RETENTION_MARKET_DATA_DAYS: int = 30
-    RETENTION_TELEGRAM_DAYS: int = 20  # 원본 텍스트 (Neo4j/Milvus에도 저장됨)
-    RETENTION_REPORTS_DAYS: int = 365  # AI 리포트 (영구히 가깝게)
-    RETENTION_CVD_DAYS: int = 30
-    RETENTION_EXECUTIONS_DAYS: int = 365
-    RETENTION_EVALUATION_DAYS: int = 365
-    RETENTION_EVALUATION_COMPONENT_DAYS: int = 180
-    RETENTION_ROLLUPS_DAYS: int = 3650
-    RETENTION_GRAPH_DAYS: int = 0  # 0 = 영구 보존 (Neo4j Aura free: 200K nodes)
-    
-    # ===== Source Credibility =====
-    TRUSTED_NEWS_DOMAINS: List[str] = [
-        "bloomberg.com", "reuters.com", "wsj.com", "ft.com", "cnbc.com",
-        "coindesk.com", "cointelegraph.com", "theblock.co", "decrypt.co",
-        "dlnews.com", "blockworks.co", "sec.gov", "cftc.gov", "federalreserve.gov",
-        "glassnode.com", "cryptoquant.com", "hankyung.com", "bloomingbit.io",
-        "mk.co.kr", "digitalasset.works"
-    ]
-
-    @property
-    def neo4j_uri(self) -> str:
-        """Resolve either NEO4J_URI or NEO4J_URL from .env"""
-        return self.NEO4J_URI or self.NEO4J_URL
-
-    @property
-    def neo4j_user(self) -> str:
-        """Resolve either NEO4J_USER or NEO4J_USERNAME"""
-        return self.NEO4J_USERNAME or self.NEO4J_USER
-
-    @property
-    def vertex_region(self) -> str:
-        """Vertex AI region. Falls back to REGION for backward compatibility."""
-        return self.VERTEX_REGION or self.REGION
-
-    @property
-    def trading_mode(self) -> TradingMode:
-        return TradingMode(self.TRADING_MODE.lower())
-
-    @property
-    def candle_limit(self) -> int:
-        mode = self.trading_mode
-        if mode == TradingMode.POSITION:
-            return self.POSITION_CANDLE_LIMIT
-        return self.SWING_CANDLE_LIMIT
-
-    @property
-    def should_use_chart(self) -> bool:
-        """All 3 modes generate structure chart for Judge VLM."""
-        return self.USE_CHART_IMAGES
-
-    @property
-    def use_execution_philosophy(self) -> bool:
-        return str(self.PHILOSOPHY_PROFILE or "").strip().lower() == "inbum_shipalnam"
-
-    @property
-    def chart_timeframe(self) -> str:
-        """Primary chart timeframe per mode."""
-        mode = self.trading_mode
-        if mode == TradingMode.POSITION:
-            return "1d"
-        return "4h"
-
-    @property
-    def analysis_timeframes(self) -> list:
-        """Timeframes to analyze per mode."""
-        mode = self.trading_mode
-        if mode == TradingMode.POSITION:
-            return ["4h", "1d", "1w"]
-        return ["1h", "4h", "1d"]
-
-    @property
-    def history_lookback_months(self) -> int:
-        """Mode-specific historical lookback window (months)."""
-        mode = self.trading_mode
-        if mode == TradingMode.POSITION:
-            return self.POSITION_HISTORY_MONTHS
-        return self.SWING_HISTORY_MONTHS
-
-    def history_lookback_months_for_mode(self, mode: TradingMode) -> int:
-        """Historical lookback window (months) for an explicit mode."""
-        if mode == TradingMode.POSITION:
-            return self.POSITION_HISTORY_MONTHS
-        return self.SWING_HISTORY_MONTHS
-
-    @property
-    def trading_symbols(self) -> List[str]:
-        """['BTCUSDT', 'ETHUSDT', ...] canonical format used throughout."""
-        return [s.strip().upper() for s in self.TRADING_SYMBOLS.split(',') if s.strip()]
-
-    @property
-    def trading_symbols_slash(self) -> List[str]:
-        """['BTC/USDT', 'ETH/USDT', ...] ccxt / Binance API format."""
-        return [f"{s[:-4]}/USDT" for s in self.trading_symbols if s.endswith('USDT')]
-
-    @property
-    def trading_symbols_base(self) -> List[str]:
-        """['BTC', 'ETH', ...] base currency only."""
-        return [s[:-4] for s in self.trading_symbols if s.endswith('USDT')]
-
-    @property
-    def trading_symbols_krw(self) -> List[str]:
-        """['BTC/KRW', 'ETH/KRW', ...] Upbit format."""
-        return [f"{s[:-4]}/KRW" for s in self.trading_symbols if s.endswith('USDT')]
-
-    @property
-    def deribit_currencies(self) -> List[str]:
-        """Deribit options exist only for BTC and ETH (exchange constraint)."""
-        _available = {'BTC', 'ETH'}
-        return [b for b in self.trading_symbols_base if b in _available]
-
-    @property
-    def data_lookback_hours(self) -> int:
-        """How far back to look for supplementary data (funding, CVD, liquidations)."""
-        mode = self.trading_mode
-        if mode == TradingMode.POSITION:
-            return 44000  # ~5 years for macro cycle context (1W scale)
-        return 8760   # 1 year for SWING (1D scale)
-
-
-class SecretManager:
-    def __init__(self, project_id: str):
-        from google.cloud import secretmanager
-
-        self.project_id = project_id
-        self.client = secretmanager.SecretManagerServiceClient()
-
-    def get_secret(self, secret_id: str, version: str = "latest") -> str:
-        name = f"projects/{self.project_id}/secrets/{secret_id}/versions/{version}"
-        response = self.client.access_secret_version(request={"name": name})
-        return response.payload.data.decode("UTF-8").strip()
-
-    def load_all_secrets(self) -> dict:
-        secrets = {}
-        secret_names = [
-            "SUPABASE_URL",
-            "SUPABASE_KEY",
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "VOYAGE_API_KEY",
-            "GEMINI_API_KEY",
-            "GEMINI_API_KEY_JUDGE",
-            "GEMINI_API_KEY_VLM",
-            "BINANCE_API_KEY",
-            "BINANCE_API_SECRET",
-            "UPBIT_ACCESS_KEY",
-            "UPBIT_SECRET_KEY",
-            "COINBASE_API_KEY",
-            "COINBASE_API_SECRET",
-            "TELEGRAM_API_ID",
-            "TELEGRAM_API_HASH",
-            "TELEGRAM_PHONE",
-            "TELEGRAM_BOT_TOKEN",
-            "TELEGRAM_CHAT_ID",
-            "PERPLEXITY_API_KEY",
-            "TAVILY_API_KEY",
-            "FRED_API_KEY",
-            "NEO4J_URI",
-            "NEO4J_USER",
-            "NEO4J_USERNAME",
-            "NEO4J_PASSWORD",
-            "MILVUS_URI",
-            "MILVUS_TOKEN",
-            "CLOUDFLARE_ACCOUNT_ID",
-            "CLOUDFLARE_AI_API_KEY",
-            "GCS_ARCHIVE_BUCKET",
-            "ENABLE_GCS_ARCHIVE",
-            "ENABLE_DIRECT_MCP_TRADING",
-            "DUNE_API_KEY",
-            "GROQ_API_KEY",
-            "CEREBRAS_API_KEY",
-            "OPENROUTER_API_KEY",
-            "OPEN_ROUTER_API_KEY",
-        ]
-
-        for name in secret_names:
-            try:
-                secrets[name] = self.get_secret(name)
-            except Exception:
-                secrets[name] = ""
-
-        return secrets
-
-@lru_cache(maxsize=1)
-def get_settings() -> Settings:
-    # [FIX] 일시적 trading_mode 복원:
-    # TRADING_MODE 환경변수가 세팅 되지 않았을 때만 SQLite에서 읽어와 주입.
-    # (cmd_mode 에서 os.environ + DB 양쪽을 동시에 업데이트 하므로 일시적인 DB vs env 복원)
-    if not os.environ.get("TRADING_MODE"):
-        try:
-            import sqlite3 as _sqlite3
-            from pathlib import Path as _Path
-            _db_path = str(_Path(__file__).parent.parent / "data" / "local_state.db")
-            _conn = _sqlite3.connect(_db_path)
-            _cur = _conn.cursor()
-            _cur.execute("SELECT value FROM system_config WHERE key = 'trading_mode'")
-            _row = _cur.fetchone()
-            _conn.close()
-            if _row:
-                os.environ["TRADING_MODE"] = _row[0]
-        except Exception:
-            pass  # DB 없거나 실패 시 .env 기본값 사용
-
-    if os.getenv("USE_SECRET_MANAGER", "false").lower() == "true":
-        project_id = os.getenv("PROJECT_ID", "")
-
-        # Auto-detect project ID from GCP metadata server if not set (VM 환경)
-        if not project_id:
-            try:
-                import urllib.request
-                req = urllib.request.Request(
-                    "http://metadata.google.internal/computeMetadata/v1/project/project-id",
-                    headers={"Metadata-Flavor": "Google"}
-                )
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    project_id = resp.read().decode("utf-8").strip()
-            except Exception:
-                pass
-
-        sm = SecretManager(project_id)
-        secrets = sm.load_all_secrets()
-        # Filter out empty strings so Pydantic uses field defaults instead of failing validation
-        secrets = {k: v for k, v in secrets.items() if v != ""}
-
-        return Settings(
-            PROJECT_ID=project_id,
-            **secrets
-        )
-    else:
-        return Settings()
-
-
-class _LazySettingsProxy:
-    """Defer secret loading until a setting is actually accessed."""
-
-    def __getattr__(self, name):
-        return getattr(get_settings(), name)
-
-    def __repr__(self) -> str:
-        return repr(get_settings())
-
-
-settings = _LazySettingsProxy()
-
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from functools import lru_cache
+from typing import List
+from enum import Enum
+import os
+import json
+from dotenv import load_dotenv
+
+# Ensure .env is loaded into environment variables early
+load_dotenv()
+
+
+class TradingMode(str, Enum):
+    """Two trading modes with distinct timeframes and analysis intervals.
+    SWING: days~2weeks, 4h analysis cycle
+    POSITION: weeks~months, 1d analysis cycle
+    """
+    SWING = "swing"
+    POSITION = "position"
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        extra="allow"
+    )
+
+    PROJECT_ID: str = ""
+    REGION: str = "asia-northeast3"          # VM 인프라 리전 (서울)
+    VERTEX_REGION: str = "global"            # 모델 호출 리전 (Gemini + Claude)
+    VERTEX_REGION_GEMINI: str = "global"     # Gemini 전용 (하위호환)
+
+    SUPABASE_URL: str = ""
+    SUPABASE_KEY: str = ""
+
+    # ===== Direct AI API Keys (Multi-LLM) =====
+    ANTHROPIC_API_KEY: str = ""
+    OPENAI_API_KEY: str = ""
+    VOYAGE_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""          # default Gemini key
+    GEMINI_API_KEY_JUDGE: str = ""    # Project A -- Judge (gemini-3.1-pro-preview)
+    GEMINI_API_KEY_VLM: str = ""      # Project B -- VLM Geometric (gemini-3-flash-preview)
+    GROQ_API_KEY: str = ""
+    CEREBRAS_API_KEY: str = ""        # Cerebras -> meta_regime + risk_eval (gpt-oss-120b)
+    OPENROUTER_API_KEY: str = ""      # OpenRouter -> hourly monitor (free tier)
+    OPEN_ROUTER_API_KEY: str = ""     # .env alias for OPENROUTER_API_KEY
+
+    BINANCE_API_KEY: str = ""
+    BINANCE_API_SECRET: str = ""
+
+    UPBIT_ACCESS_KEY: str = ""
+    UPBIT_SECRET_KEY: str = ""
+
+    TELEGRAM_API_ID: str = ""
+    TELEGRAM_API_HASH: str = ""
+    TELEGRAM_PHONE: str = ""
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
+
+    # Perplexity API for market narrative search
+    PERPLEXITY_API_KEY: str = ""
+    PERPLEXITY_MODEL_NARRATIVE: str = "sonar-pro"
+    PERPLEXITY_MODEL_TARGETED: str = "sonar"
+    TAVILY_API_KEY: str = ""
+    SERPER_API_KEY: str = ""
+    EXA_API_KEY: str = ""
+    TRIANGULATION_MAX_ATTEMPTS: int = 2
+
+    # FRED API for macro regime data
+    FRED_API_KEY: str = ""
+
+    # Neo4j Aura Free (Knowledge Graph)
+    NEO4J_URI: str = ""  # e.g. neo4j+s://xxxxxx.databases.neo4j.io
+    NEO4J_URL: str = ""  # Alias to support user's .env naming
+    NEO4J_USER: str = "neo4j"
+    NEO4J_USERNAME: str = ""  # Alias to support user's credential file
+    NEO4J_PASSWORD: str = ""
+
+    # Zilliz Cloud Free (Milvus vector DB)
+    MILVUS_URI: str = ""  # e.g. https://in03-xxxxxx.api.gcp-us-west1.zillizcloud.com
+    MILVUS_TOKEN: str = ""
+
+    # Cloudflare Workers AI (bge-reranker-base - Free tier: 10,000 neurons/day)
+    # Used as borderline-zone cross-encoder in LightRAG dedup pipeline.
+    CLOUDFLARE_ACCOUNT_ID: str = ""
+    CLOUDFLARE_AI_API_KEY: str = ""
+    CLOUDFLARE_AI_TIMEOUT_SECONDS: float = 25.0
+    CLOUDFLARE_AI_TIMEOUT_EXHAUST_SECONDS: int = 180
+    CLOUDFLARE_AI_RATE_LIMIT_EXHAUST_SECONDS: int = 1800
+
+
+    # ===== Trading Symbols (single source of truth) =====
+    # Comma-separated, Binance Futures format (no slashes).
+    # Adding a symbol here automatically propagates to ALL collectors.
+    # Upbit KRW pairs and Deribit currencies are auto-derived.
+    TRADING_SYMBOLS: str = "BTCUSDT,ETHUSDT"
+
+    # Deribit public options data (DVOL, PCR, IV Term Structure, 25d Skew)
+    # No API key required - free public REST API
+    DERIBIT_ENABLED: bool = True
+
+    # Dune API (on-chain/DEX macro signals)
+    DUNE_API_KEY: str = ""
+    DUNE_ENABLED: bool = True
+    # Cost guardrails for free-tier Dune credits (monthly 2500 credits)
+    # Keep scheduler cadence unchanged, but throttle collector execution internally.
+    DUNE_BUDGET_GUARD: bool = True
+    DUNE_GLOBAL_MIN_INTERVAL_MINUTES: int = 60  # at most once per 1h globally
+    DUNE_MAX_QUERY_RUNS_PER_DAY: int = 24
+    DUNE_MAX_QUERIES_PER_RUN: int = 5
+    DUNE_PRIORITY_QUERY_IDS: List[int] = [6638261, 3378085, 21689, 4319, 3383110]
+
+    # Optional low-cost long-term archive on GCS
+    ENABLE_GCS_ARCHIVE: bool = False
+    GCS_ARCHIVE_BUCKET: str = ""
+
+    # Coin Metrics Community API (daily on-chain regime overlay)
+    COINMETRICS_ENABLED: bool = True
+    COINMETRICS_BASE_URL: str = "https://community-api.coinmetrics.io/v4"
+    COINMETRICS_TIMEOUT_SECONDS: int = 20
+    COINMETRICS_LOOKBACK_DAYS: int = 90
+
+
+    # ===== Paper trading / sandbox safety =====
+    PAPER_TRADING_MODE: bool = True  # default safe mode (no real orders)
+    PAPER_TRADING_PRICE_SOURCE: str = "ticker"  # ticker | last_report
+    ENABLE_DIRECT_MCP_TRADING: bool = False
+    BINANCE_USE_TESTNET: bool = False
+    UPBIT_PAPER_ONLY: bool = True
+    
+    # ===== V8: Retail Multi-Exchange Execution Limits =====
+    # Hardcoded by User Request for Retail Scale limits
+    BINANCE_PAPER_BALANCE_USD: float = 2000.0
+    UPBIT_PAPER_BALANCE_KRW: float = 2000000.0
+    UPBIT_PAPER_BALANCE_USD: float = 1500.0   # 약 2,000,000 KRW; paper engine USD 단위로 통합
+    MAX_LEVERAGE: int = 3
+    
+    COINBASE_API_KEY: str = ""
+    COINBASE_API_SECRET: str = ""
+
+    VOLATILITY_THRESHOLD: float = 3.0
+    ANALYSIS_INTERVAL_HOURS: int = 4
+    DAILY_PRECISION_HOURS_UTC: str = "1,13"
+    DAILY_PRECISION_HOUR_UTC: int = 1
+    DAILY_PRECISION_MINUTE_UTC: int = 30
+    DAILY_PRECISION_PROTECTION_MINUTES: int = 20
+    DAILY_PRECISION_SYMBOL_GAP_MINUTES: int = 10
+    STATS_ADAPTIVE_STD_WINDOW_HOURS: int = 24
+    STATS_ADAPTIVE_STD_MIN_PERIODS: int = 12
+    STATS_ADAPTIVE_STD_MIN_ROLLING_SAMPLES: int = 24
+    STATS_ADAPTIVE_STD_FLOOR_QUANTILE: float = 0.20
+    STATS_LIQ_MIN_STD_BTC_USD: float = 1500000.0
+    STATS_LIQ_MIN_STD_ETH_USD: float = 600000.0
+    STATS_LIQ_MIN_STD_DEFAULT_USD: float = 500000.0
+    STATS_DVOL_MIN_STD: float = 0.8
+    STATS_PCR_MIN_STD: float = 0.01
+    STATS_MAX_LIQ_STALE_HOURS: float = 6.0
+    STATS_MAX_MICRO_STALE_HOURS: float = 3.0
+    STATS_MAX_DERIBIT_STALE_HOURS: float = 6.0
+
+    # ===== AI Models (role API model single policy table) =====
+    MODEL_ENDPOINT: str = "gemini-3.1-pro-preview"
+
+    # 1. judge Google AI Studio Project A
+    MODEL_JUDGE: str = "gemini-3.1-pro-preview"
+    MODEL_JUDGE_FALLBACK: str = "gemini-3-flash-preview"
+    MODEL_SELF_CORRECTION: str = "gemini-3.1-pro-preview"
+
+    # 2. vlm_geometric / vlm_telegram_chart -- Lightweight Flash for Vision efficiency
+    MODEL_VLM_GEOMETRIC: str = "gemini-3-flash-preview"
+    MODEL_VLM_TELEGRAM_CHART: str = "gemini-3-flash-preview"
+
+    # 3. meta_regime Cerebras
+    MODEL_META_REGIME: str = "gpt-oss-120b"
+
+    # 4. risk_eval Cerebras
+    MODEL_RISK_EVAL: str = "gpt-oss-120b"
+
+    # 5. risk_eval_fallback Groq
+    MODEL_RISK_EVAL_FALLBACK: str = "qwen/qwen3-32b"
+
+    # 6. RAG extraction (Groq) + News summarize (Cerebras lightweight)
+    MODEL_RAG_EXTRACTION: str = "qwen/qwen3-32b"
+    MODEL_NEWS_SUMMARIZE: str = "llama3.1-8b"
+    MODEL_NEWS_CLUSTER: str = "qwen/qwen3-32b"
+    MODEL_NEWS_FINAL: str = "openai/gpt-oss-120b"
+    MODEL_NEWS_FINAL_FALLBACK: str = "qwen/qwen3-32b"
+    MODEL_TRIGGER_VETO: str = "llama3.1-8b"
+
+    # 7. monitor_hourly OpenRouter (free)
+    MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
+    MONITOR_SOFT_TRIGGER_THRESHOLD: float = 0.7
+    MARKET_STATUS_PREFER_DETERMINISTIC: bool = True
+    ENABLE_SNAPSHOT_HOT_PATH_DAILY: bool = True
+    ENABLE_SNAPSHOT_HOT_PATH_TRIGGER: bool = True
+    ENABLE_LIQUIDATION_CASCADE_ALERTS: bool = True
+    LIQUIDATION_CASCADE_ARTIFACT_DIR: str = "data/models/liquidation_cascade"
+    LIQUIDATION_CASCADE_LOOKBACK_DAYS: int = 1
+    LIQUIDATION_CASCADE_LOOKBACK_MINUTES: int = 360
+    LIQUIDATION_CASCADE_HORIZON_MINUTES: int = 5
+    LIQUIDATION_CASCADE_WATCH_PROB: float = 0.45
+    LIQUIDATION_CASCADE_WARN_PROB: float = 0.60
+    LIQUIDATION_CASCADE_CONFIRM_PROB: float = 0.75
+    LIQUIDATION_CASCADE_VULNERABILITY_PCT: float = 0.90
+    LIQUIDATION_CASCADE_IGNITION_PCT: float = 0.97
+    LIQUIDATION_CASCADE_SLOPE_PCT: float = 0.80
+    LIQUIDATION_CASCADE_R2_PCT: float = 0.70
+    ORCHESTRATOR_LIQ_STATS_LIMIT: int = 2880
+    ORCHESTRATOR_MARKET_FALLBACK_LIMIT: int = 2880
+    ORCHESTRATOR_FUNDING_BRIDGE_LIMIT: int = 5000
+    TELEGRAM_RECENT_MESSAGES_LIMIT: int = 200
+    TELEGRAM_RAG_MESSAGES_LIMIT: int = 500
+    # Judge post-processing gates (deterministic, no extra LLM call)
+    # JUDGE_MIN_WIN_PROB_PCT: 52% barely exceeds coin-flip; after fees/slippage ~0 edge.
+    #   Raised to 55% for meaningful statistical edge.
+    # JUDGE_MIN_RR_FOR_ENTRY: Was 1.35 - contradicted POLICY_MIN_RR=2.0. Aligned to 1.9
+    #   (slight tolerance below 2.0 for LLM rounding; hard floor is effectively the policy).
+    JUDGE_MIN_WIN_PROB_PCT: float = 55.0
+    JUDGE_MIN_RR_FOR_ENTRY: float = 1.9
+    JUDGE_MIN_EV_FOR_ENTRY_PCT: float = 0.20
+    JUDGE_ENABLE_HOLD_OVERRIDE: bool = True
+    JUDGE_OVERRIDE_ALLOC_SWING_PCT: float = 8.0
+    JUDGE_OVERRIDE_ALLOC_POSITION_PCT: float = 5.0
+
+    # ===== Policy Engine: human-defined strategy constitution =====
+    POLICY_MAX_RISK_PER_TRADE_PCT: float = 1.0
+    POLICY_MIN_RR: float = 2.0
+    POLICY_TP1_R_MULTIPLE: float = 2.0
+    POLICY_TP1_EXIT_PCT: float = 50.0
+    POLICY_ATR_BUFFER_MULTIPLIER: float = 0.5
+    POLICY_REQUIRE_CONFIRMATION_SIGNALS: int = 1
+    POLICY_ZONE_TOLERANCE_PCT: float = 0.8
+    POLICY_ENABLE_LLM_VETO_ONLY: bool = True
+    POLICY_MAX_SPLIT_ALLOCATION_PCT: float = 100.0
+
+    # 8. cloudflare_triage / cloudflare_rerank (CF infra)
+    MODEL_CF_TRIAGE: str = "@cf/meta/llama-3-8b-instruct-awq"
+    MODEL_CF_RERANK: str = "@cf/baai/bge-reranker-base"
+    MODEL_CF_POOL_DECISION: str = (
+        "@cf/openai/gpt-oss-120b,"
+        "@cf/mistralai/mistral-small-3.1-24b-instruct,"
+        "@cf/qwen/qwen3-30b-a3b-fp8,"
+        "@cf/zai-org/glm-4.7-flash"
+    )
+    MODEL_CF_POOL_STRATEGY: str = (
+        "@cf/qwen/qwen3-30b-a3b-fp8,"
+        "@cf/openai/gpt-oss-20b,"
+        "@cf/zai-org/glm-4.7-flash,"
+        "@cf/ibm-granite/granite-4.0-h-micro"
+    )
+    MODEL_CF_POOL_LIGHT: str = (
+        "@cf/ibm-granite/granite-4.0-h-micro,"
+        "@cf/zai-org/glm-4.7-flash,"
+        "@cf/meta/llama-4-scout-17b-16e-instruct,"
+        "@cf/qwen/qwen3-30b-a3b-fp8"
+    )
+    MODEL_CF_POOL_VISION: str = (
+        "@cf/mistralai/mistral-small-3.1-24b-instruct,"
+        "@cf/meta/llama-4-scout-17b-16e-instruct,"
+        "@cf/google/gemma-3-12b-it,"
+        "@cf/meta/llama-3.2-11b-vision-instruct"
+    )
+
+    # 9. claude_standby Anthropic (reserved, not in default routing)
+    MODEL_CLAUDE_STANDBY: str = "claude-sonnet-4-6"
+
+    # 10. Chat model
+    MODEL_CHAT: str = "gemini-3-flash-preview"
+    # Soft input caps (character-based) to improve token efficiency
+    MAX_INPUT_CHARS_MACRO: int = 15000
+    MAX_INPUT_CHARS_JUDGE: int = 25000
+    MAX_INPUT_CHARS_SELF_CORRECTION: int = 10000
+    MAX_INPUT_CHARS_RAG_EXTRACTION: int = 5000
+    MAX_INPUT_CHARS_VLM_TELEGRAM_CHART: int = 1000  # caption only, short
+    MAX_INPUT_CHARS_TRIGGER_VETO: int = 6000
+
+    # ===== Trading Mode =====
+    # "swing"       = multi-day (days~2weeks), 4h analysis cycle
+    # "position"    = long-term (weeks~months), 1d analysis cycle
+    TRADING_MODE: str = "swing"
+    PHILOSOPHY_PROFILE: str = "inbum_shipalnam"
+
+    # ===== Chart Image / VLM Cost Control =====
+    # Smart image strategy:
+    #   SWING mode: chart sent to Judge only (1280x800, ~2048 tokens)
+    #   SCALP mode: no images (text-only, pure speed)
+    USE_CHART_IMAGES: bool = True
+    CHART_LOW_RES: bool = False  # Set to False for premium quality
+    CHART_IMAGE_WIDTH: int = 1280
+    CHART_IMAGE_HEIGHT: int = 800
+    CHART_IMAGE_DPI: int = 150
+    CHART_THEME: str = "dark_premium"  # [NEW] dark_premium | light_premium
+    # Derivative panel toggles (visual quality-first defaults)
+    CHART_SHOW_OI_PANEL: bool = False
+    CHART_SHOW_FUNDING_PANEL: bool = False
+    # Legacy CVD toggles (optional mode; OFF by default)
+    CHART_SHOW_CVD_PANEL: bool = False
+    CHART_SHOW_CVD_OVERLAY: bool = False
+
+    # ===== Candle Limits per Mode (1m candles needed from DB) =====
+    # SWING: 14400 (10 days) for 1h/4h + needs 1d from GCS
+    # POSITION: 10080 (7 days) for 4h + needs 1d/1w from GCS
+    # SWING: 10000 (approx 1 year of 1h)
+    # POSITION: 60000 (approx 6-7 years of 1h)
+    SWING_CANDLE_LIMIT: int = 10000 
+    POSITION_CANDLE_LIMIT: int = 60000
+
+    # ===== Historical Window per Mode (for chart/context loading from GCS) =====
+    # SWING: 12 months
+    # POSITION: 60 months (5 years)
+    SWING_HISTORY_MONTHS: int = 12
+    POSITION_HISTORY_MONTHS: int = 60
+
+    # ===== Data Retention (days) =====
+    # PostgreSQL(Supabase): 통계용 데이터만 보존 (30일)
+    # --------------- Neo4j/Milvus / (cleanup ) ---------------
+    RETENTION_MARKET_DATA_DAYS: int = 30
+    RETENTION_TELEGRAM_DAYS: int = 20  # 원본 텍스트 (Neo4j/Milvus에도 장됨)
+    RETENTION_REPORTS_DAYS: int = 365  # AI 리포트 (영구히 깝게)
+    RETENTION_CVD_DAYS: int = 30
+    RETENTION_EXECUTIONS_DAYS: int = 365
+    RETENTION_EVALUATION_DAYS: int = 365
+    RETENTION_EVALUATION_COMPONENT_DAYS: int = 180
+    RETENTION_ROLLUPS_DAYS: int = 3650
+    RETENTION_GRAPH_DAYS: int = 0  # 0 = 영구 보존 (Neo4j Aura free: 200K nodes)
+    
+    # ===== Source Credibility =====
+    TRUSTED_NEWS_DOMAINS: List[str] = [
+        "bloomberg.com", "reuters.com", "wsj.com", "ft.com", "cnbc.com",
+        "coindesk.com", "cointelegraph.com", "theblock.co", "decrypt.co",
+        "dlnews.com", "blockworks.co", "sec.gov", "cftc.gov", "federalreserve.gov",
+        "glassnode.com", "cryptoquant.com", "hankyung.com", "bloomingbit.io",
+        "mk.co.kr", "digitalasset.works"
+    ]
+
+    @property
+    def neo4j_uri(self) -> str:
+        """Resolve either NEO4J_URI or NEO4J_URL from .env"""
+        return self.NEO4J_URI or self.NEO4J_URL
+
+    @property
+    def neo4j_user(self) -> str:
+        """Resolve either NEO4J_USER or NEO4J_USERNAME"""
+        return self.NEO4J_USERNAME or self.NEO4J_USER
+
+    @property
+    def vertex_region(self) -> str:
+        """Vertex AI region. Falls back to REGION for backward compatibility."""
+        return self.VERTEX_REGION or self.REGION
+
+    @property
+    def trading_mode(self) -> TradingMode:
+        return TradingMode(self.TRADING_MODE.lower())
+
+    @property
+    def candle_limit(self) -> int:
+        mode = self.trading_mode
+        if mode == TradingMode.POSITION:
+            return self.POSITION_CANDLE_LIMIT
+        return self.SWING_CANDLE_LIMIT
+
+    @property
+    def should_use_chart(self) -> bool:
+        """All 3 modes generate structure chart for Judge VLM."""
+        return self.USE_CHART_IMAGES
+
+    @property
+    def use_execution_philosophy(self) -> bool:
+        return str(self.PHILOSOPHY_PROFILE or "").strip().lower() == "inbum_shipalnam"
+
+    @property
+    def chart_timeframe(self) -> str:
+        """Primary chart timeframe per mode."""
+        mode = self.trading_mode
+        if mode == TradingMode.POSITION:
+            return "1d"
+        return "4h"
+
+    @property
+    def analysis_timeframes(self) -> list:
+        """Timeframes to analyze per mode."""
+        mode = self.trading_mode
+        if mode == TradingMode.POSITION:
+            return ["4h", "1d", "1w"]
+        return ["1h", "4h", "1d"]
+
+    @property
+    def history_lookback_months(self) -> int:
+        """Mode-specific historical lookback window (months)."""
+        mode = self.trading_mode
+        if mode == TradingMode.POSITION:
+            return self.POSITION_HISTORY_MONTHS
+        return self.SWING_HISTORY_MONTHS
+
+    def history_lookback_months_for_mode(self, mode: TradingMode) -> int:
+        """Historical lookback window (months) for an explicit mode."""
+        if mode == TradingMode.POSITION:
+            return self.POSITION_HISTORY_MONTHS
+        return self.SWING_HISTORY_MONTHS
+
+    @property
+    def trading_symbols(self) -> List[str]:
+        """['BTCUSDT', 'ETHUSDT', ...] canonical format used throughout."""
+        return [s.strip().upper() for s in self.TRADING_SYMBOLS.split(',') if s.strip()]
+
+    @property
+    def trading_symbols_slash(self) -> List[str]:
+        """['BTC/USDT', 'ETH/USDT', ...] ccxt / Binance API format."""
+        return [f"{s[:-4]}/USDT" for s in self.trading_symbols if s.endswith('USDT')]
+
+    @property
+    def trading_symbols_base(self) -> List[str]:
+        """['BTC', 'ETH', ...] base currency only."""
+        return [s[:-4] for s in self.trading_symbols if s.endswith('USDT')]
+
+    @property
+    def trading_symbols_krw(self) -> List[str]:
+        """['BTC/KRW', 'ETH/KRW', ...] Upbit format."""
+        return [f"{s[:-4]}/KRW" for s in self.trading_symbols if s.endswith('USDT')]
+
+    @property
+    def deribit_currencies(self) -> List[str]:
+        """Deribit options exist only for BTC and ETH (exchange constraint)."""
+        _available = {'BTC', 'ETH'}
+        return [b for b in self.trading_symbols_base if b in _available]
+
+    @property
+    def data_lookback_hours(self) -> int:
+        """How far back to look for supplementary data (funding, CVD, liquidations)."""
+        mode = self.trading_mode
+        if mode == TradingMode.POSITION:
+            return 44000  # ~5 years for macro cycle context (1W scale)
+        return 8760   # 1 year for SWING (1D scale)
+
+
+class SecretManager:
+    def __init__(self, project_id: str):
+        from google.cloud import secretmanager
+
+        self.project_id = project_id
+        self.client = secretmanager.SecretManagerServiceClient()
+
+    def get_secret(self, secret_id: str, version: str = "latest") -> str:
+        name = f"projects/{self.project_id}/secrets/{secret_id}/versions/{version}"
+        response = self.client.access_secret_version(request={"name": name})
+        return response.payload.data.decode("UTF-8").strip()
+
+    def load_all_secrets(self) -> dict:
+        secrets = {}
+        secret_names = [
+            "SUPABASE_URL",
+            "SUPABASE_KEY",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "VOYAGE_API_KEY",
+            "GEMINI_API_KEY",
+            "GEMINI_API_KEY_JUDGE",
+            "GEMINI_API_KEY_VLM",
+            "BINANCE_API_KEY",
+            "BINANCE_API_SECRET",
+            "UPBIT_ACCESS_KEY",
+            "UPBIT_SECRET_KEY",
+            "COINBASE_API_KEY",
+            "COINBASE_API_SECRET",
+            "TELEGRAM_API_ID",
+            "TELEGRAM_API_HASH",
+            "TELEGRAM_PHONE",
+            "TELEGRAM_BOT_TOKEN",
+            "TELEGRAM_CHAT_ID",
+            "PERPLEXITY_API_KEY",
+            "TAVILY_API_KEY",
+            "FRED_API_KEY",
+            "NEO4J_URI",
+            "NEO4J_USER",
+            "NEO4J_USERNAME",
+            "NEO4J_PASSWORD",
+            "MILVUS_URI",
+            "MILVUS_TOKEN",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "CLOUDFLARE_AI_API_KEY",
+            "GCS_ARCHIVE_BUCKET",
+            "ENABLE_GCS_ARCHIVE",
+            "ENABLE_DIRECT_MCP_TRADING",
+            "DUNE_API_KEY",
+            "GROQ_API_KEY",
+            "CEREBRAS_API_KEY",
+            "OPENROUTER_API_KEY",
+            "OPEN_ROUTER_API_KEY",
+        ]
+
+        for name in secret_names:
+            try:
+                secrets[name] = self.get_secret(name)
+            except Exception:
+                secrets[name] = ""
+
+        return secrets
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    # [FIX] 일시적 trading_mode 복원:
+    # ----------------- TRADING_MODE SQLite . -----------------
+    # ---------- (cmd_mode os.environ DB DB vs env ) ----------
+    if not os.environ.get("TRADING_MODE"):
+        try:
+            import sqlite3 as _sqlite3
+            from pathlib import Path as _Path
+            _db_path = str(_Path(__file__).parent.parent / "data" / "local_state.db")
+            _conn = _sqlite3.connect(_db_path)
+            _cur = _conn.cursor()
+            _cur.execute("SELECT value FROM system_config WHERE key = 'trading_mode'")
+            _row = _cur.fetchone()
+            _conn.close()
+            if _row:
+                os.environ["TRADING_MODE"] = _row[0]
+        except Exception:
+            pass  # DB 없거나 실패 시 .env 기본값 사용
+
+    if os.getenv("USE_SECRET_MANAGER", "false").lower() == "true":
+        project_id = os.getenv("PROJECT_ID", "")
+
+        # Auto-detect project ID from GCP metadata server if not set (VM 환경)
+        if not project_id:
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    "http://metadata.google.internal/computeMetadata/v1/project/project-id",
+                    headers={"Metadata-Flavor": "Google"}
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    project_id = resp.read().decode("utf-8").strip()
+            except Exception:
+                pass
+
+        sm = SecretManager(project_id)
+        secrets = sm.load_all_secrets()
+        # Filter out empty strings so Pydantic uses field defaults instead of failing validation
+        secrets = {k: v for k, v in secrets.items() if v != ""}
+
+        return Settings(
+            PROJECT_ID=project_id,
+            **secrets
+        )
+    else:
+        return Settings()
+
+
+class _LazySettingsProxy:
+    """Defer secret loading until a setting is actually accessed."""
+
+    def __getattr__(self, name):
+        return getattr(get_settings(), name)
+
+    def __repr__(self) -> str:
+        return repr(get_settings())
+
+
+settings = _LazySettingsProxy()
+

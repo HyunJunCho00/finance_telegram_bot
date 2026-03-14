@@ -4,25 +4,25 @@
   OI       : data.binance.vision daily metrics zip (5분 해상도, 2019-09~)
   Funding  : data.binance.vision monthly fundingRate zip (8시간 해상도, 2019-09~)
 
-GCS 출력 경로 (live collector와 동일):
+GCS 출력 경로 (live collector 동일):
   funding/{symbol}/{YYYY-MM}.parquet
 
 스키마 (live collector funding_data 테이블 호환):
   symbol, timestamp (UTC), funding_rate, open_interest_value
 
 중복 처리:
-  _merge_upload_parquet (keep="last") 가 알아서 처리.
-  live collector가 이미 쌓은 데이터가 있어도 안전하게 merge됨.
+  _merge_upload_parquet (keep="last")  알아서 처리.
+  live collector 이미 쌓 데이터 있어도 안전하게 merge됨.
 
 Usage:
     python tools/backfill_oi.py                        # BTC+ETH 2020-01-01 ~ 오늘
-    python tools/backfill_oi.py --dry-run              # GCS 저장 없이 파싱만 확인
-    python tools/backfill_oi.py --start 2022-01-01    # 시작일 지정
+    python tools/backfill_oi.py --dry-run              # GCS 장 없이 파싱만 확인
+    python tools/backfill_oi.py --start 2022-01-01    # 시작일 정
     python tools/backfill_oi.py --symbol BTCUSDT       # 특정 심볼만
 
 참고:
-  BTCUSDT : 2019-09-25 부터 데이터 존재
-  ETHUSDT : 2020-12-10 부터 데이터 존재 (그 이전 날짜는 404 → 자동 스킵)
+  BTCUSDT : 2019-09-25 터 데이터 존재
+  ETHUSDT : 2020-12-10 터 데이터 존재 (그 이전 날짜는 404 → 자동 스킵)
   --start 2020-01-01 이어도 실제 파일 없는 날짜는 조용히 스킵됨.
 """
 
@@ -45,16 +45,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.settings import settings
 from processors.gcs_parquet import gcs_parquet_store
 
-# ── 상수 ──────────────────────────────────────────────────────────────────────
+# -------------------------------------------------------
 DEFAULT_START = "2020-01-01"
 OI_BASE_URL   = "https://data.binance.vision/data/futures/um/daily/metrics"
 FUND_BASE_URL = "https://data.binance.vision/data/futures/um/monthly/fundingRate"
-REQUEST_DELAY = 0.05   # 초 — Binance Data Vision rate limit 방지
+REQUEST_DELAY = 0.05   # 초  Binance Data Vision rate limit 방
 
 
-# ── 다운로드 ──────────────────────────────────────────────────────────────────
+# -------------------------------------------------------
 def _download(url: str, dest: Path) -> bool:
-    """URL → dest 다운로드. 이미 캐시된 파일은 스킵. 404는 False 반환."""
+    """URL → dest 다운로드. 이미 캐시된 파일 스킵. 404는 False 반환."""
     if dest.exists():
         return True
     try:
@@ -63,16 +63,16 @@ def _download(url: str, dest: Path) -> bool:
             dest.write_bytes(r.content)
             return True
         if r.status_code == 404:
-            return False          # 해당 날짜 파일 없음 — 정상적인 경우
+            return False          # 해당 날짜 파일 없음  정상적인 경우
         logger.warning(f"HTTP {r.status_code}: {url}")
     except requests.RequestException as e:
         logger.warning(f"Download error ({dest.name}): {e}")
     return False
 
 
-# ── 타임스탬프 파싱 ────────────────────────────────────────────────────────────
+# -------------------------------------------------------
 def _parse_ts(series: pd.Series) -> pd.Series:
-    """ms / us / s 정수 또는 문자열 타임스탬프 → UTC datetime."""
+    """ms / us / s 정수 또는 문자열 임스탬프 → UTC datetime."""
     numeric = pd.to_numeric(series, errors="coerce")
     result  = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns, UTC]")
 
@@ -91,7 +91,7 @@ def _parse_ts(series: pd.Series) -> pd.Series:
     return result
 
 
-# ── OI zip 파싱 ───────────────────────────────────────────────────────────────
+# ------------------------ OI zip ------------------------
 def _read_oi_zip(path: Path) -> pd.DataFrame:
     """
     daily metrics zip → DataFrame[timestamp, open_interest_value]
@@ -134,7 +134,7 @@ def _read_oi_zip(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-# ── Funding zip 파싱 ──────────────────────────────────────────────────────────
+# ---------------------- Funding zip ----------------------
 def _read_funding_zip(path: Path) -> pd.DataFrame:
     """
     monthly fundingRate zip → DataFrame[timestamp, funding_rate]
@@ -174,7 +174,7 @@ def _read_funding_zip(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-# ── 심볼별 처리 ───────────────────────────────────────────────────────────────
+# -------------------------------------------------------
 def process_symbol(
     symbol: str,
     start_dt: datetime,
@@ -187,7 +187,7 @@ def process_symbol(
     logger.info(f"{'='*55}")
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    # ── 1. OI: 일별 metrics zip 다운로드 + 파싱 ──────────────────────────────
+    # ------------------- 1. OI metrics zip -------------------
     logger.info("[1/3] Downloading OI metrics (daily zips)...")
     oi_dfs = []
     days = [
@@ -219,7 +219,7 @@ def process_symbol(
     )
     logger.info(f"  OI rows collected: {len(full_oi):,}")
 
-    # ── 2. Funding: 월별 zip 다운로드 + 파싱 ─────────────────────────────────
+    # -------------------- 2. Funding zip --------------------
     logger.info("[2/3] Downloading Funding rates (monthly zips)...")
     fund_dfs = []
     curr = start_dt.replace(day=1)
@@ -237,7 +237,7 @@ def process_symbol(
 
     logger.info(f"  Funding months collected: {len(fund_dfs)}")
 
-    # ── 3. Merge: OI 타임스탬프 기준으로 funding_rate forward-fill ───────────
+    # --------- 3. Merge OI funding_rate forward fill ---------
     logger.info("[3/3] Merging OI + Funding...")
 
     if fund_dfs:
@@ -247,7 +247,7 @@ def process_symbol(
             .sort_values("timestamp")
             .reset_index(drop=True)
         )
-        # OI 타임스탬프 기준, 가장 가까운 이전 funding_rate를 붙임
+        # -------------------- OI funding_rate --------------------
         merged = pd.merge_asof(
             full_oi,
             full_fund,
@@ -265,14 +265,14 @@ def process_symbol(
     # live collector 스키마에 맞춤
     merged = merged[["symbol", "timestamp", "funding_rate", "open_interest_value"]].copy()
 
-    # 날짜 범위 재확인 (타임스탬프 파싱 오류로 인한 이상값 제거)
+    # -------------------------- ( ) --------------------------
     start_ts = pd.Timestamp(start_dt)
     end_ts   = pd.Timestamp(end_dt) + timedelta(days=1)
     merged   = merged[(merged["timestamp"] >= start_ts) & (merged["timestamp"] < end_ts)]
 
     logger.info(f"  Final rows to write: {len(merged):,}")
 
-    # ── 4. GCS에 월 단위로 업로드 ────────────────────────────────────────────
+    # ------------------------ 4. GCS ------------------------
     merged["_month"] = merged["timestamp"].dt.strftime("%Y-%m")
     total_rows   = 0
     months_done  = 0
@@ -286,7 +286,7 @@ def process_symbol(
             logger.info(f"  [DRY RUN] {path}  ←  {rows:,} rows")
         else:
             if not gcs_parquet_store.enabled:
-                logger.error("GCS 비활성화 — .env에서 ENABLE_GCS_ARCHIVE=true 확인")
+                logger.error("GCS 비활성화  .env에서 ENABLE_GCS_ARCHIVE=true 확인")
                 return {"symbol": symbol, "status": "gcs_disabled"}
 
             size = gcs_parquet_store._merge_upload_parquet(
@@ -307,7 +307,7 @@ def process_symbol(
     }
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
+# ---------------------- Entry point ----------------------
 def main():
     parser = argparse.ArgumentParser(
         description="Backfill historical OI + Funding from data.binance.vision → GCS Parquet",
@@ -331,7 +331,7 @@ def main():
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="파싱까지만 수행, GCS 업로드 안 함"
+        help="파싱까만 수행, GCS 업로드 안 함"
     )
     args = parser.parse_args()
 
@@ -364,7 +364,7 @@ def main():
             symbol, start_dt, end_dt, cache_dir, args.dry_run
         )
 
-    logger.info("\n── 최종 결과 ──────────────────────────────────────")
+    logger.info("\n 최종 결과 ")
     for sym, r in results.items():
         logger.info(f"  {sym}: {r}")
     logger.info("Backfill complete.")

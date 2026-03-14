@@ -50,24 +50,24 @@ def _precision_schedule_labels_utc() -> str:
 
 # --- 자연어 채팅 핸들러용 상수 ---
 
-_CHAT_SYSTEM = """당신은 독립형 트레이딩봇의 AI 어시스턴트입니다. 
-사용자의 자연어 질문에 답하기 위해 적절한 툴을 선택해 데이터를 조회하고, 결과를 한국어로 간결하게 해석해서 답변하세요.
+_CHAT_SYSTEM = """당신 독립형 트레이딩봇의 AI 어시스턴트입니다. 
+사용자의 자연어 질문에 답하기 위해 적절한 툴을 선택해 데이터를 조회하고, 결과를 한국어로 간결하게 해석해서 답하세요.
 
 현 시스템 전략 안내:
-1. SWING 레인: 바이낸스 선물 헤지 모드 (Long/Short 양방향), 4시간봉 기반 추세 추종.
+1. SWING 레인: 바이낸스 선물 헤 모드 (Long/Short 양방향), 4시간봉 기반 추세 추종.
 2. POSITION 레인: 바이낸스 현물 및 업비트 적립식 (Long Only), 일봉/주봉 기반 거시 사이클 투자.
-두 레인을 동시에 활용해 하락장 리스크는 헤징하고 상승장 수익은 극대화하는 Dual-Lane 전략을 사용 중입니다.
+두 레인을 동시에 활용해 하락장 리스크는 헤징하고 상승장 수익 극화하는 Dual-Lane 전략을 사용 중입니다.
 
-지침:
-- BTC/비트코인 언급 시 BTCUSDT, ETH/이더리움 언급 시 ETHUSDT 조회
+침:
+- BTC/비트코인 언급 시 BTCUSDT, ETH/이더리 언급 시 ETHUSDT 조회
 - 숫자는 읽기 쉽게 적절히 반올림 (예: $98,432.12 -> $98,432)
-- 질문에 필요한 툴만 사용하고 과도한 호출은 피할 것
-- 모든 답변과 분석은 반드시 **한국어**로 작성할 것"""
+- 질문에 필요한 툴만 사용하고 과도한 호출 피할 것
+- 모든 답과 분석 반드시 **한국어**로 작성할 것"""
 
 _CHAT_TOOLS = [
     {
         "name": "analyze_market",
-        "description": "BTC/ETH 멀티타임프레임 기술적 분석 (RSI, MACD, 볼린저밴드 등)",
+        "description": "BTC/ETH 티임프레임 기술적 분석 (RSI, MACD, 볼린밴드 등)",
         "input_schema": {
             "type": "object",
             "properties": {"symbol": {"type": "string", "description": "예: BTCUSDT"}},
@@ -76,7 +76,7 @@ _CHAT_TOOLS = [
     },
     {
         "name": "get_funding_info",
-        "description": "펀딩비·OI·롱숏비율 조회 및 과열/공포 분석",
+        "description": "딩비·OI·롱숏비율 조회 및 과열/공포 분석",
         "input_schema": {
             "type": "object",
             "properties": {"symbol": {"type": "string"}},
@@ -85,7 +85,7 @@ _CHAT_TOOLS = [
     },
     {
         "name": "get_global_oi",
-        "description": "글로벌 미결제약정(OI) 총합 (Binance+Bybit+OKX 합산)",
+        "description": "로벌 미결제약정(OI) 총합 (Binance+Bybit+OKX 합산)",
         "input_schema": {
             "type": "object",
             "properties": {"symbol": {"type": "string"}},
@@ -94,7 +94,7 @@ _CHAT_TOOLS = [
     },
     {
         "name": "get_cvd",
-        "description": "CVD(누적 체결 델타) 및 매수/매도 압력 추세",
+        "description": "CVD(누적 체결 델) 및 매수/매도 압력 추세",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -106,7 +106,7 @@ _CHAT_TOOLS = [
     },
     {
         "name": "get_indicator_summary",
-        "description": "기술적 지표 요약 (compact 포맷)",
+        "description": "기술적 표 요약 (compact 포맷)",
         "input_schema": {
             "type": "object",
             "properties": {"symbol": {"type": "string"}},
@@ -124,12 +124,12 @@ _CHAT_TOOLS = [
     },
     {
         "name": "get_latest_trading_report",
-        "description": "가장 최근 AI 트레이딩 결정 리포트",
+        "description": "장 최근 AI 트레이딩 결정 리포트",
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "get_current_position",
-        "description": "현재 포지션 상태 (진입가, 방향, PnL 등)",
+        "description": "현재 포션 상태 (진입, 방향, PnL 등)",
         "input_schema": {
             "type": "object",
             "properties": {"symbol": {"type": "string"}},
@@ -162,14 +162,14 @@ _CHAT_TOOLS = [
     {
         "name": "query_knowledge_graph",
         "description": (
-            "LightRAG 지식 그래프 조회. 1시간마다 14개 텔레그램 채널에서 수집된 "
-            "시장 내러티브·고래 동향·거시적 이벤트/뉴스 등 관계 맥락 검색. "
+            "LightRAG 식 그래프 조회. 1시간마다 14개 텔레그램 채널에서 수집된 "
+            "시장 내러티브·고래 동향·거시적 이벤트/뉴스 등 계 맥락 색. "
             "'~를 알려줘' 질문 시 필수."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "검색어 (예: 'BTC whale accumulation', 'ETH ETF')"},
+                "query": {"type": "string", "description": "색어 (예: 'BTC whale accumulation', 'ETH ETF')"},
                 "mode": {"type": "string", "description": "'local'(단기), 'global'(장기), 'hybrid'(모두). 기본 hybrid"},
             },
             "required": ["query"],
@@ -178,8 +178,8 @@ _CHAT_TOOLS = [
     {
         "name": "search_narrative",
         "description": (
-            "Perplexity API로 실시간 검색. BTC/ETH 가격 움직임의 최신 이유·매크로 이벤트/뉴스 흐름 파악. "
-            "RAG로 부족할 때 사용. API 쿼터(200회) 주의."
+            "Perplexity API로 실시간 색. BTC/ETH 격 직임의 최신 이유·매크로 이벤트/뉴스 흐름 파악. "
+            "RAG로 족할 때 사용. API 쿼터(200회) 주의."
         ),
         "input_schema": {
             "type": "object",
@@ -189,7 +189,7 @@ _CHAT_TOOLS = [
     },
     {
         "name": "get_chart_image",
-        "description": "기술적 차트 이미지를 생성해 텔레그램으로 전송. lane은 swing 또는 position만 허용",
+        "description": "기술적 차트 이미를 생성해 텔레그램으로 전송. lane swing 또는 position만 허용",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -201,10 +201,10 @@ _CHAT_TOOLS = [
     },
     {
         "name": "search_web",
-        "description": "Tavily API(저비용)를 사용한 일반 웹 검색. 최신 뉴스 및 일반적인 정보 조사용",
+        "description": "Tavily API(비용)를 사용한 일반 웹 색. 최신 뉴스 및 일반적인 정보 조사용",
         "input_schema": {
             "type": "object",
-            "properties": {"query": {"type": "string", "description": "검색어"}},
+            "properties": {"query": {"type": "string", "description": "색어"}},
             "required": ["query"],
         },
     },
@@ -417,7 +417,7 @@ class TradingBot:
     def _build_pressure_evaluation_summary(self, symbol: str, hours: int = 168, limit: int = 300) -> str:
         rows = db.get_market_status_events(symbol=symbol, limit=limit, hours=hours)
         if not rows:
-            return f"<b>{symbol} Pressure Evaluation</b>\n- 최근 {hours}시간 이벤트가 없습니다."
+            return f"<b>{symbol} Pressure Evaluation</b>\n- 최근 {hours}시간 이벤트 없습니다."
 
         horizons = (5, 15, 30)
         overall = {m: {"correct": 0, "total": 0, "returns": []} for m in horizons}
@@ -455,7 +455,7 @@ class TradingBot:
                     overall[minutes]["correct"] += 1
 
         if not groups:
-            return f"<b>{symbol} Pressure Evaluation</b>\n- 최근 {hours}시간 내 평가 완료된 신호가 없습니다."
+            return f"<b>{symbol} Pressure Evaluation</b>\n- 최근 {hours}시간 내 평 완료된 신호 없습니다."
 
         lines = [
             f"<b>{symbol} Pressure Evaluation</b>",
@@ -757,7 +757,7 @@ class TradingBot:
 
             replayed = await report_generator.replay_last_scheduled_report(str(chat_id))
             if not replayed:
-                await update.message.reply_text("저장된 마지막 정기 리포트가 없습니다.")
+                await update.message.reply_text("장된 마막 정기 리포트 없습니다.")
         except Exception as e:
             logger.error(f"Report command error: {e}")
             await update.message.reply_text(f"Error: {e}")
@@ -806,7 +806,7 @@ class TradingBot:
             state_manager.set_telegram_chat_id(str(chat_id))
         await update.message.reply_text(
             "정기 AI 리포트를 다시 켰습니다.\n"
-            "이 채팅방을 정기 발송 대상으로 저장했습니다.",
+            "이 채팅방을 정기 발송 상으로 장했습니다.",
             parse_mode='HTML',
         )
 
@@ -815,7 +815,7 @@ class TradingBot:
         state_manager.set_analysis_enabled(False)
         await update.message.reply_text(
             "정기 AI 리포트를 껐습니다.\n"
-            "데이터 수집은 계속되지만 자동 분석/발송은 중단됩니다.",
+            "데이터 수집 계속되만 자동 분석/발송 중단됩니다.",
             parse_mode='HTML',
         )
 
@@ -955,8 +955,8 @@ class TradingBot:
                 await query.message.reply_text(f"Error fetching detail: {e}")
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """자연어 메시지를 Gemini Flash function calling으로 처리.
-        분석 리포트(Judge)는 Claude를 유지하고, 대화형 채팅은 저비용 Gemini Flash 사용.
+        """자연어 메시를 Gemini Flash function calling으로 처리.
+        분석 리포트(Judge)는 Claude를 유하고, 화형 채팅 비용 Gemini Flash 사용.
         """
         user_text = update.message.text
         if not user_text or user_text.startswith('/'):
@@ -1125,7 +1125,7 @@ class TradingBot:
                     False,
                     "chat",
                 )
-                await update.message.reply_text(fallback or "요청을 이해하지 못했습니다.")
+                await update.message.reply_text(fallback or "요청을 이해하 못했습니다.")
                 return
 
             tool_calls = plan_obj.get("tool_plan", []) if isinstance(plan_obj.get("tool_plan"), list) else []
@@ -1216,12 +1216,12 @@ class TradingBot:
                 False,
                 "chat",
             )
-            safe_answer = self._sanitize_html_for_telegram(final_answer or "결과를 생성하지 못했습니다.")
+            safe_answer = self._sanitize_html_for_telegram(final_answer or "결과를 생성하 못했습니다.")
             await update.message.reply_text(safe_answer, parse_mode='HTML')
 
         except Exception as e:
             logger.error(f"handle_message error: {e}")
-            await update.message.reply_text(f"오류가 발생했습니다: {type(e).__name__}")
+            await update.message.reply_text(f"오류 발생했습니다: {type(e).__name__}")
 
     def run(self):
         """Start the bot (non-blocking, runs in background thread)."""

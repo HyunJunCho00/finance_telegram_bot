@@ -9,7 +9,7 @@ import pandas as pd
 import asyncio
 from loguru import logger
 
-# ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ HTTP/2 Cloudflare Patch ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ----------------- HTTP/2 Cloudflare Patch -----------------
 # httpx HTTP/2 implementation has a known issue with Cloudflare's trailing pseudo-headers
 # resulting in: httpx.LocalProtocolError: Received pseudo-header in trailer
 # We disable HTTP/2 globally for httpx to prevent this when talking to Supabase.
@@ -27,7 +27,7 @@ try:
     httpx.AsyncClient.__init__ = _patched_async_init
 except Exception:
     pass
-# ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ------------------------------------------------------------
 
 
 class DatabaseClient:
@@ -72,7 +72,7 @@ class DatabaseClient:
                 raise
         return wrapper
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Market Data ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ----------------------- Market Data -----------------------
 
     @reconnect_on_error
     def insert_market_data(self, data: Dict) -> Dict:
@@ -121,7 +121,7 @@ class DatabaseClient:
             return df.sort_values('timestamp').reset_index(drop=True)
         return pd.DataFrame()
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ CVD Data ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ------------------------- CVD Data -------------------------
 
     @reconnect_on_error
     def batch_upsert_cvd_data(self, data_list: List[Dict]) -> Dict:
@@ -149,7 +149,7 @@ class DatabaseClient:
             return df
         return pd.DataFrame()
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Whale Data (from WebSocket aggTrade) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ----------- Whale Data (from WebSocket aggTrade) -----------
 
     @reconnect_on_error
     def batch_upsert_whale_data(self, data_list: List[Dict]) -> Dict:
@@ -160,7 +160,7 @@ class DatabaseClient:
 
     # (Previous manual retry logic removed in favor of decorator)
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Liquidation Data ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# --------------------- Liquidation Data ---------------------
 
     @reconnect_on_error
     def batch_upsert_liquidations(self, data_list: List[Dict]) -> Dict:
@@ -179,7 +179,7 @@ class DatabaseClient:
             return df.sort_values('timestamp').reset_index(drop=True)
         return pd.DataFrame()
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Telegram Messages ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# -------------------- Telegram Messages --------------------
 
     @reconnect_on_error
     def upsert_telegram_message(self, data: Dict) -> Dict:
@@ -223,7 +223,7 @@ class DatabaseClient:
 
         return response.data if response.data else []
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Funding Data ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ----------------------- Funding Data -----------------------
 
     @reconnect_on_error
     def upsert_funding_data(self, data: Dict) -> Dict:
@@ -234,7 +234,7 @@ class DatabaseClient:
 
 
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Microstructure Data ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ------------------- Microstructure Data -------------------
 
     @reconnect_on_error
     def batch_upsert_microstructure_data(self, data_list: List[Dict]) -> Dict:
@@ -270,7 +270,7 @@ class DatabaseClient:
     def insert_liquidation_cascade_prediction(self, data: Dict) -> Dict:
         return self.client.table("liquidation_cascade_predictions").insert(data).execute()
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Macro Data ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ------------------------ Macro Data ------------------------
 
     @reconnect_on_error
     def upsert_macro_data(self, data: Dict) -> Dict:
@@ -286,7 +286,7 @@ class DatabaseClient:
             .execute()
         return response.data[0] if response.data else None
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Narrative Data ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ---------------------- Narrative Data ----------------------
 
     @reconnect_on_error
     def upsert_narrative_data(self, data: Dict) -> Dict:
@@ -307,7 +307,7 @@ class DatabaseClient:
         return response.data[0] if response.data else None
 
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Dune Query Data ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# --------------------- Dune Query Data ---------------------
 
     @reconnect_on_error
     def upsert_dune_query_result(self, data: Dict) -> Dict:
@@ -326,7 +326,7 @@ class DatabaseClient:
 
         return response.data[0] if response.data else None
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Deribit Options Data ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ------------------- Deribit Options Data -------------------
 
     @reconnect_on_error
     def upsert_deribit_data(self, data: Dict) -> Dict:
@@ -344,7 +344,7 @@ class DatabaseClient:
             .execute()
         return response.data[0] if response.data else None
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Fear & Greed Data ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# -------------------- Fear & Greed Data --------------------
 
     @reconnect_on_error
     def upsert_fear_greed(self, data: Dict) -> Dict:
@@ -398,7 +398,7 @@ class DatabaseClient:
             row["is_stale"] = None
         return row
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ AI Reports ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ------------------------ AI Reports ------------------------
 
     @reconnect_on_error
     def insert_ai_report(self, data: Dict) -> Optional[str]:
@@ -668,7 +668,7 @@ class DatabaseClient:
         """Insert hh:20 market status snapshot + event triggers for tuning."""
         return self.client.table("market_status_events").insert(data).execute()
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Feedback ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# ------------------------- Feedback -------------------------
 
     @reconnect_on_error
     def get_market_status_events(
@@ -734,7 +734,7 @@ class DatabaseClient:
 
         return response.data if response.data else []
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Trade Executions ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# --------------------- Trade Executions ---------------------
 
     @reconnect_on_error
     def insert_trade_execution(self, data: Dict) -> Dict:
@@ -760,7 +760,7 @@ class DatabaseClient:
 
         return response.data[0] if response.data else None
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Funding History ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# --------------------- Funding History ---------------------
 
     def get_funding_history(self, symbol: str, limit: int = 100, since: Optional[datetime] = None, columns: Optional[str] = None) -> pd.DataFrame:
         rows = self._fetch_paginated("funding_data", limit, "timestamp", since=since, columns=columns, symbol=symbol)
@@ -770,7 +770,7 @@ class DatabaseClient:
             return df.sort_values('timestamp').reset_index(drop=True)
         return pd.DataFrame()
 
-    # ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€ Data Cleanup (500MB free tier) ?€?€?€?€?€?€?€?€?€?€?€?€?€?€?€
+# -------------- Data Cleanup (500MB free tier) --------------
 
     @reconnect_on_error
     def cleanup_old_data(self) -> Dict:

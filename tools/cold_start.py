@@ -3,14 +3,14 @@
 Downloads historical data and stores in both PostgreSQL (hot cache) and GCS Parquet (permanent).
 
 Loadable data sources (REST API, no WebSocket needed):
-  [O] OHLCV 1m     — Binance klines API (max 1000 per request, paginated)
-  [O] CVD           — Extracted from same Binance klines (taker_buy_volume)
-  [O] Funding Rate  — Binance fundingRate API (max 1000 per request)
-  [O] OI History    — Binance openInterestHist API (5m granularity)
-  [O] Telegram      — Telethon historical messages (unlimited)
-  [X] Liquidations  — WebSocket only (no historical REST API)
-  [X] Whale CVD     — WebSocket only (aggTrade not available historically in bulk)
-  [X] Perplexity    — Real-time search only
+  [O] OHLCV 1m      Binance klines API (max 1000 per request, paginated)
+  [O] CVD            Extracted from same Binance klines (taker_buy_volume)
+  [O] Funding Rate   Binance fundingRate API (max 1000 per request)
+  [O] OI History     Binance openInterestHist API (5m granularity)
+  [O] Telegram       Telethon historical messages (unlimited)
+  [X] Liquidations   WebSocket only (no historical REST API)
+  [X] Whale CVD      WebSocket only (aggTrade not available historically in bulk)
+  [X] Perplexity     Real-time search only
 
 Usage:
   python -m tools.cold_start --mode all --days 210 --symbol BTCUSDT
@@ -43,7 +43,7 @@ from loguru import logger
 import os
 sys.path.insert(0, ".")
 
-# 수동 실행 시 환경변수가 날아가는 것을 방지하기 위해 .env 강제 로드 및 시크릿 매니저 지정
+# ------------------------- .env -------------------------
 from dotenv import load_dotenv
 load_dotenv()
 os.environ.setdefault("USE_SECRET_MANAGER", "true")
@@ -53,7 +53,7 @@ from config.database import db
 from processors.gcs_parquet import gcs_parquet_store
 
 
-# ─────────────── Resume Helper ───────────────
+# --------------------- Resume Helper ---------------------
 
 def _get_latest_timestamp(table: str, symbol: str = None, exchange: str = None) -> Optional[datetime]:
     """Query Supabase for the latest timestamp in a table, for resume support."""
@@ -223,7 +223,7 @@ class OHLCVBulkLoader:
         return {"rows": total_rows, "bytes": total_bytes}
 
 
-# ─────────────── Resample & Save Higher Timeframes ───────────────
+# ----------- Resample & Save Higher Timeframes -----------
 
 class ResampleUploader:
     """Generate 1h/4h/1d/1w from 1m data and save to GCS."""
@@ -295,7 +295,7 @@ class ResampleUploader:
         return results
 
 
-# ─────────────── Funding Rate Bulk Loader ───────────────
+# --------------- Funding Rate Bulk Loader ---------------
 
 class FundingBulkLoader:
     """Load historical funding rates from Binance."""
@@ -385,7 +385,7 @@ class FundingBulkLoader:
         return {"rows": len(df)}
 
 
-# ─────────────── Telegram Bulk Loader ───────────────
+# ----------------- Telegram Bulk Loader -----------------
 
 class TelegramBulkLoader:
     """Load historical Telegram messages."""
@@ -415,7 +415,7 @@ class TelegramBulkLoader:
             return 0
 
 
-# ─────────────── Upbit Spot Bulk Loader ───────────────
+# ---------------- Upbit Spot Bulk Loader ----------------
 
 class UpbitBulkLoader:
     """Load historical Upbit spot data (BTC/KRW, ETH/KRW)."""
@@ -542,7 +542,7 @@ class UpbitBulkLoader:
         return {"rows": len(df)}
 
 
-# ─────────────── Fear & Greed Bulk Loader ───────────────
+# --------------- Fear & Greed Bulk Loader ---------------
 
 class FearGreedBulkLoader:
     """Load historical Fear & Greed Index from alternative.me (no API key, free)."""
@@ -613,7 +613,7 @@ class FearGreedBulkLoader:
         return count
 
 
-# ─────────────── Deribit DVOL Bulk Loader ───────────────
+# --------------- Deribit DVOL Bulk Loader ---------------
 
 class DeribitDVOLBulkLoader:
     """Load historical DVOL index from Deribit public API (no auth required).
@@ -714,7 +714,7 @@ class DeribitDVOLBulkLoader:
         return count
 
 
-# ─────────────── Macro Bulk Loader ───────────────
+# ------------------- Macro Bulk Loader -------------------
 
 class MacroBulkLoader:
     """Load historical macro data from FRED API and yfinance.
@@ -744,7 +744,7 @@ class MacroBulkLoader:
 
     def _fetch_fred(self, series_id: str, days: int) -> pd.Series:
         if not self.fred_api_key:
-            logger.warning(f"FRED_API_KEY not set — skipping {series_id}")
+            logger.warning(f"FRED_API_KEY not set  skipping {series_id}")
             return pd.Series(dtype=float, name=series_id.lower())
 
         start_date = (datetime.now(timezone.utc) - timedelta(days=days)).strftime('%Y-%m-%d')
@@ -845,7 +845,7 @@ class MacroBulkLoader:
         return count
 
 
-# ─────────────── Main Entry Point ───────────────
+# ------------------- Main Entry Point -------------------
 
 def run_cold_start(mode: str = "all", days: int = 210,
                    symbols: Optional[List[str]] = None,
@@ -868,7 +868,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
         db_days: Recent days to keep in PostgreSQL hot cache (rest → GCS)
         ohlcv_days: Override for OHLCV loader
         funding_days: Override for Funding loader
-        telegram_days: Override for Telegram loader (no default cap — fetch all)
+        telegram_days: Override for Telegram loader (no default cap  fetch all)
         upbit_days: Override for Upbit loader
         fear_greed_days: Override for Fear & Greed loader
         deribit_days: Override for Deribit DVOL loader
@@ -889,7 +889,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
     effective_deribit_days = deribit_days if deribit_days is not None else days
     effective_macro_days = macro_days if macro_days is not None else days
 
-    # ── OHLCV (Binance Futures) ──
+    # ---------------- OHLCV (Binance Futures) ----------------
     if mode in ("all", "ohlcv"):
         loader = OHLCVBulkLoader()
         for symbol in symbols:
@@ -915,7 +915,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
                 "gcs": gcs_result,
             }
 
-    # ── Upbit Spot ──
+    # ---------------------- Upbit Spot ----------------------
     if mode in ("all", "upbit"):
         loader = UpbitBulkLoader()
         for symbol in ["BTC/KRW", "ETH/KRW"]:
@@ -936,7 +936,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
                 "gcs": gcs_result,
             }
 
-    # ── Funding Rates ──
+    # --------------------- Funding Rates ---------------------
     if mode in ("all", "funding"):
         loader = FundingBulkLoader()
         for symbol in symbols:
@@ -956,7 +956,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
                 "gcs": gcs_result,
             }
 
-    # ── Telegram Messages ──
+    # ------------------- Telegram Messages -------------------
     if mode in ("all", "telegram"):
         loader = TelegramBulkLoader()
         logger.info("[COLD START] Telegram: Fetching only NEW messages (resume from DB max message_id per channel).")
@@ -984,7 +984,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
         except Exception as e:
             logger.warning(f"Failed to fetch telegram stats: {e}")
 
-    # ── Fear & Greed Index ──
+    # ------------------ Fear & Greed Index ------------------
     if mode in ("all", "fear_greed"):
         loader = FearGreedBulkLoader()
         latest = _get_latest_timestamp("fear_greed_data")
@@ -998,7 +998,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
         count = loader.save_to_db(df)
         results["fear_greed"] = {"total_records": len(df), "db_rows": count}
 
-    # ── Deribit DVOL History ──
+    # ----------------- Deribit DVOL History -----------------
     if mode in ("all", "deribit_dvol"):
         loader = DeribitDVOLBulkLoader()
         deribit_currencies = [s[:-4] for s in symbols if s.endswith("USDT")
@@ -1015,7 +1015,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
             count = loader.save_to_db(df)
             results[f"deribit_dvol_{currency}"] = {"total_records": len(df), "db_rows": count}
 
-    # ── Macro (FRED + yfinance) ──
+    # ----------------- Macro (FRED yfinance) -----------------
     if mode in ("all", "macro"):
         loader = MacroBulkLoader()
         latest = _get_latest_timestamp("macro_data")
@@ -1029,7 +1029,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
         count = loader.save_to_db(df)
         results["macro"] = {"total_records": len(df), "db_rows": count}
 
-    # ── Resample (generate 1h/4h/1d/1w from 1m in GCS) ──
+    # ---- Resample (generate 1h/4h/1d/1w from 1m in GCS) ----
     if mode in ("all", "resample"):
         uploader = ResampleUploader()
         for symbol in symbols:
@@ -1043,7 +1043,7 @@ def run_cold_start(mode: str = "all", days: int = 210,
     return results
 
 
-# ─────────────── CLI ───────────────
+# -------------------------- CLI --------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Cold Start Data Loader")

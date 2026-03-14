@@ -211,7 +211,7 @@ def _build_vlm_context_text(market_data: dict, mode: TradingMode) -> str:
 
     return "\n".join(lines)
 
-# ─── State definition (LangGraph TypedDict) ───
+# -------- State definition (LangGraph TypedDict) --------
 
 class AnalysisState(TypedDict):
     symbol: str
@@ -267,7 +267,7 @@ class AnalysisState(TypedDict):
     policy_snapshot: dict
     report: Optional[Dict]
 
-    # Z-Score ���� �Ӱ谪�� ������ ��� (context_gathering���� ����)
+    # ------------- Z Score (context_gathering ) -------------
     stats_context: dict  # {liq_mean, liq_std, imbalance_mean, ..., dvol_mean, dvol_std, ...}
 
     # Error tracking
@@ -275,7 +275,7 @@ class AnalysisState(TypedDict):
 
 
 
-# ─── Node functions ───
+# -------------------- Node functions --------------------
 
 def node_collect_data(state: AnalysisState) -> dict:
     """Fetch 1m OHLCV data from Supabase + higher TFs from GCS if available."""
@@ -458,10 +458,10 @@ def node_context_gathering(state: AnalysisState) -> dict:
         return db_updates
 
     def fetch_stats_context():
-        """Z-Score ���� ������ ��� ����.
+        """Z-Score 기반 통계 컨텍스트 수집 로직.
 
-        ���� �Ӱ谪 ��� �ֱ� 7�� �ð迭 ������ rolling std ������ �����
-        asset/regime ���� adaptive floor�� ����Ѵ�.
+        통계 임계값 계산 최근 7일 시계열 데이터의 rolling std 기반으로 도출
+        asset/regime 별 adaptive floor를 사용한다.
         """
         stats = {}
         currency = symbol[:-4] if symbol.endswith("USDT") else symbol
@@ -481,7 +481,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
             except Exception:
                 return None
 
-        # ���� 1. Liquidation 7-day hourly stats ����������������������������������������������������������
+        # 단계 1. Liquidation 7-day hourly stats 수집
         try:
             liq_df_wide = db.get_liquidation_data(
                 symbol,
@@ -542,12 +542,12 @@ def node_context_gathering(state: AnalysisState) -> dict:
                     logger.warning(
                         f"[Stats] liq_std ${liq_std:,.0f} < adaptive floor ${liq_floor:,.0f} "
                         f"(base=${liq_floor_meta['base_floor']:,.0f}, rolling={liq_floor_meta['rolling_floor']:,.0f}) "
-                        f"? ������ ���, static fallback ���"
+                        f"→ 기 미달, static fallback 사용"
                     )
         except Exception as e:
             logger.warning(f"[Stats] liq error: {e}")
 
-        # ���� 2. Microstructure 7-day stats (�ּ� 30�� hourly snapshot) ����������
+        # 단계 2. Microstructure 7-day stats (최소 30개 hourly snapshot)
         try:
             rows = (
                 db.client.table("microstructure_data")
@@ -557,7 +557,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 .limit(168)
                 .execute()
             )
-            if rows.data and len(rows.data) >= 30:  # 30�� �̸��̸� std �Ҿ���
+            if rows.data and len(rows.data) >= 30:  # 30개 미만이면 std 불
                 latest_micro_ts = max((r.get("timestamp") for r in rows.data if r.get("timestamp")), default=None)
                 micro_age_hours = _age_hours(latest_micro_ts)
                 micro_is_stale = (
@@ -580,23 +580,23 @@ def node_context_gathering(state: AnalysisState) -> dict:
                     stats["spread_std"]     = float(np.std(spreads))
             elif rows.data:
                 logger.warning(
-                    f"[Stats] micro samples={len(rows.data)} < 30 ? std �Ҿ���, static fallback"
+                    f"[Stats] micro samples={len(rows.data)} < 30 → std 불, static fallback"
                 )
         except Exception as e:
             logger.warning(f"[Stats] micro error: {e}")
 
-        # ���� 3. DVOL/PCR 7-day hourly stats (��� ǥ��: 7~30�� lookback) ������
-        # 24h lookback�� ���� ����� ���� �� regime ��ȭ ���� �Ұ�
+        # ---- 3. DVOL/PCR 7 day hourly stats ( 7~30 lookback) ----
+        # ------------------ 24h lookback regime ------------------
         try:
             rows = (
                 db.client.table("deribit_data")
                 .select("dvol,pcr_oi,timestamp")
                 .eq("symbol", currency)
                 .order("timestamp", desc=True)
-                .limit(168)   # 7�� �� 24h (��� ǥ�� �ִ� lookback)
+                .limit(168)   # 7일치 24h (최 표 lookback)
                 .execute()
             )
-            if rows.data and len(rows.data) >= 24:  # �ּ� 1��ġ hourly �ʿ�
+            if rows.data and len(rows.data) >= 24:  # 최소 1주치 hourly 필요
                 latest_deribit_ts = max((r.get("timestamp") for r in rows.data if r.get("timestamp")), default=None)
                 deribit_age_hours = _age_hours(latest_deribit_ts)
                 deribit_is_stale = (
@@ -786,10 +786,10 @@ def node_triage(state: AnalysisState) -> dict:
     except Exception as e:
         logger.error(f"Triage volatility math error: {e}")
 
-    # ���� Z-Score Enhanced Agent Checks (2, 3, 4) ������������������������������������������������������������
+    # 단계 Z-Score Enhanced Agent Checks (2, 3, 4)
     _stats = state.get("stats_context") or {}
 
-    # 2. Liquidity Agent (Z-Score ��� û�� �̻� Ž��)
+    # ------------- 2. Liquidity Agent (Z Score ) -------------
     try:
         _liq_stats = None
         if any(
@@ -830,7 +830,7 @@ def node_triage(state: AnalysisState) -> dict:
     except Exception as e:
         logger.error(f"Triage liquidity agent error: {e}")
 
-    # 3. Microstructure Agent (Z-Score ��� ������ �̻� Ž��)
+    # ---------- 3. Microstructure Agent (Z Score ) ----------
     try:
         _micro_stats = None
         _micro_keys = ("imbalance_mean", "imbalance_std", "spread_mean", "spread_std")
@@ -853,7 +853,7 @@ def node_triage(state: AnalysisState) -> dict:
     except Exception as e:
         logger.error(f"Triage microstructure agent error: {e}")
 
-    # 4. Macro Options Agent (Z-Score ��� DVOL/PCR ��Ȳ Ž��)
+    # ------ 4. Macro Options Agent (Z Score DVOL/PCR ) ------
     try:
         _opts_stats = None
         _opts_keys = ("dvol_mean", "dvol_std")
@@ -1282,7 +1282,7 @@ def node_judge_agent(state: AnalysisState) -> dict:
             decision["reasoning"]["final_logic"] = (
                 f"[ENTRY VETO] {'; '.join(failed)}. " + decision["reasoning"].get("final_logic", "")
             )
-            decision["key_factors"].append("EV/RR/�·� ����Ʈ ���������� ���� ����")
+            decision["key_factors"].append("EV/RR/리스크 필터 미통과로 진입 거")
 
     # Promote HOLD to small-size entry only when edge is mathematically strong
     direction = str(decision.get("decision", "HOLD")).upper()
@@ -1314,7 +1314,7 @@ def node_judge_agent(state: AnalysisState) -> dict:
                 f"[HOLD OVERRIDE] EV={ev:.2f}, WinProb={win_prob_pct:.1f}%, RR={rr:.2f} >= gates. "
                 + decision["reasoning"].get("final_logic", "")
             )
-            decision["key_factors"].append("������ ����(EV/�·�/RR) �������� �ұԸ� ����")
+            decision["key_factors"].append("수학적 우위(EV/리스크/RR) 불충분으로 소규모 진입 거")
 
     # Scale allocation by Meta risk budget
     risk_budget = _to_float(regime_ctx.get("risk_budget_pct", 100), 100.0)
@@ -1727,7 +1727,7 @@ def _build_full_context(state: AnalysisState) -> str:
 
 
 
-# ─── Daily Playbook Generation ───
+# --------------- Daily Playbook Generation ---------------
 
 def node_generate_playbook(state) -> dict:
     """Persist Daily Playbook(s) from Judge output without extra LLM calls."""
@@ -1900,7 +1900,7 @@ def build_analysis_graph():
 
 
 
-# ─── Orchestrator class (maintains backward compatibility) ───
+#  Orchestrator class (maintains backward compatibility) 
 
 class Orchestrator:
     def __init__(self):
@@ -2680,7 +2680,7 @@ class Orchestrator:
                                 )
                                 result["status"] = "WATCH"
                                 result["reasoning"] = (
-                                    f"{result.get('reasoning', '')} ����� LLM ����: {veto_gate.get('reason', '')}"
+                                    f"{result.get('reasoning', '')} 경량 LLM 거: {veto_gate.get('reason', '')}"
                                 ).strip()
                                 lane_results[mode.value.upper()] = result
                                 continue
@@ -2690,7 +2690,7 @@ class Orchestrator:
                                     f"{veto_gate.get('reason', '')}"
                                 )
                                 result["reasoning"] = (
-                                    f"{result.get('reasoning', '')} ����� LLM ���� ����: {veto_gate.get('reason', '')}"
+                                    f"{result.get('reasoning', '')} 경량 LLM 감소 권고: {veto_gate.get('reason', '')}"
                                 ).strip()
 
                             logger.info(f"[Monitor] TRIGGER! Running analysis for {symbol}/{mode.value}")

@@ -2,15 +2,15 @@
 
 Usage:
     python tools/backfill_funding.py                       # BTC+ETH from 2021-01-01
-    python tools/backfill_funding.py --dry-run             # 확인만 (GCS 저장 안 함)
-    python tools/backfill_funding.py --start 2022-01-01   # 시작일 지정
+    python tools/backfill_funding.py --dry-run             # 확인만 (GCS 장 안 함)
+    python tools/backfill_funding.py --start 2022-01-01   # 시작일 정
     python tools/backfill_funding.py --symbol BTC/USDT    # 특정 심볼만
 
-Binance 데이터 가용 범위:
-  - Funding rate : BTCUSDT ~2019-09-10 / ETHUSDT ~2021-05-12 부터 전량
+Binance 데이터 용 범위:
+  - Funding rate : BTCUSDT ~2019-09-10 / ETHUSDT ~2021-05-12 터 전량
   - Open Interest: API 최근 30일만 제공 (장기 이력 없음)
 
-실행 후 orchstrator가 GCS Parquet merge를 통해 차트에 반영됨.
+실행 후 orchstrator GCS Parquet merge를 통해 차트에 반영됨.
 """
 
 import argparse

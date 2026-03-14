@@ -1,4 +1,4 @@
-﻿"""Market Monitor Agent | Hourly trigger evaluator.
+"""Market Monitor Agent | Hourly trigger evaluator.
 
 Role: monitor_hourly | OpenRouter (free tier)
 
@@ -290,7 +290,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 }
         except Exception as e:
             logger.warning(f"lightweight_veto_check failed ({symbol}/{mode}): {e}")
-        return {"action": "PASS", "reason": "저비용 검수 실패로 기본 통과", "risk_flags": []}
+        return {"action": "PASS", "reason": "저비용 호출 실패로 기본 통과", "risk_flags": []}
 
     def evaluate(self, symbol: str, mode: str) -> Dict:
         """Core evaluation: compare live indicators to playbook conditions deterministically."""
@@ -315,7 +315,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         pb_data = playbook.get("playbook", {})
         playbook_context = build_playbook_context(playbook)
         
-        # ── Deterministic Evaluation Logic ──
+        # ------------ Deterministic Evaluation Logic ------------
         matched = []
         unmatched = []
         invalidated = False
@@ -667,7 +667,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             return True
 
         last_line = s.splitlines()[-1].strip()
-        if len(last_line) <= 8 and not last_line.endswith((".", "!", "?", "…", "</b>", "</i>", "</code>")):
+        if len(last_line) <= 8 and not last_line.endswith((".", "!", "?", "</b>", "</i>", "</code>")):
             return True
 
         return False

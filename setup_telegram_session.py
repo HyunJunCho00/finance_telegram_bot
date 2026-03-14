@@ -11,14 +11,14 @@ Telegram 세션 최초 생성 + Secret Manager 업로드 스크립트.
     4. chmod 600 적용
     5. Secret Manager에 base64 인코딩 후 업로드
 
-이후 scheduler.py가 콜드 스타트 시 Secret Manager에서 자동 다운로드합니다.
+이후 scheduler.py 콜드 스트 시 Secret Manager에서 자동 다운로드합니다.
 """
 
 import os
 import sys
 import asyncio
 
-# 프로젝트 루트를 Python path에 추가
+# ---------------------- Python path ----------------------
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config.settings import settings
@@ -73,11 +73,11 @@ async def main():
         upload_session_to_secret_manager()
         print("✅ Secret Manager 업로드 완료!")
         print(f"   시크릿 이름: TELEGRAM_SESSION_FILE")
-        print(f"   이후 콜드 스타트 시 자동 다운로드됩니다.")
+        print(f"   이후 콜드 스트 시 자동 다운로드됩니다.")
     except Exception as e:
         print(f"⚠️  Secret Manager 업로드 실패: {e}")
         print(f"   .env에 USE_SECRET_MANAGER=true, PROJECT_ID 확인하세요.")
-        print(f"   세션 파일은 로컬에 안전하게 저장되어 있습니다.")
+        print(f"   세션 파일 로컬에 안전하게 장되어 있습니다.")
 
     print(f"\n{'='*50}")
     print(f"  완료! 이제 scheduler.py를 시작하세요.")

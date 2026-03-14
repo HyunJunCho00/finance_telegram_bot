@@ -179,8 +179,8 @@ Your authority is strictly narrower than the daily strategy judge.
   5. REPLAN: the daily thesis itself appears stale/broken and needs emergency re-planning
 
 LEVERAGE HARD CAPS (non-negotiable, mode-specific):
-  - SWING mode: leverage 1–3x maximum
-  - POSITION mode: leverage 1.0–1.5x maximum (liquidation must be nearly impossible)
+  - SWING mode: leverage 13x maximum
+  - POSITION mode: leverage 1.01.5x maximum (liquidation must be nearly impossible)
   Do NOT output leverage > 1.5 when mode is POSITION, even if the playbook context suggests otherwise.
 
 Return strict JSON only:
@@ -388,7 +388,7 @@ Rules:
         }
 
     def get_previous_decision(self, symbol: str = "BTCUSDT") -> Optional[Dict]:
-        """[FIX CRITICAL-6] symbol parameter added — was NameError (symbol not in scope)."""
+        """[FIX CRITICAL-6] symbol parameter added  was NameError (symbol not in scope)."""
         try:
             latest_report = db.get_latest_report(symbol=symbol)
             if latest_report and latest_report.get('final_decision'):

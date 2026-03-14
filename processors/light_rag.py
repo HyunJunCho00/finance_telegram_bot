@@ -3,12 +3,12 @@
 Architecture (LightRAG 정석):
 1. Graph Extraction (LLM 기반): Gemini Flash로 Entity + Relationship 추출
 2. Dual-level Indexing:
-   - Low-level: 구체적 entity + 직접 관계 (Local retrieval)
+   - Low-level: 구체적 entity + 직접 계 (Local retrieval)
    - High-level: 요약된 topic + community (Global retrieval)
 3. Storage:
-   - Neo4j Aura (free tier): Knowledge Graph 저장
-   - Zilliz Cloud (free tier): Vector embeddings 저장
-   - Supabase (PostgreSQL): 원본 텍스트 + 메타데이터
+   - Neo4j Aura (free tier): Knowledge Graph 장
+   - Zilliz Cloud (free tier): Vector embeddings 장
+   - Supabase (PostgreSQL): 원본 텍스트 + 메데이터
 4. Incremental Update: 새 데이터는 기존 그래프에 병합 (전체 리빌드 불필요)
 
 Cost:
@@ -565,7 +565,7 @@ class MilvusVectorStore:
 
 
 class CloudflareReranker:
-    """Cloudflare Workers AI bge-reranker-base — cross-encoder for borderline dedup.
+    """Cloudflare Workers AI bge-reranker-base  cross-encoder for borderline dedup.
 
     Role in pipeline:
       Called ONLY when cosine+Jaccard land in the borderline zone.
@@ -594,7 +594,7 @@ class CloudflareReranker:
         self._session = None  # requests.Session, lazy init
 
     def _init(self):
-        """Lazy init from settings — avoids circular import at module load."""
+        """Lazy init from settings  avoids circular import at module load."""
         if self._enabled or self._account_id:
             return
         try:
@@ -627,7 +627,7 @@ class CloudflareReranker:
         if not self._enabled or not contexts:
             return None
 
-        import requests  # optional dep — already used elsewhere in project
+        import requests  # optional dep  already used elsewhere in project
 
         url = self._URL_TEMPLATE.format(account_id=self._account_id)
         payload = {
@@ -672,7 +672,7 @@ class CloudflareReranker:
                 )
                 if not isinstance(results, list):
                     logger.warning(
-                        f"CloudflareReranker: unexpected result dict — could not extract list. "
+                        f"CloudflareReranker: unexpected result dict  could not extract list. "
                         f"Keys: {list(data.get('result', {}).keys()) if isinstance(data.get('result'), dict) else '?'}"
                     )
                     return None
@@ -700,7 +700,7 @@ class CloudflareReranker:
             return None
 
 class CloudflareTriage:
-    """Cloudflare Workers AI Llama 3 8B — Zero-cost triage for Telegram triggers.
+    """Cloudflare Workers AI Llama 3 8B  Zero-cost triage for Telegram triggers.
     
     10,000 neurons/day free tier. ~1,800 messages/day.
     """
@@ -757,7 +757,7 @@ Message: {text}
         if not self._acquire_quota():
             if not self._limit_warned:
                 logger.warning(
-                    f"CloudflareTriage: daily quota {self.DAILY_LIMIT} reached — "
+                    f"CloudflareTriage: daily quota {self.DAILY_LIMIT} reached  "
                     "passing all messages through for remainder of day"
                 )
                 self._limit_warned = True
@@ -786,7 +786,7 @@ Message: {text}
             if resp.status_code == 429:
                 logger.warning(
                     f"CloudflareTriage: HTTP 429 received ({self._call_count}/{self.DAILY_LIMIT} used) "
-                    "— exhausting remaining daily quota"
+                    " exhausting remaining daily quota"
                 )
                 with self._lock:
                     self._call_count = self.DAILY_LIMIT
@@ -805,7 +805,7 @@ Message: {text}
             return {"is_trigger": True, "category": "error_fallback", "confidence": 0.5}
 
 
-# Module-level singleton — shared across all ingest_message calls
+# ---- Module level singleton shared across all ingest_message calls ----
 _cf_reranker = CloudflareReranker()
 
 
@@ -986,7 +986,7 @@ class LightRAGEngine:
     LLM-based extraction uses Gemini Flash (cheap, fast).
     """
 
-    # ── Deduplication thresholds ──────────────────────────────────────────────
+    # --------------- Deduplication thresholds ---------------
     # Two separate thresholds for two distinct purposes:
     #
     # SPAM_THRESHOLD (0.90):
@@ -1000,7 +1000,7 @@ class LightRAGEngine:
     #   Cross-channel: different outlets reporting the same event.
     #   Lower threshold because paraphrase/editorial variation is expected.
     #   Research basis: FinMTEB 2025 cross-source financial STS pairs cluster 0.82-0.88.
-    #   Time-window NOT applied — corroboration is independent of recency.
+    # ---- Time window NOT applied corroboration is independent of recency. ----
     #
     # SPAM_WINDOW_HOURS (48):
     #   Max age of a past document to be considered a spam duplicate.
@@ -1011,7 +1011,7 @@ class LightRAGEngine:
     CORROBORATION_THRESHOLD: float = 0.84
     SPAM_WINDOW_HOURS: int = 48
 
-    # ── NDD-MAC entity gate parameters ─────────────────────────────────────────
+    # ------------ NDD MAC entity gate parameters ------------
     # ENTITY_GATE_STRONG (0.50):
     #   Jaccard overlap threshold that qualifies as "strong entity match".
     #   When Jaccard ≥ 0.50, both messages share majority of financial entities
@@ -1030,8 +1030,8 @@ class LightRAGEngine:
     ENTITY_GATE_STRONG: float = 0.50
     ENTITY_BOOST_MARGIN: float = 0.05
 
-    # ── Cloudflare reranker borderline zones ───────────────────────────────────
-    # Reranker is called ONLY when cosine falls in [lower, threshold) — the gray
+    # --------- Cloudflare reranker borderline zones ---------
+    # ---- Reranker is called ONLY when cosine falls in lower threshold) the gray ----
     # zone where cosine+Jaccard alone are unreliable.
     #
     # Purpose A (Spam, same-channel + 48h):
@@ -1043,7 +1043,7 @@ class LightRAGEngine:
     # Purpose B (Corroboration, cross-channel):
     #   RERANKER_CORR_LOWER  (0.65): below this → not worth checking
     #   RERANKER_CORR_CONFIRM (0.65): reranker score above this → corroboration
-    #   Zone: 0.65 to corr_thr (~0.79-0.84) — expands corroboration detection
+    # ---- Zone 0.65 to corr_thr (~0.79 0.84) expands corroboration detection ----
     #   Goal: catch same-event reports that current threshold misses
     #
     # Expected call rate: ~8% of ingested messages.
@@ -1066,22 +1066,22 @@ class LightRAGEngine:
 
     @staticmethod
     def _entity_gate_check(new_entities: set, past_entities_json: str) -> Optional[float]:
-        """Entity prerequisite gate — NDD-MAC (NAACL 2025 Industry) metadata signal.
+        """Entity prerequisite gate  NDD-MAC (NAACL 2025 Industry) metadata signal.
 
         Financial event deduplication requires shared entity context.
         Two messages with zero overlapping entities (coins, exchanges, orgs) cannot
         be near-duplicates of the same event, regardless of cosine similarity.
 
         Returns:
-            None  — zero entity overlap → different financial events → skip candidate.
-            1.0   — entity data unavailable (extraction failed or generic text)
+            None   zero entity overlap → different financial events → skip candidate.
+            1.0    entity data unavailable (extraction failed or generic text)
                     → no gate applied, fall back to pure cosine comparison.
-            float — Jaccard score (0, 1] → partial/strong entity overlap.
+            float  Jaccard score (0, 1] → partial/strong entity overlap.
 
         Why 1.0 as the "no data" fallback?
             Conservative: if we can't extract entities from either message, we should
             NOT silently pass through potential duplicates. 1.0 means "treat as strong
-            match" from the entity dimension — the cosine threshold then decides alone.
+            match" from the entity dimension  the cosine threshold then decides alone.
         """
         if not new_entities:
             return 1.0  # No entity data on new msg → cannot gate → pure cosine
@@ -1303,7 +1303,7 @@ CRITICAL RULES:
         
         import time
         
-        # ── Rate Limit: 3 RPM (Voyage Free) = 20s per call ────────────────────
+        # ------ Rate Limit 3 RPM (Voyage Free) 20s per call ------
         # Even on paid tiers, a small 0.5s floor prevents burst errors.
         current_time = time.time()
         elapsed = current_time - LightRAGEngine._last_embed_time
@@ -1387,7 +1387,7 @@ CRITICAL RULES:
 
     def _extract_with_llm(self, text: str) -> Dict:
         """LLM-based entity and relationship extraction (Gemini Flash) with rate limiting."""
-        # ── Rate Limit: 30-50 RPM Floor ────────────────────
+        # -------------- Rate Limit 30 50 RPM Floor --------------
         import time
         current_time = time.time()
         elapsed = current_time - LightRAGEngine._last_llm_time
@@ -1548,24 +1548,24 @@ CRITICAL RULES:
         if doc_id in self._ingested_ids:
             return {"status": "duplicate_id", "doc_id": doc_id}
 
-        # Step 0: Metadata-Aware Semantic Dedup  ─── NDD-MAC architecture (NAACL 2025)
+        # ---- Step 0 Metadata Aware Semantic Dedup NDD MAC architecture (NAACL 2025) ----
         #
         # Three signals, two purposes:
         #
-        #  Signal 1 — Cosine similarity (semantic):  voyage-finance-2 embeddings
-        #  Signal 2 — Entity Jaccard (metadata):     fast regex extraction, no LLM cost
+        # ---- Signal 1 Cosine similarity (semantic) voyage finance 2 embeddings ----
+        # ---- Signal 2 Entity Jaccard (metadata) fast regex extraction no LLM cost ----
         #             Identifies shared financial entities: BTC/ETH/exchange/org/macro
-        #  Signal 3 — Temporal window (48h):          spam purpose only
+        # ---- Signal 3 Temporal window (48h) spam purpose only ----
         #
-        #  Purpose A — Spam guard (same-channel, ≤48h):
+        # -------- Purpose A Spam guard (same channel 48h) --------
         #    Base threshold: SPAM_THRESHOLD=0.90
         #    Strong entity match (Jaccard≥0.50) relaxes it by ENTITY_BOOST_MARGIN=0.05
         #    → effective threshold 0.85 when entity confirms semantic signal
         #
-        #  Purpose B — Cross-channel corroboration (no time limit):
+        # ---- Purpose B Cross channel corroboration (no time limit) ----
         #    Base threshold: CORROBORATION_THRESHOLD=0.84
         #    Strong entity match → effective threshold 0.79
-        #    NOT discarded — proceeds to ingest so graph edge weight accumulates
+        # ---- NOT discarded proceeds to ingest so graph edge weight accumulates ----
         #
         #  Entity hard gate:
         #    Zero entity overlap → messages concern different financial events →
@@ -1624,10 +1624,10 @@ CRITICAL RULES:
                     corr_thr -= self.ENTITY_BOOST_MARGIN   # 0.84 → 0.79
 
                 if past_channel == channel:
-                    # ── Purpose A: same-channel spam guard (time-windowed) ──
+                    # ---- Purpose A same channel spam guard (time windowed) ----
                     if self._within_spam_window(timestamp, past_ts):
                         if best_cosine > spam_thr:
-                            # High confidence spam — no reranker needed
+                            # -------- High confidence spam no reranker needed --------
                             logger.info(
                                 f"Truth Engine: Spam discarded (high-conf) "
                                 f"[cosine={best_cosine:.3f}, entity_j={best_jaccard:.2f}, "
@@ -1637,7 +1637,7 @@ CRITICAL RULES:
                             return {"status": "spam_same_channel", "doc_id": doc_id}
 
                         elif best_cosine >= self.RERANKER_SPAM_LOWER:
-                            # Borderline zone — ask cross-encoder to confirm
+                            # ----- Borderline zone ask cross encoder to confirm -----
                             reranker_score = self._call_reranker(text, best_doc.get("text", ""))
                             if reranker_score is not None:
                                 if reranker_score > self.RERANKER_SPAM_CONFIRM:
@@ -1650,26 +1650,26 @@ CRITICAL RULES:
                                     return {"status": "spam_same_channel", "doc_id": doc_id}
                                 else:
                                     logger.info(
-                                        f"Truth Engine: Reranker cleared borderline — NOT spam "
+                                        f"Truth Engine: Reranker cleared borderline  NOT spam "
                                         f"[cosine={best_cosine:.3f}, reranker={reranker_score:.3f}] "
                                         f"'{text[:50]}...'"
                                     )
                             # reranker_score is None (disabled/failed) → cosine didn't
                             # exceed spam_thr on its own → treat as not spam, proceed
                 else:
-                    # ── Purpose B: cross-channel corroboration ──
+                    # --------- Purpose B cross channel corroboration ---------
                     past_text = best_doc.get("text", "")
 
                     if best_cosine > corr_thr:
-                        # High confidence corroboration — no reranker needed
+                        # ---- High confidence corroboration no reranker needed ----
                         logger.info(
                             f"Truth Engine: Corroboration (high-conf) "
                             f"[cosine={best_cosine:.3f}, entity_j={best_jaccard:.2f}, "
                             f"thr={corr_thr:.2f}, src={past_channel}→{channel}] "
-                            f"'{text[:50]}...' — proceeding to ingest."
+                            f"'{text[:50]}...'  proceeding to ingest."
                         )
                     elif best_cosine >= self.RERANKER_CORR_LOWER:
-                        # Expanded zone — reranker may catch corroboration cosine missed
+                        # ---- Expanded zone reranker may catch corroboration cosine missed ----
                         reranker_score = self._call_reranker(text, past_text)
                         if reranker_score is not None and reranker_score > self.RERANKER_CORR_CONFIRM:
                             logger.info(
@@ -1677,7 +1677,7 @@ CRITICAL RULES:
                                 f"[cosine={best_cosine:.3f}, reranker={reranker_score:.3f}, "
                                 f"src={past_channel}→{channel}] '{text[:50]}...'"
                             )
-                            # Corroboration detected — proceed to ingest normally
+                            # ---- Corroboration detected proceed to ingest normally ----
                             # (graph upsert in Step 2/3 will accumulate edge weight)
 
         # Step 1: LLM-based extraction (or regex fallback)
@@ -1852,18 +1852,18 @@ CRITICAL RULES:
             "intent": intent,
         }
 
-        # ── Local retrieval (Low-level: exact facts) ──
+        # -------- Local retrieval (Low level exact facts) --------
         if intent in ("local", "hybrid"):
             for entity in query_entities:
                 ctx = self.graph.get_local_context(entity, max_depth=2)
                 if ctx.get("neighbors") or ctx.get("paths"):
                     result["local_context"][entity] = ctx
 
-        # ── Global retrieval (High-level: important entities + topics) ──
+        # ---- Global retrieval (High level important entities topics) ----
         if intent in ("global", "hybrid"):
             result["global_context"] = self.graph.get_global_context(top_k=10)
 
-        # ── Semantic search (vector similarity) ──
+        # ---------- Semantic search (vector similarity) ----------
         query_embedding = self._get_embedding(query_text)
         if query_embedding is not None:
             if isinstance(self.vector_store, InMemoryFallback):

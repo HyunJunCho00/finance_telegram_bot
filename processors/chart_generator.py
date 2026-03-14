@@ -1,8 +1,8 @@
-"""Chart generator — structure-only overlays for VLM analysis.
+"""Chart generator  structure-only overlays for VLM analysis.
 
 Design principle:
   Charts show STRUCTURE (patterns, trendlines, levels) only.
-  All indicator VALUES (RSI, MACD, OBV, etc.) go via text — VLM can't read numbers accurately.
+  All indicator VALUES (RSI, MACD, OBV, etc.) go via text  VLM can't read numbers accurately.
 
 What's drawn on the chart:
   - Candlesticks (price)
@@ -424,7 +424,7 @@ class ChartGenerator:
                                    df_1d: Optional[pd.DataFrame] = None,
                                    df_1w: Optional[pd.DataFrame] = None,
                                    mode: TradingMode = TradingMode.SWING) -> Optional[bytes]:
-        """Core chart generation — candlesticks + structure overlays only."""
+        """Core chart generation  candlesticks + structure overlays only."""
         try:
             # Prepare OHLCV (Realtime)
             tmp = df.copy()
@@ -606,7 +606,7 @@ class ChartGenerator:
                     # so OI starts at panel=3; otherwise OI starts at panel=2.
                     _oi_panel = 3 if _cvd_added else 2
 
-                    # OI Panel — only if column exists
+                    # ------------ OI Panel only if column exists ------------
                     if has_oi:
                         fnd_oi_plot = fnd_aligned['open_interest'].ffill()
                         apds.append(mpf.make_addplot(fnd_oi_plot, panel=_oi_panel,
@@ -614,10 +614,10 @@ class ChartGenerator:
                                                    ylabel='OI', secondary_y=False))
                         _has_oi = True
                     else:
-                        # No OI — flag for panel count correction below
+                        # ------ No OI flag for panel count correction below ------
                         _has_oi = False
 
-                    # Funding Rate Tape — only if column exists
+                    # -------- Funding Rate Tape only if column exists --------
                     # Funding always goes one panel above OI; if OI is absent it takes OI's slot.
                     if has_funding:
                         fnd_rate_plot = fnd_aligned['funding_rate'].fillna(0)
@@ -664,7 +664,7 @@ class ChartGenerator:
                 text_color = '#D1D4DC'
                 grid_color = '#1E222D'
 
-            # Professional Font Config — Legibility Boost
+            # ------- Professional Font Config Legibility Boost -------
             plt.rcParams['font.size'] = 10
             plt.rcParams['axes.titlesize'] = 12
             plt.rcParams['axes.labelsize'] = 10
@@ -675,8 +675,8 @@ class ChartGenerator:
             plt.rcParams['xtick.color'] = '#787B86'
             plt.rcParams['ytick.color'] = '#787B86'
 
-            # Plot — Adaptive panel layout (Price 0, Vol 1, [CVD 2], [OI 2/3], [Funding 3/4])
-            # Use _cvd_added (not cvd_df is not None) — empty cvd_df must not reserve a panel
+            # ---- Plot Adaptive panel layout (Price 0 Vol 1 CVD 2 OI 2/3 Funding 3/4 ) ----
+            # ---- Use _cvd_added (not cvd_df is not None) empty cvd_df must not reserve a panel ----
             num_panels = 2  # Basic: Price + Vol
             if _cvd_added: num_panels += 1
             if _has_oi:
@@ -708,25 +708,25 @@ class ChartGenerator:
                 returnfig=True
             )
             
-            # ── Layout Optimization ──
+            # ------------------ Layout Optimization ------------------
             fig.subplots_adjust(top=0.92, right=0.92, left=0.08, bottom=0.08)
             price_ax = axes[0]
             
-            # ── Enhanced Title & Metadata ──
+            # --------------- Enhanced Title & Metadata ---------------
             price_ax.text(0.01, 1.05, f"{symbol} | {df['close'].iloc[-1]:.2f}",
                          transform=price_ax.transAxes, fontsize=14, fontweight='bold', 
                          color=text_color, ha='left')
 
-            # ── Add Background Watermark (Big Symbol) ──
+            # --------- Add Background Watermark (Big Symbol) ---------
             price_ax.text(0.5, 0.5, symbol.split('USDT')[0],
                          transform=price_ax.transAxes, fontsize=80, fontweight='bold',
                          color=text_color, alpha=0.03, ha='center', va='center', zorder=0)
 
-            # ── Overlay 1: Pivot Points (turning points) — SWING only ──
+            # ---- Overlay 1 Pivot Points (turning points) SWING only ----
             if config.get('draw_pivots', mode != TradingMode.POSITION):
                 self._draw_pivot_points(price_ax, chart_df)
 
-            # ── Overlay 2: Market Structure Labels (HH/HL/LH/LL) ──
+            # ---- Overlay 2 Market Structure Labels (HH/HL/LH/LL) ----
             if config.get('draw_market_structure_labels', True):
                 self._draw_market_structure_labels(price_ax, chart_df)
             if config.get('draw_structure_events', False):
@@ -734,11 +734,11 @@ class ChartGenerator:
                 market_structure = (analysis.get('market_structure', {}) or {}).get(tf_label)
                 self._draw_structure_events(price_ax, chart_df, market_structure, tf_label)
 
-            # ── Overlay 3: EMA200 line ──
+            # ----------------- Overlay 3 EMA200 line -----------------
             if config.get('draw_ema200', True):
                 self._draw_ema200(price_ax, chart_df)
 
-            # ── Overlay 4: Diagonal Trendlines (support/resistance) ──
+            # ---- Overlay 4 Diagonal Trendlines (support/resistance) ----
             structure = analysis.get('structure', {}) or {}
             if config.get('draw_diagonal_lines', True):
                 for tf in config['structure_tfs']:
@@ -749,7 +749,7 @@ class ChartGenerator:
                                              structure.get(f'resistance_{tf}'),
                                              'resistance_price', '#F23645', theme, text_color)
 
-            # ── Overlay 5: Fibonacci Levels ──
+            # -------------- Overlay 5 Fibonacci Levels --------------
             fib = None
             if config.get('draw_fibonacci', True):
                 fib = (analysis.get('fibonacci', {}) or {}).get(config['fib_tf'])
@@ -768,7 +768,7 @@ class ChartGenerator:
                     focus_tfs=config.get('structure_tfs', []),
                 )
 
-            # ── Overlay 6: Swing High/Low (Liquidity Levels) ──
+            # ------ Overlay 6 Swing High/Low (Liquidity Levels) ------
             if config.get('draw_swing_levels', False) and config.get('swing_tf'):
                 swing = (analysis.get('swing_levels', {}) or {}).get(config['swing_tf'])
                 self._draw_swing_levels(price_ax, chart_df, swing, config.get('swing_tf'))
@@ -777,19 +777,19 @@ class ChartGenerator:
                 execution_plan = self._derive_execution_plan(chart_df, analysis, config)
                 self._draw_execution_plan(price_ax, chart_df, execution_plan)
 
-            # ── Overlay 7: Volume Profile Histogram (right side) ──
+            # ---- Overlay 7 Volume Profile Histogram (right side) ----
             if config.get('draw_volume_profile', True):
                 self._draw_volume_profile_histogram(price_ax, chart_df)
 
-            # ── Overlay 8: Liquidation Markers — SWING only ──
+            # ------- Overlay 8 Liquidation Markers SWING only -------
             if config.get('draw_liquidations', mode != TradingMode.POSITION) and liquidation_df is not None and not liquidation_df.empty:
                 self._draw_liquidation_markers(price_ax, chart_df, liquidation_df)
 
-            # ── Overlay 9: Fair Value Gaps (FVG) ──
+            # ------------ Overlay 9 Fair Value Gaps (FVG) ------------
             if config.get('draw_fvg', True):
                 self._draw_fair_value_gaps(price_ax, chart_df, trading_mode)
 
-            # ── [NEW] Overlay 10: Macro Order Blocks (OB) ──
+            # -------- NEW Overlay 10 Macro Order Blocks (OB) --------
             # count=4 → returns up to 8 candidates (obs[:count*2])
             # Ensures enough pool to guarantee 1 above + 1 below current price
             # even in strongly trending markets where recent OBs cluster on one side
@@ -797,7 +797,7 @@ class ChartGenerator:
                 macro_obs = math_engine.calculate_macro_order_blocks(full_resampled, count=4)
                 self._draw_macro_order_blocks(price_ax, chart_df, macro_obs)
 
-            # ── [NEW] Overlay 11: Anchored VWAP ──
+            # ------------- NEW Overlay 11 Anchored VWAP -------------
             if config.get('draw_avwap', True):
                 self._draw_anchored_vwap(price_ax, chart_df, full_resampled)
 
@@ -806,17 +806,17 @@ class ChartGenerator:
                 div = math_engine.detect_macro_divergences(full_resampled, cvd_df)
                 self._draw_macro_alpha_markers(price_ax, chart_df, div)
 
-            # ── [PRO] Overlay 13: Header Legend ──
+            # ------------- PRO Overlay 13 Header Legend -------------
             self._draw_header_legend(price_ax, chart_df, symbol, config, text_color)
 
-            # ── [PRO] Overlay 14: Session Breaks (Day-dividers) — SWING only ──
+            # ---- PRO Overlay 14 Session Breaks (Day dividers) SWING only ----
             if config.get('draw_session_breaks', mode != TradingMode.POSITION):
                 self._draw_session_breaks(price_ax, chart_df)
             
-            # ── [PRO] Overlay 15: Current Price Label (On Y-axis) ──
+            # ---- PRO Overlay 15 Current Price Label (On Y axis) ----
             self._draw_current_price_label(price_ax, chart_df, text_color)
 
-            # ── Lock Y-axis to candlestick range ──
+            # ----------- Lock Y axis to candlestick range -----------
             # Must happen AFTER all overlays so nothing autoscales the axis
             _y_lo = float(chart_df['low'].min())
             _y_hi = float(chart_df['high'].max())
@@ -835,7 +835,7 @@ class ChartGenerator:
             logger.error(f"Chart error for {symbol} ({config['title_suffix']}): {e}")
             return None
 
-    # ─────────────── Overlay Drawing Methods ───────────────
+    # ---------------- Overlay Drawing Methods ----------------
 
     def _draw_ema200(self, ax, chart_df: pd.DataFrame):
         """Draw EMA200 line. Uses pre-calculated high-precision EMA from full history."""
@@ -875,7 +875,7 @@ class ChartGenerator:
             max_idx = argrelextrema(high, np.greater, order=order)[0]
 
             # Build full label history first (full history needed for correct HH/LH classification)
-            # Then render only the LAST 3 swing highs and lows — enough to read current structure
+            # ---- Then render only the LAST 3 swing highs and lows enough to read current structure ----
             # (e.g. HH→HH→LH signals potential trend break; HL→HL→LL signals continuation of downtrend)
             all_high_labels = []
             for i, idx in enumerate(max_idx):
@@ -1028,10 +1028,10 @@ class ChartGenerator:
                 return
             slope_sec = (y2 - y1) / dt
 
-            # ── Find line start position ──────────────────────────────────────
+            # --------------- Find line start position ---------------
             # If ts1 is WITHIN the chart window, start the line at ts1's x-position.
             # If ts1 is BEFORE chart_start, start at x=0 (left edge) with the
-            # correctly extrapolated y — same math as before, no change in that case.
+            # ---- correctly extrapolated y same math as before no change in that case. ----
             chart_ts = chart_df.index
             try:
                 # Normalize timezone for searchsorted comparison
@@ -1747,7 +1747,7 @@ class ChartGenerator:
                     if not is_mitigated:
                         bear_gaps.append({'idx': i, 'top': top, 'bottom': bottom})
 
-            # ── Merge and Draw Bullish Gaps ──
+            # -------------- Merge and Draw Bullish Gaps --------------
             if bull_gaps:
                 merged = []
                 if bull_gaps:
@@ -1793,7 +1793,7 @@ class ChartGenerator:
                             "FVG", color='#27AE60', fontsize=9, alpha=0.9, 
                             ha=ha, va='center', fontweight='bold')
 
-            # ── Merge and Draw Bearish Gaps ──
+            # -------------- Merge and Draw Bearish Gaps --------------
             if bear_gaps:
                 merged = []
                 curr = bear_gaps[0].copy()
@@ -2009,7 +2009,7 @@ class ChartGenerator:
         except Exception as e:
             logger.debug(f"Current price label error: {e}")
 
-    # ─────────────── Utility Methods ───────────────
+    # -------------------- Utility Methods --------------------
 
     def chart_to_base64(self, chart_bytes: bytes) -> str:
         return base64.b64encode(chart_bytes).decode('utf-8')

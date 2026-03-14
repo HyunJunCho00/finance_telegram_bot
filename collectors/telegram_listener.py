@@ -84,7 +84,7 @@ Output should be a list of dense factual triplets, one per line. If no significa
 VLM_SYSTEM_PROMPT = (
     "You are a crypto on-chain chart analyst embedded in an automated trading system. "
     "Your job: extract exactly three fields from a chart image, anchored by its caption. "
-    "Accuracy is critical — your output feeds directly into trading decisions. "
+    "Accuracy is critical  your output feeds directly into trading decisions. "
     "Never invent data. Only report values that appear as explicit printed text annotations on the chart itself."
 )
 
@@ -94,7 +94,7 @@ Caption: "{caption}"
 
 Study the chart using the caption as your anchor for what metric is being shown.
 Return EXACTLY three lines in this format:
-LABELS: <text values printed as annotations ON the chart — NONE if absent>
+LABELS: <text values printed as annotations ON the chart  NONE if absent>
 TREND: <BULLISH | BEARISH | NEUTRAL>
 MISMATCH: <If the chart contradicts the caption, one sentence. NONE if aligned.>
 """
@@ -364,7 +364,7 @@ class TelegramListener:
             
             # Priority Trigger: If it's a critical source, flush extraction immediately
             if sender_name in PRIORITY_CHANNELS:
-                logger.info(f"🚀 PRIORITY EXTRACTION: Immediate trigger for [{sender_name}]")
+                logger.info(f" PRIORITY EXTRACTION: Immediate trigger for [{sender_name}]")
                 asyncio.create_task(self._process_triggered_now())
         else:
             # Still buffer for "Routine Alpha" if we want, but usually junk is just junk.

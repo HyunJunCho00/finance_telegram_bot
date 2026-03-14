@@ -24,7 +24,7 @@ SESSION_PATH = os.path.join(_SESSION_DIR, 'trading_session')
 async def main():
     print("🔹 텔레그램에 연결 중입니다...")
     
-    # 세션 파일이 없으면 터미널에서 전화번호와 인증번호를 물어봅니다.
+    # --------------------------- . ---------------------------
     client = TelegramClient(SESSION_PATH, int(api_id), api_hash)
     
     # client.start() will automatically handle the interactive login prompt if needed

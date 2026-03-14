@@ -606,7 +606,7 @@ class AIClient:
             max_tokens,
             temperature,
             chart_image_b64,
-            timeout=120.0,  # [FIX] 늘어난 타임아웃 (실패 방지)
+            timeout=120.0,  # [FIX] 늘어난 임아웃 (실패 방)
             name="Cerebras",
         )
         if result:
@@ -840,7 +840,7 @@ class AIClient:
                 user_content.append({"type": "text", "text": user_message})
                 messages.append({"role": "user", "content": user_content})
             else:
-                # [FIX] 이미지 없을 때는 단순 문자열로 전달 (호환성 상향)
+                # ------------------------ FIX ( ) ------------------------
                 messages.append({"role": "user", "content": user_message})
 
             resp = client.chat.completions.create(

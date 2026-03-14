@@ -11,7 +11,7 @@ from agents.ai_router import ai_client
 from processors.light_rag import light_rag
 from pathlib import Path
 
-# [FIX MEDIUM-16] Absolute path — works regardless of systemd WorkingDirectory
+# ---- FIX MEDIUM 16 Absolute path works regardless of systemd WorkingDirectory ----
 _BASE_DIR = Path(__file__).parent.parent
 MEMORY_FILE_PATH = str(_BASE_DIR / "data" / "episodic_memory.jsonl")
 
@@ -155,7 +155,7 @@ def write_post_mortem(report: dict, current_price: float):
 def retrieve_similar_memories(current_anomalies: list, symbol: str) -> str:
     """Retrieve past trade memories semantically similar to current market conditions.
 
-    Primary: LightRAG vector search (semantic similarity — finds structurally similar
+    Primary: LightRAG vector search (semantic similarity  finds structurally similar
     past setups regardless of time). Post-mortems are stored with channel=SYSTEM_POST_MORTEM.
     Fallback: JSONL time-reverse scan (used when LightRAG/Milvus unavailable).
     """
@@ -164,7 +164,7 @@ def retrieve_similar_memories(current_anomalies: list, symbol: str) -> str:
         f"anomalies: {', '.join(current_anomalies) if current_anomalies else 'none'}"
     )
 
-    # ── Primary: LightRAG semantic search ──
+    # ----------- Primary LightRAG semantic search -----------
     try:
         result = light_rag.query(query_text, top_k=10)
         semantic_hits = [
@@ -183,7 +183,7 @@ def retrieve_similar_memories(current_anomalies: list, symbol: str) -> str:
     except Exception as e:
         logger.warning(f"LightRAG memory search failed, falling back to JSONL: {e}")
 
-    # ── Fallback: JSONL time-reverse scan ──
+    # ----------- Fallback JSONL time reverse scan -----------
     return _retrieve_from_jsonl(symbol)
 
 
@@ -208,7 +208,7 @@ def _retrieve_from_jsonl(symbol: str) -> str:
     if not relevant_memories:
         return "System running in Bootstrap mode. No historical matches found yet."
 
-    mem_str = "Recent Past Outcomes (JSONL fallback — time-ordered, not semantic):\n"
+    mem_str = "Recent Past Outcomes (JSONL fallback  time-ordered, not semantic):\n"
     for mem in relevant_memories:
         reasoning = mem.get("reasoning", "")
         if isinstance(reasoning, dict):

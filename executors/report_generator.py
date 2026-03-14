@@ -153,7 +153,7 @@ class ReportGenerator:
             compact = cls._compact_text(candidate, 320)
             if compact:
                 return compact
-        return "요약 가능한 핵심 논리가 아직 정리되지 않았습니다."
+        return "요약 능한 핵심 논리 아직 정리되 않았습니다."
 
     @staticmethod
     def _should_render_execution_receipt(decision: Dict[str, Any], receipt: Any) -> bool:
@@ -339,13 +339,13 @@ class ReportGenerator:
         confidence = decision.get("confidence", decision.get("win_probability_pct", 0))
 
         if direction == "LONG":
-            header_icon, color_theme = "🚀", "🟢 강세 (LONG)"
+            header_icon, color_theme = "", "🟢 강세 (LONG)"
         elif direction == "SHORT":
             header_icon, color_theme = "🔻", "🔴 약세 (SHORT)"
         else:
-            header_icon, color_theme = "⚖️", "⚪ 관망 (HOLD)"
+            header_icon, color_theme = "⚖️", "⚪ 망 (HOLD)"
 
-        mode_label = "SWING (스윙)" if mode == TradingMode.SWING else "POSITION (포지션)"
+        mode_label = "SWING (스윙)" if mode == TradingMode.SWING else "POSITION (포션)"
         final_logic = self._summary_from_decision(decision)
 
         summary_lines = [
@@ -353,9 +353,9 @@ class ReportGenerator:
             f"🕒 <code>{report['timestamp'][:16].replace('T', ' ')} UTC</code>\n",
             f"🎯 <b>최종 결정: {color_theme}</b> (확신도: {confidence}%)",
             "<blockquote>",
-            f"🔵 진입가: <code>{self._fmt_price(decision.get('entry_price'))}</code>",
-            f"🛑 손절가: <code>{self._fmt_price(decision.get('stop_loss'))}</code>",
-            f"🏁 목표가: <code>{self._fmt_price(decision.get('take_profit'))}</code>",
+            f"🔵 진입: <code>{self._fmt_price(decision.get('entry_price'))}</code>",
+            f"🛑 손절: <code>{self._fmt_price(decision.get('stop_loss'))}</code>",
+            f"🏁 목표: <code>{self._fmt_price(decision.get('take_profit'))}</code>",
             "</blockquote>\n",
             "📝 <b>Summary:</b>",
             f"<i>{final_logic}</i>\n",
@@ -426,7 +426,7 @@ class ReportGenerator:
                 "technical": "📊 기술적 분석 (Technical)",
                 "onchain": "🔗 심층 온체인 분석 (On-chain)",
                 "derivatives": "⛓️ 파생상품 심리 (Derivatives)",
-                "experts": "🤖 전문가 스웜 (Expert Swarm)",
+                "experts": "🤖 전문 스웜 (Expert Swarm)",
                 "narrative": "🌐 시장 내러티브 (Narrative/News)",
                 "counter_scenario": "🚨 최악의 시나리오 (Risk)",
             }

@@ -28,7 +28,7 @@ class DeribitCollector:
         self._session = requests.Session()
         self._session.headers.update({'Accept': 'application/json'})
 
-    # ─────────────── Raw API Calls ───────────────
+    # --------------------- Raw API Calls ---------------------
 
     def _get(self, method: str, params: Dict = None) -> Optional[object]:
         """Generic GET wrapper for Deribit public API."""
@@ -79,7 +79,7 @@ class DeribitCollector:
         })
         return result if isinstance(result, list) else []
 
-    # ─────────────── Expiry Bucketing ───────────────
+    # ------------------- Expiry Bucketing -------------------
 
     def _expiry_bucket(self, exp_ts_ms: int) -> Optional[str]:
         """Classify an expiry timestamp into a term bucket."""
@@ -100,7 +100,7 @@ class DeribitCollector:
             return '6m'
         return None
 
-    # ─────────────── PCR ───────────────
+    # -------------------------- PCR --------------------------
 
     def calculate_pcr(self, summaries: List[Dict]) -> Dict:
         """Calculate Put/Call Ratio by OI and by volume."""
@@ -126,12 +126,12 @@ class DeribitCollector:
             'call_vol': round(call_vol, 6),
         }
 
-    # ─────────────── IV Term Structure ───────────────
+    # ------------------- IV Term Structure -------------------
 
     def calculate_term_structure(self, summaries: List[Dict]) -> Dict:
         """Build IV term structure: average mark_iv per expiry bucket.
 
-        Deribit's mark_iv is the model IV for each option — averaging across
+        Deribit's mark_iv is the model IV for each option  averaging across
         all strikes gives a crude ATM proxy that is sufficient for directional bias.
         """
         buckets: Dict[str, List[float]] = {}
@@ -158,7 +158,7 @@ class DeribitCollector:
 
         return term
 
-    # ─────────────── 25-delta Skew ───────────────
+    # --------------------- 25 delta Skew ---------------------
 
     def calculate_skew(self, summaries: List[Dict], spot: float) -> Dict:
         """Calculate approx 25-delta skew per expiry bucket.
@@ -213,7 +213,7 @@ class DeribitCollector:
 
         return skew
 
-    # ─────────────── Main Collection ───────────────
+    # -------------------- Main Collection --------------------
 
     def collect_for_currency(self, currency: str) -> Optional[Dict]:
         """Collect all Deribit options signals for one currency."""

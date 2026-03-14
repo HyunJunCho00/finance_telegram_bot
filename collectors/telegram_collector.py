@@ -13,7 +13,7 @@ from utils.text_sanitizer import clean_telegram_text
 # Only these channels trigger image download + Gemini Flash chart extraction.
 VISUAL_CHANNELS = {"CryptoQuant", "Glassnode", "Lookonchain"}
 
-# 세션 파일 경로: data/ 디렉토리에 저장 (프로젝트 루트 노출 방지)
+# ----------------------- data/ ( ) -----------------------
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SESSION_DIR = os.path.join(_PROJECT_ROOT, 'data')
 SESSION_PATH = os.path.join(_SESSION_DIR, 'trading_session')
@@ -31,13 +31,13 @@ def _ensure_session_security():
     """
     os.makedirs(_SESSION_DIR, exist_ok=True)
 
-    # ── Session Download on cold start (Secret Manager → GCS fallback) ──
+    # ---- Session Download on cold start (Secret Manager GCS fallback) ----
     session_file = SESSION_PATH + '.session'
     if not os.path.exists(session_file):
         if not _download_session_from_secret_manager(session_file):
             _download_session_from_gcs(session_file)
 
-    # ── File permissions (Linux VM) ──
+    # -------------- File permissions (Linux VM) --------------
     for path in [session_file, SESSION_PATH + '.session-journal']:
         if os.path.exists(path) and os.name != 'nt':
             try:
@@ -54,7 +54,7 @@ def _download_session_from_secret_manager(local_path: str) -> bool:
     """Download session file from Secret Manager (base64-encoded). Returns True on success."""
     project_id = settings.PROJECT_ID
     if not project_id or os.getenv("USE_SECRET_MANAGER", "false").lower() != "true":
-        logger.debug("Secret Manager not configured — skipping SM download")
+        logger.debug("Secret Manager not configured  skipping SM download")
         return False
 
     try:
@@ -75,7 +75,7 @@ def _download_session_from_secret_manager(local_path: str) -> bool:
         logger.info(f"✅ Session downloaded from Secret Manager ({_SESSION_SECRET_ID})")
         return True
     except Exception as e:
-        # Secret may not exist yet (first run) — this is expected
+        # ---- Secret may not exist yet (first run) this is expected ----
         logger.info(f"Session not found in Secret Manager (will try GCS fallback): {e}")
         return False
 
@@ -137,10 +137,10 @@ def upload_session_to_secret_manager():
     with open(session_file, 'rb') as f:
         session_bytes = f.read()
 
-    # ── Primary: GCS (no size limit) ──
+    # -------------- Primary GCS (no size limit) --------------
     gcs_ok = _upload_session_to_gcs(session_bytes)
 
-    # ── Delete local session files after successful GCS upload ──
+    # ---- Delete local session files after successful GCS upload ----
     # Session only needs to exist on disk while Telethon is running.
     # After upload, wipe local copies so they don't persist on the VM.
     if gcs_ok:
@@ -152,9 +152,9 @@ def upload_session_to_secret_manager():
                 except Exception as e:
                     logger.warning(f"Could not delete local session file {path}: {e}")
     else:
-        logger.warning("GCS upload failed — keeping local session file as fallback")
+        logger.warning("GCS upload failed  keeping local session file as fallback")
 
-    # ── Secondary: Secret Manager (best-effort, may fail if >64KB) ──
+    # ---- Secondary Secret Manager (best effort may fail if 64KB) ----
     if not project_id or not use_sm:
         return
     try:
@@ -187,7 +187,7 @@ def upload_session_to_secret_manager():
 
 class TelegramCollector:
     def __init__(self):
-        # [FIX Cold Start] Lazy init — Telethon client is NOT created at import time.
+        # ---- FIX Cold Start Lazy init Telethon client is NOT created at import time. ----
         # This prevents Telegram session errors from crashing the entire process.
         self._client = None
         self._init_failed = False
@@ -204,13 +204,13 @@ class TelegramCollector:
             "Whale_Alert": "whale_alert_io",
             "PeckShield": "peckshield",
             
-            # 신규 추가 (Arkham 봇 및 분석 채널)
+            # ----------------------- (Arkham ) -----------------------
             "Arkham_Alerter": "ArkhamAlertBot",
             "DeFi_Million": "DeFiMillionz",
             "CryptoQuant": "cryptoquant_official",
             "Glassnode": "glassnode",
 
-            # 2026 베스트 스마트 머니 + 매크로 (유저 인증 팩트 체크 완료)
+            # ----------------------- 2026 ( ) -----------------------
             "Unfolded": "unfolded",
             "Lookonchain": "lookonchainchannel",
             "Watcher_Guru": "WatcherGuru"
@@ -254,7 +254,7 @@ class TelegramCollector:
     _VLM_SYSTEM_PROMPT = (
         "You are a crypto on-chain chart analyst embedded in an automated trading system. "
         "Your job: extract exactly three fields from a chart image, anchored by its caption. "
-        "Accuracy is critical — your output feeds directly into trading decisions. "
+        "Accuracy is critical  your output feeds directly into trading decisions. "
         "Never invent data. Never read values from axis tick marks or scales. "
         "Only report values that appear as explicit printed text annotations on the chart itself."
     )
@@ -264,10 +264,10 @@ Channel: {channel}
 Caption: "{caption}"
 
 Study the chart using the caption as your anchor for what metric is being shown.
-Return EXACTLY three lines in this format — no markdown, no extra text:
+Return EXACTLY three lines in this format  no markdown, no extra text:
 
-LABELS: <text values printed as annotations ON the chart e.g. "$102B, $51B, 100B" — NONE if absent>
-TREND: <BULLISH | BEARISH | NEUTRAL — based on the rightmost/most recent section of the chart>
+LABELS: <text values printed as annotations ON the chart e.g. "$102B, $51B, 100B"  NONE if absent>
+TREND: <BULLISH | BEARISH | NEUTRAL  based on the rightmost/most recent section of the chart>
 MISMATCH: <If the chart's current state directly contradicts the caption's claim, one sentence. NONE if aligned.>
 
 Examples:
@@ -290,7 +290,7 @@ Now analyze the provided chart:"""
     ) -> str:
         """Download the photo in message and run Gemini Flash VLM analysis.
 
-        Gate 1 (free): caption keyword check — skips VLM for non-BTC/ETH content.
+        Gate 1 (free): caption keyword check  skips VLM for non-BTC/ETH content.
         Gate 2: image size sanity check.
         Prompt: few-shot examples teach Flash the MISMATCH detection pattern.
         Returns a compact pipe-delimited string for DB storage, or "" on skip/failure.
@@ -304,7 +304,7 @@ Now analyze the provided chart:"""
                 caption_lower = caption.lower()
                 if not any(kw in caption_lower for kw in self._SIGNAL_KEYWORDS):
                     logger.debug(
-                        f"Chart VLM skipped — no BTC/ETH keywords in caption "
+                        f"Chart VLM skipped  no BTC/ETH keywords in caption "
                         f"[{channel_name} msg={message.id}]"
                     )
                     return ""
@@ -337,7 +337,7 @@ Now analyze the provided chart:"""
             if not result or "TREND:" not in result:
                 return ""
 
-            # Extract only the three expected fields — discard any "Note:", commentary, etc.
+            # ---- Extract only the three expected fields discard any Note commentary etc. ----
             field_lines = [
                 ln.strip()
                 for ln in result.strip().splitlines()
@@ -380,7 +380,7 @@ Now analyze the provided chart:"""
         This avoids re-downloading the full history on every run.
         """
         if self.client is None:
-            logger.warning("Telegram client unavailable — skipping message fetch")
+            logger.warning("Telegram client unavailable  skipping message fetch")
             return []
 
         messages = []
@@ -397,7 +397,7 @@ Now analyze the provided chart:"""
                     try:
                         entity = await self.client.get_entity(channel_username)
 
-                        # ── Resume: find where we left off ──
+                        # ------------- Resume find where we left off -------------
                         min_id = self._get_channel_max_message_id(channel_name)
                         if min_id > 0:
                             print(f"\n[{channel_name}] Resuming from message_id > {min_id:,}...", flush=True)
@@ -421,14 +421,14 @@ Now analyze the provided chart:"""
                             if count % 100 == 0:
                                 print(f"\r  [{channel_name}] Downloaded: {count:,} new messages...", end="", flush=True)
 
-                            # ── Text content ──
+                            # --------------------- Text content ---------------------
                             text_content = ""
                             if message.message:
                                 cleaned = clean_telegram_text(message.message)
                                 if cleaned:
                                     text_content = cleaned
 
-                            # ── Chart VLM (visual channels only, photo messages only) ──
+                            # ---- Chart VLM (visual channels only photo messages only) ----
                             if channel_name in VISUAL_CHANNELS and getattr(message, 'photo', None):
                                 chart_analysis = await self._extract_chart_analysis(
                                     message, channel_name, caption=text_content
@@ -524,7 +524,7 @@ Now analyze the provided chart:"""
         if not messages:
             return
         try:
-            # Bulk upsert: 2000개를 1번 HTTP 요청으로 처리 (개별 루프 대비 100배 이상 빠름)
+            # ------------ Bulk upsert 2000 1 HTTP ( 100 ) ------------
             db.client.table("telegram_messages").upsert(
                 messages, on_conflict="channel,message_id"
             ).execute()

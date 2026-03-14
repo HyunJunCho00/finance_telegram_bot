@@ -36,7 +36,7 @@ class EmergencyReplanAgent:
         if trigger_action == "CANCEL" and has_open_exposure:
             return {
                 "action": "CANCEL_AND_CLOSE",
-                "reason": "기존 포지션/주문을 유지하기 어려워 강제 청산을 요청합니다.",
+                "reason": "기존 포션/주문을 유하기 어려워 강제 청산을 요청합니다.",
             }
         if direction == "CANCEL_AND_CLOSE":
             return {

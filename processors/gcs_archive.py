@@ -1,4 +1,4 @@
-"""GCS Archive — now delegates to GCS Parquet store.
+"""GCS Archive  now delegates to GCS Parquet store.
 
 Backward-compatible wrapper. The scheduler calls gcs_archive_exporter.run_daily_archive()
 which now uses Parquet format instead of compressed JSONL.

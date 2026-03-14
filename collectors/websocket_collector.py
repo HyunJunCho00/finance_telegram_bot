@@ -32,7 +32,7 @@ from config.settings import settings
 from executors.paper_exchange import paper_engine
 
 
-# ─────────────── Constants ───────────────
+# ----------------------- Constants -----------------------
 
 BINANCE_WS_BASE = "wss://fstream.binance.com/ws"
 
@@ -42,11 +42,11 @@ WHALE_THRESHOLD_USD = 100_000
 # Flush interval in seconds
 FLUSH_INTERVAL = 60
 
-# Symbols to track — derived from central TRADING_SYMBOLS config
+# ---- Symbols to track derived from central TRADING_SYMBOLS config ----
 SYMBOLS = [s.lower() for s in settings.trading_symbols]
 
 
-# ─────────────── Buffer Classes ───────────────
+# -------------------- Buffer Classes --------------------
 
 class LiquidationBuffer:
     """Accumulates liquidation events per minute per symbol."""
@@ -190,7 +190,7 @@ class WhaleBuffer:
         return data
 
 
-# ─────────────── WebSocket Collector ───────────────
+# ------------------ WebSocket Collector ------------------
 
 class WebSocketCollector:
     """Manages Binance Futures WebSocket connections for liquidation and whale data."""

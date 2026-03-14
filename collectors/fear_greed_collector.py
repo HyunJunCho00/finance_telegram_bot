@@ -1,6 +1,6 @@
 """Crypto Fear & Greed Index Collector.
 
-Uses the free alternative.me API — no API key required, daily updates.
+Uses the free alternative.me API  no API key required, daily updates.
 Endpoint: https://api.alternative.me/fng/
 
 Index range: 0 (Extreme Fear) → 100 (Extreme Greed)

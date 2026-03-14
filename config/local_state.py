@@ -7,7 +7,7 @@ from loguru import logger
 from typing import Dict, List, Optional
 from executors.execution_repository import DuplicateActiveIntentError, execution_repository
 
-# [FIX MEDIUM-16] 절대 경로 사용 — systemd WorkingDirectory와 무관하게 동작
+# -------- FIX MEDIUM 16 systemd WorkingDirectory --------
 _BASE_DIR = Path(__file__).parent.parent
 DB_PATH = str(_BASE_DIR / "data" / "local_state.db")
 
@@ -44,7 +44,7 @@ def init_db():
         )
     ''')
 
-    # [FIX CRITICAL-2] 기존 테이블에 새 컬럼 추가 (이미 존재하면 무시)
+    # ------------------ FIX CRITICAL 2 ( ) ------------------
     for col, col_def in [
         ("leverage", "REAL DEFAULT 1"),
         ("tp_price", "REAL DEFAULT 0"),
@@ -60,7 +60,7 @@ def init_db():
         try:
             conn.execute(f"ALTER TABLE active_orders ADD COLUMN {col} {col_def}")
         except Exception:
-            pass  # 이미 존재하는 컬럼 — 정상
+            pass  # 이미 존재하는 컬럼  정상
 
     # [FIX RESOURCE-2] Index for flush_expired() and get_active_orders() performance
     try:
@@ -158,7 +158,7 @@ def init_db():
     cursor.execute(
         "INSERT OR IGNORE INTO system_config (key, value) VALUES ('panic_mode', 'false')"
     )
-    # [FIX] trading_mode 영구 저장 — 재시작 후에도 유지
+    # ------------------- FIX trading_mode -------------------
     cursor.execute(
         "INSERT OR IGNORE INTO system_config (key, value) VALUES ('trading_mode', 'swing')"
     )
@@ -190,7 +190,7 @@ class LocalStateManager:
         self.conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL;")
-        # [FIX HIGH-7] 멀티스레드 동시 쓰기 방지 락
+        # ---------------------- FIX HIGH 7 ----------------------
         self._lock = threading.Lock()
 
     def is_analysis_enabled(self) -> bool:
@@ -300,8 +300,8 @@ class LocalStateManager:
     ) -> str:
         """Register a new execution intent.
 
-        [FIX HIGH-8/9] leverage, tp_price, sl_price 저장 — _execute_chunk가
-        올바른 레버리지로 마진 계산할 수 있도록 함.
+        [FIX HIGH-8/9] leverage, tp_price, sl_price 장  _execute_chunk
+        올바른 레버리로 마진 계산할 수 있도록 함.
         """
         try:
             intent_id = execution_repository.create_intent(

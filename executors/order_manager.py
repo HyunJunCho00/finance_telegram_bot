@@ -100,7 +100,7 @@ class ExecutionDesk:
         if amount <= 0:
             return
 
-        # [FIX HIGH-8/9] leverage no longer hard-coded to 1 — passes the CRO-approved value
+        # ---- FIX HIGH 8/9 leverage no longer hard coded to 1 passes the CRO approved value ----
         res = trade_executor.execute(
             symbol=symbol,
             side=direction,

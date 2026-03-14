@@ -1,4 +1,4 @@
-﻿import pandas as pd
+import pandas as pd
 import numpy as np
 from scipy.signal import argrelextrema
 from typing import Dict, Tuple, Optional, List
@@ -6,10 +6,10 @@ import pandas_ta_classic as ta
 from loguru import logger
 from config.settings import TradingMode
 
-# ── 분석 파이프라인(VLM + AI 에이전트)에 전달되는 지표 화이트리스트 ────────
-# 사용자 질의용 지표(PSAR, KC, Aroon, HMA 등)는 계산되지만 여기엔 포함하지 않음
+# ----------------------- (VLM AI ) -----------------------
+# ----------------- (PSAR KC Aroon HMA ) -----------------
 # 중복 제거 원칙:
-#   모멘텀 → RSI + StochRSI + MFI  (Williams%R, CCI, OBV 제외)
+# -------- RSI StochRSI MFI (Williams R CCI OBV ) --------
 #   이동평균 → EMA(21/50/200)       (EMA9, SMA50, SMA200 제외)
 _COMPACT_KEYS = frozenset({
     'price', 'price_change_pct',
@@ -64,7 +64,7 @@ class MathEngine:
         combined = combined.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
         return combined.reset_index(drop=True)
 
-    # ─────────────── Resampling ───────────────
+    # ---------------------- Resampling ----------------------
 
     def resample_to_timeframe(self, df: pd.DataFrame, timeframe: str) -> pd.DataFrame:
         if timeframe == '1m':
@@ -114,7 +114,7 @@ class MathEngine:
 
         return resampled
 
-    # ─────────────── Structure Analysis ───────────────
+    # ------------------ Structure Analysis ------------------
 
     def find_pivot_points(self, df: pd.DataFrame, order: int = None) -> Tuple[np.ndarray, np.ndarray]:
         o = order or self.order
@@ -177,7 +177,7 @@ class MathEngine:
             if 'low_time' in df.columns:
                 ts1 = df.iloc[x1]['low_time']
                 ts2 = df.iloc[x2]['low_time']
-                # GCS historical rows may have NaT for low_time — fall back to candle timestamp
+                # ---- GCS historical rows may have NaT for low_time fall back to candle timestamp ----
                 if pd.isna(ts1): ts1 = df.iloc[x1]['timestamp']
                 if pd.isna(ts2): ts2 = df.iloc[x2]['timestamp']
             else:
@@ -223,7 +223,7 @@ class MathEngine:
             if 'high_time' in df.columns:
                 ts1 = df.iloc[x1]['high_time']
                 ts2 = df.iloc[x2]['high_time']
-                # GCS historical rows may have NaT for high_time — fall back to candle timestamp
+                # ---- GCS historical rows may have NaT for high_time fall back to candle timestamp ----
                 if pd.isna(ts1): ts1 = df.iloc[x1]['timestamp']
                 if pd.isna(ts2): ts2 = df.iloc[x2]['timestamp']
             else:
@@ -322,7 +322,7 @@ class MathEngine:
             logger.error(f"Macro divergence error: {e}")
             return {'macro_bull_div': False, 'macro_bear_div': False}
 
-    # ─────────────── Order Blocks ───────────────
+    # --------------------- Order Blocks ---------------------
 
     def calculate_macro_order_blocks(self, df: pd.DataFrame, count: int = 3) -> List[Dict]:
         """Identify Institutional Order Blocks (OB).
@@ -370,7 +370,7 @@ class MathEngine:
             logger.error(f"Order Block calculation error: {e}")
             return []
 
-    # ─────────────── Anchored VWAP ───────────────
+    # --------------------- Anchored VWAP ---------------------
 
     def calculate_anchored_vwap(self, df: pd.DataFrame, anchor_idx: int) -> Optional[pd.Series]:
         """Calculate VWAP starting from a specific anchor index."""
@@ -396,7 +396,7 @@ class MathEngine:
             logger.error(f"Anchored VWAP error: {e}")
             return None
 
-    # ─────────────── Fibonacci Levels ───────────────
+    # ------------------- Fibonacci Levels -------------------
 
     def calculate_fibonacci_levels(self, df: pd.DataFrame) -> Optional[Dict]:
         """Fibonacci retracement levels from recent swing high/low.
@@ -449,7 +449,7 @@ class MathEngine:
         fibs = {k: abs(price - v) for k, v in levels.items() if k.startswith('fib_')}
         return min(fibs, key=fibs.get) if fibs else 'none'
 
-    # ─────────────── Volume Profile (simplified) ───────────────
+    # -------------- Volume Profile (simplified) --------------
 
     def calculate_volume_profile(self, df: pd.DataFrame, bins: int = 20) -> Optional[Dict]:
         """Simplified volume profile: find price levels with highest traded volume."""
@@ -483,7 +483,7 @@ class MathEngine:
             logger.error(f"Volume profile error: {e}")
             return None
 
-    # ─────────────── Helper ───────────────
+    # ------------------------ Helper ------------------------
 
     def _safe_val(self, series, idx=-1) -> Optional[float]:
         if series is None or (hasattr(series, 'empty') and series.empty):
@@ -496,7 +496,7 @@ class MathEngine:
         except Exception:
             return None
 
-    # ─────────────── Core Indicators (shared) ───────────────
+    # --------------- Core Indicators (shared) ---------------
 
     def calculate_indicators_for_timeframe(self, df: pd.DataFrame) -> Dict:
         """Calculate all technical indicators. Pure numbers, zero interpretation."""
@@ -623,11 +623,11 @@ class MathEngine:
             except Exception as e:
                 logger.warning(f"Error calculating volume indicators (obv/vwap/cmf): {e}")
 
-            # HMA (Hull Moving Average) — 빠른 MA, EMA보다 노이즈 적음
+            # ----------- HMA (Hull Moving Average) MA EMA -----------
             r['hma_9'] = self._safe_val(ta.hma(close, length=9))
             r['hma_21'] = self._safe_val(ta.hma(close, length=21))
 
-            # Parabolic SAR — 트렌드 전환 신호
+            # --------------------- Parabolic SAR ---------------------
             try:
                 psar_df = ta.psar(high, low, close)
                 if psar_df is not None and not psar_df.empty:
@@ -645,7 +645,7 @@ class MathEngine:
             except Exception:
                 pass
 
-            # Keltner Channel — 변동성 채널 (BB 스퀴즈 감지에 활용)
+            # ----------------- Keltner Channel (BB ) -----------------
             try:
                 kc_df = ta.kc(high, low, close, length=20)
                 if kc_df is not None and not kc_df.empty:
@@ -653,13 +653,13 @@ class MathEngine:
                     r['kc_lower'] = self._safe_val(kc_df[cols[0]])
                     r['kc_mid'] = self._safe_val(kc_df[cols[1]])
                     r['kc_upper'] = self._safe_val(kc_df[cols[2]])
-                    # BB inside KC = Squeeze (변동성 수축, 폭발 임박)
+                    # --------------- BB inside KC Squeeze ( ) ---------------
                     if r.get('bb_lower') and r.get('bb_upper') and r.get('kc_lower') and r.get('kc_upper'):
                         r['bb_kc_squeeze'] = r['bb_lower'] > r['kc_lower'] and r['bb_upper'] < r['kc_upper']
             except Exception:
                 pass
 
-            # Aroon — 트렌드 전환 조기 감지 (ADX 보완)
+            # --------------------- Aroon (ADX ) ---------------------
             try:
                 aroon_df = ta.aroon(high, low, length=25)
                 if aroon_df is not None and not aroon_df.empty:
@@ -677,7 +677,7 @@ class MathEngine:
 
         return r
 
-    # ─────────────── SCALP-specific indicators ───────────────
+    # --------------- SCALP specific indicators ---------------
 
     def calculate_scalp_indicators(self, df: pd.DataFrame) -> Dict:
         """Extra indicators for scalp mode: Keltner Channels, VWAP bands, volume delta proxy."""
@@ -723,7 +723,7 @@ class MathEngine:
 
         return r
 
-    # ─────────────── Funding Rate Context ───────────────
+    # ----------------- Funding Rate Context -----------------
 
     def analyze_funding_context(self, funding_data: Dict) -> Dict:
         """Deliver funding rate context as raw facts for AI.
@@ -758,7 +758,7 @@ class MathEngine:
 
         return result
 
-    # ─────────────── FVG (Fair Value Gap) ───────────────
+    # ----------------- FVG (Fair Value Gap) -----------------
 
     def calculate_fvg(self, df: pd.DataFrame, max_gaps: int = 5, mode: TradingMode = TradingMode.SWING) -> List[Dict]:
         """Detect Fair Value Gaps (3-candle imbalance zones).
@@ -813,7 +813,7 @@ class MathEngine:
         unfilled = [g for g in fvgs if not g['filled']]
         return unfilled[-max_gaps:] if unfilled else fvgs[-max_gaps:]
 
-    # ─────────────── Swing High/Low (Liquidity Levels) ───────────────
+    # ----------- Swing High/Low (Liquidity Levels) -----------
 
     def calculate_swing_levels(self, df: pd.DataFrame, lookback: int = None) -> Dict:
         """Find major swing highs/lows that act as liquidity pools.
@@ -845,14 +845,14 @@ class MathEngine:
 
         return result
 
-    # ─────────────── Market Structure (MSB / CHoCH) ───────────────
+    # ------------ Market Structure (MSB / CHoCH) ------------
 
     def detect_market_structure(self, df: pd.DataFrame, mode: TradingMode = TradingMode.SWING) -> Dict:
         """Detect HH/HL/LH/LL sequence and Market Structure Breaks.
 
         MSB  (Market Structure Break): price breaks through last significant
-             swing level — confirms trend change.
-        CHoCH (Change of Character): first counter-trend swing — early warning.
+             swing level  confirms trend change.
+        CHoCH (Change of Character): first counter-trend swing  early warning.
         """
         if len(df) < 20:
             return {'structure': 'insufficient_data'}
@@ -896,13 +896,13 @@ class MathEngine:
                 choch = {
                     'type': 'bearish_choch',
                     'price': round(recent_lows[-1], 2),
-                    'note': 'First LL in uptrend — early reversal warning',
+                    'note': 'First LL in uptrend  early reversal warning',
                 }
             elif structure == 'downtrend' and recent_highs[-1] > recent_highs[-2]:
                 choch = {
                     'type': 'bullish_choch',
                     'price': round(recent_highs[-1], 2),
-                    'note': 'First HH in downtrend — early reversal warning',
+                    'note': 'First HH in downtrend  early reversal warning',
                 }
 
             # MSB: price already through last key level
@@ -911,13 +911,13 @@ class MathEngine:
                 msb = {
                     'type': 'bearish_msb',
                     'broken_level': last_swing_low,
-                    'note': 'Price broke below last swing low — structure break',
+                    'note': 'Price broke below last swing low  structure break',
                 }
             elif structure == 'downtrend' and current_price > last_swing_high:
                 msb = {
                     'type': 'bullish_msb',
                     'broken_level': last_swing_high,
-                    'note': 'Price broke above last swing high — structure break',
+                    'note': 'Price broke above last swing high  structure break',
                 }
 
             return {
@@ -935,7 +935,7 @@ class MathEngine:
             logger.error(f"Market structure detection error: {e}")
             return {}
 
-    # ─────────────── Trendline Quality Score ───────────────
+    # ---------------- Trendline Quality Score ----------------
 
     def score_trendline_quality(self, df: pd.DataFrame,
                                  line_info: Optional[Dict],
@@ -943,15 +943,15 @@ class MathEngine:
         """Score a diagonal trendline on 4 dimensions (0-100).
 
         Dimensions:
-          Angle      (30pts) — 15-45° normalised slope is sustainable
-          Touches    (40pts) — more confirmed bounces = stronger line
-          Recency    (20pts) — how recently was it last tested?
-          Distance   (10pts) — how close is current price to the line?
+          Angle      (30pts)  15-45° normalised slope is sustainable
+          Touches    (40pts)  more confirmed bounces = stronger line
+          Recency    (20pts)  how recently was it last tested?
+          Distance   (10pts)  how close is current price to the line?
         """
         if not line_info or len(df) < 10:
             return None
         try:
-            # ── Derive slope + current_val from stored pivot row indices ──
+            # ---- Derive slope current_val from stored pivot row indices ----
             # calculate_diagonal_support/resistance stores '_x1', '_x2', 'point1', 'point2'
             x1 = line_info.get('_x1')
             x2 = line_info.get('_x2')
@@ -975,7 +975,7 @@ class MathEngine:
             if avg_price == 0:
                 return None
 
-            # ── 1. Angle score ──────────────────────────────────────
+            # -------------------- 1. Angle score --------------------
             norm_slope = abs(slope) / avg_price * 100   # % per candle
             if 0.005 <= norm_slope <= 0.35:
                 angle_score, angle_tag = 30, 'optimal'
@@ -984,7 +984,7 @@ class MathEngine:
             else:
                 angle_score, angle_tag = 6,  'too_steep'
 
-            # ── 2. Touch count score ────────────────────────────────
+            # ----------------- 2. Touch count score -----------------
             x          = np.arange(n)
             intercept  = current_val - slope * (n - 1)
             line_vals  = slope * x + intercept
@@ -1004,7 +1004,7 @@ class MathEngine:
             else:
                 touch_score, touch_tag = 4,  'very_weak'
 
-            # ── 3. Recency score (pivot_count as proxy for age) ─────
+            # ---- 3. Recency score (pivot_count as proxy for age) ----
             pivot_count = line_info.get('pivot_count', 0)
             if pivot_count >= 4:
                 recency_score = 20
@@ -1013,7 +1013,7 @@ class MathEngine:
             else:
                 recency_score = 7
 
-            # ── 4. Distance score ───────────────────────────────────
+            # ------------------- 4. Distance score -------------------
             current_price = float(df['close'].iloc[-1])
             dist_pct = abs(current_price - current_val) / avg_price * 100
             if dist_pct <= 0.5:
@@ -1041,7 +1041,7 @@ class MathEngine:
             logger.error(f"Trendline quality score error: {e}")
             return None
 
-    # ─────────────── Multi-TF Confluence Detection ───────────────
+    # ------------- Multi TF Confluence Detection -------------
 
     def detect_confluence_zones(self, multi_tf_analysis: Dict,
                                   tolerance_pct: float = 0.8) -> List[Dict]:
@@ -1976,7 +1976,7 @@ class MathEngine:
             
         return result
 
-    # ─────────────── Compact Data Formatting ───────────────
+    # ---------------- Compact Data Formatting ----------------
 
     def format_compact(self, analysis: Dict) -> str:
         """Format analysis as compact text to save tokens.
@@ -2071,9 +2071,9 @@ class MathEngine:
                        f" SwH={s.get('last_swing_high')} SwL={s.get('last_swing_low')}")
                 lines.append(row)
                 if choch:
-                    lines.append(f"    CHoCH={choch['type']} @ {choch['price']} — {choch['note']}")
+                    lines.append(f"    CHoCH={choch['type']} @ {choch['price']}  {choch['note']}")
                 if msb:
-                    lines.append(f"    MSB={msb['type']} broken={msb['broken_level']} — {msb['note']}")
+                    lines.append(f"    MSB={msb['type']} broken={msb['broken_level']}  {msb['note']}")
 
         tq = analysis.get('trendline_quality', {})
         if tq:
@@ -2103,7 +2103,7 @@ class MathEngine:
 
         return '\n'.join(lines)
 
-    # ─────────────── Internal Helpers ───────────────
+    # ------------------- Internal Helpers -------------------
     def _recent_candle_data(self, df: pd.DataFrame, count: int = 5) -> List[Dict]:
         candles = []
         for _, row in df.tail(count).iterrows():
@@ -2129,7 +2129,7 @@ math_engine = MathEngine()
 def calculate_z_score(current: float, mean: float, std: float, min_std: float = 1e-9) -> float:
     """Z-Score: (current − mean) / std.  근접-제로 std를 안전하게 처리.
 
-    해석 기준:
+    해석 기:
       |z| >= 3.5 → EXTREME  (상위/하위 0.02%)
       |z| >= 2.5 → ANOMALY  (상위/하위 0.6%)
       |z| >= 2.0 → ELEVATED (상위/하위 2.3%)

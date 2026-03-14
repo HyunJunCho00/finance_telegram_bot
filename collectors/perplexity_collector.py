@@ -146,7 +146,7 @@ class PerplexityCollector:
     def _gather_market_state(self, symbol: str) -> Dict:
         """Pull live market indicators from DB for mode-aware prompt injection.
 
-        Returns a dict with available fields — any field may be absent if DB
+        Returns a dict with available fields  any field may be absent if DB
         has no data yet (cold start, API failures). Callers must handle None.
         """
         state: Dict = {}
@@ -168,7 +168,7 @@ class PerplexityCollector:
                     if macro.get(db_key) is not None:
                         state[state_key] = macro[db_key]
 
-            # Current price (1 row — lightweight)
+            # ----------- Current price (1 row lightweight) -----------
             latest_df = db.get_latest_market_data(symbol, limit=1)
             if not latest_df.empty and "close" in latest_df.columns:
                 state["current_price"] = float(latest_df["close"].iloc[-1])
@@ -406,7 +406,7 @@ class PerplexityCollector:
             "{",
             f'  "summary": "2-3 sentences: where is {coin_name} in its market cycle and what is the dominant regime",',
             '  "sentiment": "bullish" or "bearish" or "neutral",',
-            '  "cycle_position": "one of: early_accumulation | late_accumulation | distribution | capitulation | recovery — with 1-sentence evidence",',
+            '  "cycle_position": "one of: early_accumulation | late_accumulation | distribution | capitulation | recovery  with 1-sentence evidence",',
             '  "bullish_factors": ["YYYY-MM-DD: structural factor supporting medium-term bullish thesis"],',
             '  "bearish_factors": ["structural risk that could extend the current bearish phase or trigger further decline"],',
             f'  "reasoning": "1 sentence: the single most important factor for {coin_name} direction over the next 2-8 weeks",',
@@ -890,7 +890,7 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
         }
 
     def format_targeted_for_agents(self, result: Dict) -> str:
-        """타겟 검색 결과를 에이전트용 텍스트로 포맷."""
+        """겟 색 결과를 에이전트용 텍스트로 포맷."""
         if result.get("status") == "unavailable":
             return f"[SEARCH] {result.get('entity', '?')}: No data"
         lines = [
