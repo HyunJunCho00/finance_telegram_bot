@@ -539,10 +539,11 @@ def node_context_gathering(state: AnalysisState) -> dict:
                         f"floor=${liq_floor:,.0f}"
                     )
                 else:
+                    _liq_data_ok = liq_floor_meta.get("has_enough_data", False)
                     logger.warning(
                         f"[Stats] liq_std ${liq_std:,.0f} < adaptive floor ${liq_floor:,.0f} "
-                        f"(base=${liq_floor_meta['base_floor']:,.0f}, rolling={liq_floor_meta['rolling_floor']:,.0f}) "
-                        f"→ 기 미달, static fallback 사용"
+                        f"(base=${liq_floor_meta['base_floor']:,.0f}, rolling=${liq_floor_meta['rolling_floor']:,.0f}) "
+                        f"data_ok={_liq_data_ok} → static fallback 사용"
                     )
         except Exception as e:
             logger.warning(f"[Stats] liq error: {e}")
@@ -626,10 +627,11 @@ def node_context_gathering(state: AnalysisState) -> dict:
                         stats["dvol_mean"] = dvol_mean
                         stats["dvol_std"]  = dvol_std
                     else:
+                        _dvol_data_ok = dvol_floor_meta.get("has_enough_data", False)
                         logger.warning(
                             f"[Stats] dvol_std={dvol_std:.2f} < adaptive floor {dvol_floor:.2f} "
                             f"(base={dvol_floor_meta['base_floor']:.2f}, rolling={dvol_floor_meta['rolling_floor']:.2f}) "
-                            f"- DVOL flat, static fallback"
+                            f"data_ok={_dvol_data_ok} - DVOL flat, static fallback"
                         )
                 if not deribit_is_stale and pcrs:
                     pcr_mean = float(np.mean(pcrs))
@@ -645,10 +647,11 @@ def node_context_gathering(state: AnalysisState) -> dict:
                         stats["pcr_mean"] = pcr_mean
                         stats["pcr_std"]  = pcr_std
                     else:
+                        _pcr_data_ok = pcr_floor_meta.get("has_enough_data", False)
                         logger.warning(
                             f"[Stats] pcr_std={pcr_std:.4f} < adaptive floor {pcr_floor:.4f} "
                             f"(base={pcr_floor_meta['base_floor']:.4f}, rolling={pcr_floor_meta['rolling_floor']:.4f}) "
-                            f"- PCR flat, static fallback"
+                            f"data_ok={_pcr_data_ok} - PCR flat, static fallback"
                         )
             elif rows.data:
                 logger.warning(
