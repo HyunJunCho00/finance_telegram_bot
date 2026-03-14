@@ -1160,7 +1160,7 @@ def job_hourly_swing_charts():
             return
 
         from mcp_server.tools import mcp_tools
-        import asyncio
+        from executors.outbox_dispatcher import outbox_dispatcher as _dispatcher
         target_chat_id = state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
 
         target_symbols = [s for s in settings.trading_symbols if s in ("BTCUSDT", "ETHUSDT")]
@@ -1198,7 +1198,7 @@ def job_hourly_swing_charts():
                             f"Panel: <code>{idx}/{total}</code>\n"
                             f"Lookback: <code>{lookback_months}M</code>"
                         )
-                        asyncio.run(trading_bot.send_photo(target_chat_id, chart_bytes, caption))
+                        _dispatcher._run_async(trading_bot.send_photo, target_chat_id, chart_bytes, caption)
                 except Exception as e:
                     logger.warning(f"Hourly {lane} chart send failed for {symbol}: {e}")
     except Exception as e:

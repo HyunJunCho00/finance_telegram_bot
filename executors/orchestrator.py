@@ -1993,37 +1993,49 @@ class Orchestrator:
 
     def _notify_daily_precision_failure(self, result: Dict, summary: Dict) -> None:
         try:
-            if str((result or {}).get("status", "")).upper() == "SUCCESS":
-                return
-
             from executors.execution_repository import execution_repository
             from executors.outbox_dispatcher import outbox_dispatcher
 
+            status_upper = str((result or {}).get("status", "")).upper()
             started_at = str((result or {}).get("started_at", "") or "")
-            lines = [
-                "<b>Daily Precision Partial Failure</b>",
-                f"Started: <code>{started_at[:16].replace('T', ' ') if started_at else 'N/A'} UTC</code>",
-            ]
-            symbol_rows = (summary.get("symbols", {}) if isinstance(summary, dict) else {}) or {}
-            ordered_symbols = list(settings.trading_symbols) or list(symbol_rows.keys())
-            for symbol_key in ordered_symbols:
-                item = symbol_rows.get(symbol_key)
-                if not isinstance(item, dict):
-                    continue
-                symbol = str(item.get("symbol", "?") or "?")
-                mode = str(item.get("mode", "?") or "?").upper()
-                status = str(item.get("status", "UNKNOWN") or "UNKNOWN").upper()
-                report_id = str(item.get("report_id", "") or "-")
-                decision = str(item.get("decision", "") or "-")
-                error = str(item.get("error", "") or "").strip()
-                line = (
-                    f"- <b>{symbol} {mode}</b> | status=<code>{status}</code> "
-                    f"| decision=<code>{decision}</code> | report_id=<code>{report_id}</code>"
-                )
-                if error:
-                    safe_error = error[:240].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                    line += f"\n  error: <code>{safe_error}</code>"
-                lines.append(line)
+
+            if status_upper == "SUCCESS":
+                # 성공 시에도 완료 요약 알림 전송
+                sym = str((result or {}).get("symbol", "?") or "?")
+                mode_str = str((result or {}).get("mode", "?") or "?").upper()
+                decision = str((result or {}).get("decision", "-") or "-")
+                report_id = str((result or {}).get("report_id", "-") or "-")
+                lines = [
+                    "<b>\u2705 Daily Precision \uc644\ub8cc</b>",
+                    f"<code>{sym} {mode_str}</code>",
+                    f"Decision: <b>{decision}</b> | report_id: <code>{report_id}</code>",
+                    f"Started: <code>{started_at[:16].replace('T', ' ') if started_at else 'N/A'} UTC</code>",
+                ]
+            else:
+                lines = [
+                    "<b>\u26a0\ufe0f Daily Precision Partial Failure</b>",
+                    f"Started: <code>{started_at[:16].replace('T', ' ') if started_at else 'N/A'} UTC</code>",
+                ]
+                symbol_rows = (summary.get("symbols", {}) if isinstance(summary, dict) else {}) or {}
+                ordered_symbols = list(settings.trading_symbols) or list(symbol_rows.keys())
+                for symbol_key in ordered_symbols:
+                    item = symbol_rows.get(symbol_key)
+                    if not isinstance(item, dict):
+                        continue
+                    sym = str(item.get("symbol", "?") or "?")
+                    mode_str = str(item.get("mode", "?") or "?").upper()
+                    st = str(item.get("status", "UNKNOWN") or "UNKNOWN").upper()
+                    report_id = str(item.get("report_id", "") or "-")
+                    decision = str(item.get("decision", "") or "-")
+                    error = str(item.get("error", "") or "").strip()
+                    line = (
+                        f"- <b>{sym} {mode_str}</b> | status=<code>{st}</code> "
+                        f"| decision=<code>{decision}</code> | report_id=<code>{report_id}</code>"
+                    )
+                    if error:
+                        safe_error = error[:240].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        line += f"\n  error: <code>{safe_error}</code>"
+                    lines.append(line)
 
             target_chat_id = state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
             execution_repository.enqueue_outbox_event(
@@ -2037,7 +2049,8 @@ class Orchestrator:
             )
             outbox_dispatcher.publish_pending(limit=20)
         except Exception as e:
-            logger.warning(f"Failed to notify daily precision failures: {e}")
+            logger.warning(f"Failed to notify daily precision result: {e}")
+
 
     def run_analysis(
         self,
@@ -2728,6 +2741,7 @@ class Orchestrator:
             # Send one consolidated dual-lane monitor message per symbol.
             try:
                 if trading_bot:
+                    from executors.outbox_dispatcher import outbox_dispatcher as _dispatcher
                     target_chat_id = state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
                     swing_res = lane_results.get("SWING", {})
                     pos_res = lane_results.get("POSITION", {})
@@ -2740,8 +2754,8 @@ class Orchestrator:
                         f"{_lane_line('SWING', swing_res)}\n"
                         f"{_lane_line('POSITION', pos_res)}"
                     )
-                    asyncio.run(trading_bot.send_message(target_chat_id, msg))
-                    
+                    _dispatcher._run_async(trading_bot.send_message, target_chat_id, msg)
+
                     try:
                         from mcp_server.tools import mcp_tools
                         import base64
@@ -2761,7 +2775,7 @@ class Orchestrator:
                                             f"Panel: <code>{idx}/{total}</code>\n"
                                             f"Lookback: <code>{lookback_label}</code>"
                                         )
-                                        asyncio.run(trading_bot.send_photo(target_chat_id, chart_bytes, caption=caption))
+                                        _dispatcher._run_async(trading_bot.send_photo, target_chat_id, chart_bytes, caption=caption)
                     except Exception as e:
                         logger.warning(f"Failed to send hourly monitor chart for {symbol}: {e}")
             except Exception as e:
