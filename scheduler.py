@@ -1096,6 +1096,10 @@ def job_routine_market_status():
 
         target_chat_id = _get_target_chat_id()
 
+        # idempotency_key에 UTC hour를 포함 → 매 시간마다 새로운 key로 재발송 보장
+        _now_utc = datetime.now(timezone.utc)
+        _hour_bucket = _now_utc.strftime("%Y%m%d%H")  # e.g. "2026031421"
+
         # Message 1: News Briefing (only if news exists)
         if telegram_intel and "주요 뉴스 없음" not in telegram_intel:
             news_header = "<b>📰 최근 1시간 뉴스 브리핑 (Synthesized)</b>"
@@ -1103,8 +1107,8 @@ def job_routine_market_status():
                 execution_repository.enqueue_outbox_event(
                     "telegram_message",
                     {"chat_id": target_chat_id, "text": f"{news_header}\n\n{telegram_intel}", "parse_mode": "HTML"},
-                    idempotency_key="telegram:routine_news:"
-                    + hashlib.sha256(f"{news_header}\n\n{telegram_intel}".encode("utf-8")).hexdigest()[:24],
+                    idempotency_key=f"telegram:routine_news:{_hour_bucket}:"
+                    + hashlib.sha256(f"{news_header}\n\n{telegram_intel}".encode("utf-8")).hexdigest()[:16],
                 )
             except Exception as e:
                 logger.warning(f"Routine news briefing enqueue failed: {e}")
@@ -1120,22 +1124,22 @@ def job_routine_market_status():
                         "text": f"{refs_header}\n\n{html.escape(refs_text)}",
                         "parse_mode": "HTML",
                     },
-                    idempotency_key="telegram:routine_news_refs:"
-                    + hashlib.sha256(f"{refs_header}\n\n{refs_text}".encode("utf-8")).hexdigest()[:24],
+                    idempotency_key=f"telegram:routine_news_refs:{_hour_bucket}:"
+                    + hashlib.sha256(f"{refs_header}\n\n{refs_text}".encode("utf-8")).hexdigest()[:16],
                 )
             except Exception as e:
                 logger.warning(f"Routine news reference enqueue failed: {e}")
 
         # Message 2: Market Status Summary (Indicators)
-        market_header = "<b>📊 주요 시장 표 업데이트</b>"
+        market_header = "<b>📊 주요 시장 지표 업데이트</b>"
         summary = market_monitor_agent.summarize_current_status(indicators)
         logger.success(f"Market Summary Generated:\n{summary}")
         try:
             execution_repository.enqueue_outbox_event(
                 "telegram_message",
                 {"chat_id": target_chat_id, "text": f"{market_header}\n\n{summary}", "parse_mode": "HTML"},
-                idempotency_key="telegram:routine_market_summary:"
-                + hashlib.sha256(f"{market_header}\n\n{summary}".encode("utf-8")).hexdigest()[:24],
+                idempotency_key=f"telegram:routine_market_summary:{_hour_bucket}:"
+                + hashlib.sha256(f"{market_header}\n\n{summary}".encode("utf-8")).hexdigest()[:16],
             )
             outbox_dispatcher.publish_pending(limit=20)
         except Exception as e:
