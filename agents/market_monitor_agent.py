@@ -712,6 +712,9 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         """LLM fallback summary so hourly status never becomes empty."""
         lines = ["<b>시장 상태 요약 (Fallback)</b>"]
 
+        def _esc(v) -> str:
+            return str(v or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
         symbol_rows = []
         for key, value in (indicators or {}).items():
             if key == "TELEGRAM_INTEL" or not isinstance(value, dict):
@@ -738,29 +741,29 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             sweep = liq_map.get("liquidity_sweep", {}) if isinstance(liq_map.get("liquidity_sweep"), dict) else {}
             sr_flip = liq_map.get("sr_flip", {}) if isinstance(liq_map.get("sr_flip"), dict) else {}
             pieces = [
-                f"bias {philos.get('higher_timeframe_bias', 'N/A')}->{philos.get('execution_bias', 'N/A')}",
-                f"side {active.get('side', 'N/A')}",
-                f"trigger {active.get('trigger', 'N/A')}",
+                f"bias {_esc(philos.get('higher_timeframe_bias', 'N/A'))}->{_esc(philos.get('execution_bias', 'N/A'))}",
+                f"side {_esc(active.get('side', 'N/A'))}",
+                f"trigger {_esc(active.get('trigger', 'N/A'))}",
             ]
             if active.get("entry_zone_low") is not None or active.get("entry_zone_high") is not None:
-                pieces.append(f"zone {active.get('entry_zone_low')}~{active.get('entry_zone_high')}")
+                pieces.append(f"zone {_esc(active.get('entry_zone_low'))}~{_esc(active.get('entry_zone_high'))}")
             if active.get("invalidation") is not None:
-                pieces.append(f"invalid {active.get('invalidation')}")
+                pieces.append(f"invalid {_esc(active.get('invalidation'))}")
             if active.get("tp1") is not None:
-                pieces.append(f"tp1 {active.get('tp1')}")
+                pieces.append(f"tp1 {_esc(active.get('tp1'))}")
             if active.get("tp2") is not None:
-                pieces.append(f"tp2 {active.get('tp2')}")
+                pieces.append(f"tp2 {_esc(active.get('tp2'))}")
             if volume_profile.get("poc") is not None:
-                pieces.append(f"POC {volume_profile.get('poc')}")
+                pieces.append(f"POC {_esc(volume_profile.get('poc'))}")
             if philos.get("confluence_count") is not None:
-                pieces.append(f"confluence {philos.get('confluence_count')}")
+                pieces.append(f"confluence {_esc(philos.get('confluence_count'))}")
             if sweep.get("confirmed"):
-                pieces.append(f"sweep {sweep.get('status', 'confirmed')}")
+                pieces.append(f"sweep {_esc(sweep.get('status', 'confirmed'))}")
             if sr_flip.get("confirmed"):
-                pieces.append(f"sr_flip {sr_flip.get('status', 'confirmed')}")
+                pieces.append(f"sr_flip {_esc(sr_flip.get('status', 'confirmed'))}")
             revision = str(philos.get("scenario_revision_reason") or "").strip()
             if revision and revision != "No forced scenario revision.":
-                pieces.append(f"rev {revision}")
+                pieces.append(f"rev {_esc(revision)}")
             return f"{label}: " + " | ".join(str(piece) for piece in pieces if piece)
 
         def _line_for_mode(snapshot: dict, label: str) -> str:
@@ -793,14 +796,14 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             msb = ms.get("msb")
             extra = []
             if choch:
-                extra.append(f"CHoCH={choch}")
+                extra.append(f"CHoCH={_esc(choch)}")
             if msb:
-                extra.append(f"MSB={msb}")
+                extra.append(f"MSB={_esc(msb)}")
             pressure_summary = pressure_map.get(pressure.get("summary"))
             pressure_details = pressure.get("details", []) or []
             pressure_text = pressure_summary
             if pressure_summary and pressure_details:
-                pressure_text = f"{pressure_summary} ({', '.join(pressure_details[:2])})"
+                pressure_text = f"{pressure_summary} ({', '.join(_esc(d) for d in pressure_details[:2])})"
             return (
                 f"{label}({tf}) {trend}"
                 + (f" | {pressure_text}" if pressure_text else "")
@@ -888,8 +891,8 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             position_pb = playbook.get("position", {}) if isinstance(playbook.get("position", {}), dict) else {}
             bias = position_pb.get("source_decision", "HOLD")
             allocation = position_pb.get("max_allocation_pct")
-            entry = ", ".join(position_pb.get("entry_conditions", [])[:1]) if isinstance(position_pb.get("entry_conditions"), list) else ""
-            invalidation = ", ".join(position_pb.get("invalidation_conditions", [])[:1]) if isinstance(position_pb.get("invalidation_conditions"), list) else support
+            entry = ", ".join(_esc(c) for c in position_pb.get("entry_conditions", [])[:1]) if isinstance(position_pb.get("entry_conditions"), list) else ""
+            invalidation = ", ".join(_esc(c) for c in position_pb.get("invalidation_conditions", [])[:1]) if isinstance(position_pb.get("invalidation_conditions"), list) else support
             alloc_txt = f"{allocation}%" if allocation is not None else "N/A"
             pressure_txt = pressure.get("summary", "mixed")
             event_count = events.get("event_count", 0) if isinstance(events, dict) else 0
@@ -907,7 +910,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 any_event = True
                 items = events.get("event_items", []) or []
                 if items:
-                    lines.append(f"- <b>{symbol}</b> " + "; ".join(str(x) for x in items[:8]))
+                    lines.append(f"- <b>{symbol}</b> " + "; ".join(_esc(x) for x in items[:8]))
         if not any_event:
             lines.append("- 이번 사이클 이벤트 트리거 없음 (기본 요약만 유지)")
 

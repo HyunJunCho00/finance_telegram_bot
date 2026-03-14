@@ -892,14 +892,12 @@ class TradingBot:
                 
                 from executors.paper_exchange import paper_engine
                 from executors.trade_executor import trade_executor
-                cursor = paper_engine._conn.cursor()
-                cursor.execute("SELECT symbol FROM paper_positions WHERE position_id = ?", (pos_id,))
-                pos = cursor.fetchone()
-                
+                pos = paper_engine.get_open_position(pos_id)
+
                 if not pos:
                     await query.edit_message_text(f"{query.message.text}\n\n⚠️ Position not found or closed.")
                     return
-                
+
                 symbol = pos["symbol"]
                 current_price = trade_executor._get_reference_price(symbol)
                 

@@ -18,10 +18,35 @@ class PaperExchangeEngine:
     """
 
     def __init__(self):
-        self._conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA journal_mode=WAL;")
         self._lock = threading.Lock()
+
+    @staticmethod
+    def _new_connection():
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout = 30000;")
+        return conn
+
+    def _fetch_one(self, query: str, params: tuple = ()):
+        with self._lock:
+            conn = self._new_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return cursor.fetchone()
+            finally:
+                conn.close()
+
+    def _fetch_all(self, query: str, params: tuple = ()) -> List[Dict]:
+        with self._lock:
+            conn = self._new_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(query, params)
+                return [dict(row) for row in cursor.fetchall()]
+            finally:
+                conn.close()
 
     def _queue_notification(self, message: str, idempotency_key: str) -> Dict:
         return {
@@ -37,9 +62,10 @@ class PaperExchangeEngine:
         outbox_dispatcher.publish_pending(limit=20)
 
     def get_wallet_balance(self, exchange: str) -> float:
-        cursor = self._conn.cursor()
-        cursor.execute("SELECT balance FROM paper_wallets WHERE exchange = ?", (exchange.lower(),))
-        row = cursor.fetchone()
+        row = self._fetch_one(
+            "SELECT balance FROM paper_wallets WHERE exchange = ?",
+            (exchange.lower(),),
+        )
         return row["balance"] if row else 0.0
 
     def update_wallet_balance(self, exchange: str, delta: float):
@@ -48,9 +74,14 @@ class PaperExchangeEngine:
         return result
 
     def get_open_positions(self) -> List[Dict]:
-        cursor = self._conn.cursor()
-        cursor.execute("SELECT * FROM paper_positions WHERE is_open = 1")
-        return [dict(row) for row in cursor.fetchall()]
+        return self._fetch_all("SELECT * FROM paper_positions WHERE is_open = 1")
+
+    def get_open_position(self, position_id: str) -> Dict | None:
+        row = self._fetch_one(
+            "SELECT * FROM paper_positions WHERE is_open = 1 AND position_id = ?",
+            (position_id,),
+        )
+        return dict(row) if row else None
 
     def simulate_execution(
         self,
@@ -89,9 +120,7 @@ class PaperExchangeEngine:
         return result
 
     def check_liquidations(self, current_prices: dict):
-        cursor = self._conn.cursor()
-        cursor.execute("SELECT * FROM paper_positions WHERE is_open = 1")
-        for pos in cursor.fetchall():
+        for pos in self.get_open_positions():
             symbol = pos["symbol"]
             price = current_prices.get(symbol)
             if not price:
@@ -128,11 +157,10 @@ class PaperExchangeEngine:
                 logger.error(f"Liquidation persistence failed for {pos['position_id']}: {res.get('error')}")
 
     def check_tp_sl(self, current_prices: dict):
-        cursor = self._conn.cursor()
-        cursor.execute(
+        positions = self._fetch_all(
             "SELECT * FROM paper_positions WHERE is_open = 1 AND (tp_price > 0 OR sl_price > 0)"
         )
-        for pos in cursor.fetchall():
+        for pos in positions:
             symbol = pos["symbol"]
             price = current_prices.get(symbol)
             if not price:
@@ -266,9 +294,7 @@ class PaperExchangeEngine:
         return {"success": True, "pnl": res["pnl"], "returned": res["returned"]}
 
     def update_sl_to_breakeven(self, pos_id: str):
-        cursor = self._conn.cursor()
-        cursor.execute("SELECT * FROM paper_positions WHERE is_open = 1 AND position_id = ?", (pos_id,))
-        pos = cursor.fetchone()
+        pos = self.get_open_position(pos_id)
         if not pos:
             return {"success": False, "error": "Position not found"}
 

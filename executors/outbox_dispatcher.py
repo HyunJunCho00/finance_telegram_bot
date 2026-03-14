@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from typing import Dict, List
 
 from loguru import logger
@@ -13,6 +14,31 @@ from executors.execution_repository import execution_repository
 
 
 class OutboxDispatcher:
+    @staticmethod
+    def _run_async(async_fn, *args, **kwargs):
+        """Run async Telegram SDK calls from both sync and async caller contexts."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(async_fn(*args, **kwargs))
+
+        result: Dict[str, object] = {}
+        error: Dict[str, BaseException] = {}
+
+        def _runner():
+            try:
+                result["value"] = asyncio.run(async_fn(*args, **kwargs))
+            except BaseException as exc:
+                error["exc"] = exc
+
+        worker = threading.Thread(target=_runner, name="outbox-async-runner", daemon=True)
+        worker.start()
+        worker.join()
+
+        if "exc" in error:
+            raise error["exc"]
+        return result.get("value")
+
     def publish_pending(self, limit: int = 50, stale_after_seconds: int = 300) -> Dict:
         rows = execution_repository.claim_pending_outbox_events(limit=limit, stale_after_seconds=stale_after_seconds)
         published = 0
@@ -71,7 +97,7 @@ class OutboxDispatcher:
         )
         parse_mode = payload.get("parse_mode")
         bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
-        asyncio.run(bot.send_message(chat_id=chat_id, text=text, parse_mode=parse_mode))
+        self._run_async(bot.send_message, chat_id=chat_id, text=text, parse_mode=parse_mode)
 
     def _send_telegram_payload(self, payload: Dict) -> None:
         from executors.report_generator import report_generator
@@ -82,7 +108,7 @@ class OutboxDispatcher:
             raise ValueError("telegram_payload missing payload or chat_id")
 
         bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
-        asyncio.run(report_generator._send_payload(bot, str(chat_id), message_payload))
+        self._run_async(report_generator._send_payload, bot, str(chat_id), message_payload)
 
 
 outbox_dispatcher = OutboxDispatcher()
