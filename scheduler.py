@@ -1130,19 +1130,24 @@ def job_routine_market_status():
             except Exception as e:
                 logger.warning(f"Routine news reference enqueue failed: {e}")
 
-        # Message 2: Market Status Summary (Indicators)
-        market_header = "<b>📊 주요 시장 지표 업데이트</b>"
-        try:
-            summary = market_monitor_agent.summarize_current_status(indicators)
-            logger.success(f"Market Summary Generated:\n{summary}")
-            execution_repository.enqueue_outbox_event(
-                "telegram_message",
-                {"chat_id": target_chat_id, "text": f"{market_header}\n\n{summary}", "parse_mode": "HTML"},
-                idempotency_key=f"telegram:routine_market_summary:{_hour_bucket}:"
-                + hashlib.sha256(f"{market_header}\n\n{summary}".encode("utf-8")).hexdigest()[:16],
-            )
-        except Exception as e:
-            logger.warning(f"Routine market status enqueue failed: {e}")
+        # Message 2: Market Status Summary — 심볼별로 분리 발송 (4096자 초과 방지)
+        for symbol in settings.trading_symbols:
+            symbol_indicators = {
+                symbol: indicators.get(symbol, {}),
+                "TELEGRAM_INTEL": indicators.get("TELEGRAM_INTEL"),
+            }
+            market_header = f"<b>📊 {symbol} 시장 지표 업데이트</b>"
+            try:
+                summary = market_monitor_agent.summarize_current_status(symbol_indicators)
+                logger.success(f"Market Summary Generated [{symbol}]:\n{summary}")
+                execution_repository.enqueue_outbox_event(
+                    "telegram_message",
+                    {"chat_id": target_chat_id, "text": f"{market_header}\n\n{summary}", "parse_mode": "HTML"},
+                    idempotency_key=f"telegram:routine_market_summary:{symbol}:{_hour_bucket}:"
+                    + hashlib.sha256(f"{market_header}\n\n{summary}".encode("utf-8")).hexdigest()[:16],
+                )
+            except Exception as e:
+                logger.warning(f"Routine market status enqueue failed [{symbol}]: {e}")
 
     except Exception as e:
         logger.error(f"Routine market status job error: {e}")
