@@ -190,10 +190,10 @@ class DatabaseClient:
             ).execute()
             if response.data:
                 msg = data.get("text", "")[:30].replace("\n", " ")
-                logger.info(f"??DB: Saved [{data.get('channel')}] ID:{data.get('message_id')} | {msg}...")
+                logger.info(f"DB: Saved [{data.get('channel')}] ID:{data.get('message_id')} | {msg}...")
             return response
         except Exception as e:
-            logger.error(f"??DB: Failed to upsert telegram message: {e}")
+            logger.error(f"DB: Failed to upsert telegram message: {e}")
             raise
 
     def insert_telegram_message(self, data: Dict) -> Dict:
@@ -883,7 +883,7 @@ class DatabaseClient:
             except Exception:
                 results['deribit_deleted'] = 0
 
-            # Fear & Greed data (keep 90 days ??same as reports)
+            # Fear & Greed data (keep 90 days same as reports)
             cutoff_fg = (datetime.now(timezone.utc) - timedelta(
                 days=settings.RETENTION_REPORTS_DAYS
             )).isoformat()
