@@ -1132,22 +1132,29 @@ def job_routine_market_status():
 
         # Message 2: Market Status Summary (Indicators)
         market_header = "<b>📊 주요 시장 지표 업데이트</b>"
-        summary = market_monitor_agent.summarize_current_status(indicators)
-        logger.success(f"Market Summary Generated:\n{summary}")
         try:
+            summary = market_monitor_agent.summarize_current_status(indicators)
+            logger.success(f"Market Summary Generated:\n{summary}")
             execution_repository.enqueue_outbox_event(
                 "telegram_message",
                 {"chat_id": target_chat_id, "text": f"{market_header}\n\n{summary}", "parse_mode": "HTML"},
                 idempotency_key=f"telegram:routine_market_summary:{_hour_bucket}:"
                 + hashlib.sha256(f"{market_header}\n\n{summary}".encode("utf-8")).hexdigest()[:16],
             )
-            outbox_dispatcher.publish_pending(limit=20)
         except Exception as e:
             logger.warning(f"Routine market status enqueue failed: {e}")
 
-
     except Exception as e:
         logger.error(f"Routine market status job error: {e}")
+    finally:
+        # 큐에 쌓인 메시지는 중간 실패와 무관하게 항상 발송 시도
+        try:
+            from executors.outbox_dispatcher import outbox_dispatcher as _dispatcher
+            result = _dispatcher.publish_pending(limit=20)
+            if result.get("published", 0) or result.get("failed", 0):
+                logger.info(f"Outbox flush: published={result.get('published', 0)} failed={result.get('failed', 0)}")
+        except Exception as e:
+            logger.warning(f"Outbox flush (finally) failed: {e}")
 
 
 def job_hourly_swing_charts():
@@ -1259,6 +1266,17 @@ def job_1hour_crypto_news():
         news_collector.fetch_and_ingest()
     except Exception as e:
         logger.error(f"1-hour Crypto News API job error: {e}")
+
+
+def job_outbox_drain():
+    """Safety-net: drain any queued outbox messages that weren't published by their originating job."""
+    try:
+        from executors.outbox_dispatcher import outbox_dispatcher as _dispatcher
+        result = _dispatcher.publish_pending(limit=50)
+        if result.get("published", 0) or result.get("failed", 0):
+            logger.info(f"Outbox drain: published={result.get('published', 0)} failed={result.get('failed', 0)}")
+    except Exception as e:
+        logger.error(f"Outbox drain job error: {e}")
 
 
 def job_pressure_signal_evaluation():
@@ -1529,6 +1547,15 @@ def main():
         CronTrigger(minute=10),
         id='job_1hour_crypto_news',
         max_instances=1
+    )
+
+    # Outbox safety-net drain: 발송 실패한 큐 메시지를 5분마다 재시도
+    scheduler_config.scheduler.add_job(
+        job_outbox_drain,
+        'interval',
+        minutes=5,
+        id='job_outbox_drain',
+        max_instances=1,
     )
 
     # Realtime pressure signal evaluation -> write 5m/15m/30m outcomes into market_status_events JSONB
