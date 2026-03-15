@@ -31,6 +31,7 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 from io import BytesIO
 import base64
+import gc
 from PIL import Image, ImageDraw, ImageFont
 from typing import Dict, List, Optional, Tuple
 from config.settings import get_settings, TradingMode
@@ -362,7 +363,14 @@ class ChartGenerator:
             buf = BytesIO()
             canvas.convert('RGB').save(buf, format='PNG')
             buf.seek(0)
-            return buf.getvalue()
+            result = buf.getvalue()
+            # [OOM FIX] PIL 이미지 명시적 해제
+            for img in pil_images:
+                img.close()
+            canvas.close()
+            del pil_images, canvas
+            gc.collect()
+            return result
         except Exception as e:
             logger.error(f"Lane chart stack error: {e}")
             return None
@@ -825,15 +833,31 @@ class ChartGenerator:
 
             # Save with high-quality settings
             buf = BytesIO()
-            fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight', 
+            fig.savefig(buf, format='png', dpi=self.dpi, bbox_inches='tight',
                         facecolor='white', edgecolor='#CCCCCC')
-            plt.close(fig)
             buf.seek(0)
             return buf.getvalue()
 
         except Exception as e:
             logger.error(f"Chart error for {symbol} ({config['title_suffix']}): {e}")
             return None
+
+        finally:
+            # [OOM FIX] 예외 여부와 관계없이 matplotlib figure 반드시 해제
+            try:
+                plt.close(fig)
+            except Exception:
+                pass
+            try:
+                plt.close('all')
+            except Exception:
+                pass
+            # 로컬 대형 DataFrame 참조 명시적 해제
+            try:
+                del full_resampled, chart_df, tmp
+            except Exception:
+                pass
+            gc.collect()
 
     # ---------------- Overlay Drawing Methods ----------------
 

@@ -304,7 +304,7 @@ class Settings(BaseSettings):
     # POSITION: 10080 (7 days) for 4h + needs 1d/1w from GCS
     # SWING: 10000 (approx 1 year of 1h)
     # POSITION: 60000 (approx 6-7 years of 1h)
-    SWING_CANDLE_LIMIT: int = 10000 
+    SWING_CANDLE_LIMIT: int = 10000
     POSITION_CANDLE_LIMIT: int = 60000
 
     # ===== Historical Window per Mode (for chart/context loading from GCS) =====

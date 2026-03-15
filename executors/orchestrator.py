@@ -51,6 +51,7 @@ from executors.data_synthesizer import synthesize_training_data
 from executors.stats_thresholds import adaptive_std_floor, symbol_liq_min_std_usd
 from utils.cooldown import is_on_cooldown, set_cooldown
 from loguru import logger
+import gc
 import numpy as np
 import pandas as pd
 import json
@@ -308,6 +309,13 @@ def node_collect_data(state: AnalysisState) -> dict:
 
     market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
     compact = math_engine.format_compact(market_data)
+
+    # [OOM FIX] GCS historical DataFrames 분석 완료 후 즉시 해제 (수백MB)
+    try:
+        del df_4h, df_1d, df_1w
+        gc.collect()
+    except Exception:
+        pass
 
     # [FIX RESOURCE-1] Cache market_data so node_generate_chart doesn't recompute
     _market_data_cache[cache_key] = market_data
@@ -1037,14 +1045,21 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
     vlm_context_text = state.get("vlm_context_text", "")
 
     result = vlm_geometric_agent.analyze(
-        chart, 
+        chart,
         mode=state.get("mode", "SWING").upper(),
         symbol=symbol,
         current_price=current_price,
         primary_timeframe=primary_tf,
         higher_timeframe_context=vlm_context_text,
     )
-    return {"blackboard": {"vlm_geometry": result}}
+    # [OOM FIX] VLM 분석 완료 후 이미지 데이터를 State에서 즉시 해제
+    # chart_image_b64(~1-2MB b64)와 chart_bytes(~500KB-2MB PNG)가 judge→risk→report까지
+    # LangGraph State에 불필요하게 잔류하는 것을 방지
+    return {
+        "blackboard": {"vlm_geometry": result},
+        "chart_image_b64": None,
+        "chart_bytes": None,
+    }
 
 
 
@@ -1169,6 +1184,13 @@ def node_generate_chart(state: AnalysisState) -> dict:
     except Exception as e:
         logger.error(f'Chart generation FAILED: {e}')
         chart_bytes = None
+
+    # [OOM FIX] chart 생성 직후 GCS historical DataFrames 즉시 해제 (수백MB)
+    try:
+        del df_4h, df_1d, df_1w
+        gc.collect()
+    except Exception:
+        pass
 
     if not chart_bytes:
         logger.warning(f"Chart generation FAILED for {symbol} ({mode.value})")
