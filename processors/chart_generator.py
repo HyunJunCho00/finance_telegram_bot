@@ -125,7 +125,7 @@ class ChartGenerator:
         if mode == TradingMode.POSITION:
             config = {
                 'resample_rule': '1D',
-                'tail_candles': 1825,   # ~60 months
+                'tail_candles': 1600,   # ~4.5 years (2021 ATH ~ 2026-03)
                 'min_candles': 20,
                 'title_suffix': '1D POSITION',
                 'fib_tf': '1w',          # Macro Fibonacci retracements (Weekly)
@@ -136,7 +136,7 @@ class ChartGenerator:
         else:  # SWING (default)
             config = {
                 'resample_rule': '4h',
-                'tail_candles': 2190,   # ~12 months (6 candles/day * 365)
+                'tail_candles': 600,    # ~3.5 months (Q4 2025 ~ 2026-03)
                 'min_candles': 30,
                 'title_suffix': '4H SWING',
                 'fib_tf': '1d',          # Fib based on Daily trend for reliable pullbacks

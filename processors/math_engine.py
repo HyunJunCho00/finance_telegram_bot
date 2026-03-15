@@ -398,11 +398,13 @@ class MathEngine:
 
     # ------------------- Fibonacci Levels -------------------
 
-    def calculate_fibonacci_levels(self, df: pd.DataFrame) -> Optional[Dict]:
+    def calculate_fibonacci_levels(self, df: pd.DataFrame, lookback: int = 180) -> Optional[Dict]:
         """Fibonacci retracement levels from recent swing high/low.
-        Pro traders use OTE entry zones: 50%, 61.8%, 70.5%, 78.6%."""
+        Pro traders use OTE entry zones: 50%, 61.8%, 70.5%, 78.6%.
+        lookback: SWING 4h=120, SWING 1d=180, POSITION 1d=360, POSITION 1w=180
+        """
         try:
-            working_df = df.tail(min(len(df), 180)).reset_index(drop=True)
+            working_df = df.tail(min(len(df), lookback)).reset_index(drop=True)
             local_min_idx, local_max_idx = self.find_pivot_points(working_df, order=max(3, len(working_df) // 18))
             if len(local_min_idx) == 0 or len(local_max_idx) == 0:
                 return None
@@ -1738,7 +1740,7 @@ class MathEngine:
         # Fibonacci on 4h and 1d
         tf_4h = timeframes.get('4h', pd.DataFrame())
         if len(tf_4h) >= 20:
-            result['fibonacci']['4h'] = self.calculate_fibonacci_levels(tf_4h)
+            result['fibonacci']['4h'] = self.calculate_fibonacci_levels(tf_4h, lookback=120)
 
         if len(tf_1d) >= 10:
             result['fibonacci']['1d'] = self.calculate_fibonacci_levels(tf_1d)
@@ -1846,7 +1848,7 @@ class MathEngine:
 
         # Fibonacci on 1d and 1w
         if len(tf_1d) >= 10:
-            result['fibonacci']['1d'] = self.calculate_fibonacci_levels(tf_1d)
+            result['fibonacci']['1d'] = self.calculate_fibonacci_levels(tf_1d, lookback=360)
         if len(tf_1w) >= 10:
             result['fibonacci']['1w'] = self.calculate_fibonacci_levels(tf_1w)
 
