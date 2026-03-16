@@ -101,10 +101,12 @@ class OutboxDispatcher:
             self._run_async(bot.send_message, chat_id=chat_id, text=text, parse_mode=parse_mode)
         except Exception as e:
             # Telegram HTML parser rejects chars like <= in AI-generated text.
-            # Retry as plain text so the message is never silently dropped.
+            # Retry with a fresh Bot instance (asyncio.run closes the event loop after
+            # each call, so reusing the same Bot object causes 'Event loop is closed').
             if parse_mode and ("parse" in str(e).lower() or "entities" in str(e).lower() or "tag" in str(e).lower()):
                 logger.warning(f"Telegram HTML parse error, retrying as plain text: {e}")
-                self._run_async(bot.send_message, chat_id=chat_id, text=text, parse_mode=None)
+                retry_bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
+                self._run_async(retry_bot.send_message, chat_id=chat_id, text=text, parse_mode=None)
             else:
                 raise
 
