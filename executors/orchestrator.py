@@ -1928,12 +1928,15 @@ def build_analysis_graph():
 #  Orchestrator class (maintains backward compatibility) 
 
 class Orchestrator:
+    _MAX_DAILY_PRECISION_SECONDS = 7200  # 2시간 초과 시 자동 해제
+
     def __init__(self):
         self.symbols = settings.trading_symbols
         self._graph = None
         self._analysis_locks: Dict[str, threading.Lock] = {}
         self._daily_precision_active_count = 0
         self._daily_precision_state_lock = threading.Lock()
+        self._daily_precision_started_at: Optional[datetime] = None
         ensure_registered()
 
     @property
@@ -1953,15 +1956,31 @@ class Orchestrator:
 
     def is_daily_precision_running(self) -> bool:
         with self._daily_precision_state_lock:
-            return self._daily_precision_active_count > 0
+            if self._daily_precision_active_count <= 0:
+                return False
+            # 2시간 초과 시 stuck 간주하고 강제 해제
+            if self._daily_precision_started_at is not None:
+                elapsed = (datetime.now(timezone.utc) - self._daily_precision_started_at).total_seconds()
+                if elapsed > self._MAX_DAILY_PRECISION_SECONDS:
+                    logger.warning(
+                        f"Daily precision stuck detected ({elapsed:.0f}s elapsed). Force-resetting count."
+                    )
+                    self._daily_precision_active_count = 0
+                    self._daily_precision_started_at = None
+                    return False
+            return True
 
     def _enter_daily_precision_run(self) -> None:
         with self._daily_precision_state_lock:
             self._daily_precision_active_count += 1
+            if self._daily_precision_started_at is None:
+                self._daily_precision_started_at = datetime.now(timezone.utc)
 
     def _exit_daily_precision_run(self) -> None:
         with self._daily_precision_state_lock:
             self._daily_precision_active_count = max(0, self._daily_precision_active_count - 1)
+            if self._daily_precision_active_count == 0:
+                self._daily_precision_started_at = None
 
     @staticmethod
     def _daily_precision_summary_key() -> str:

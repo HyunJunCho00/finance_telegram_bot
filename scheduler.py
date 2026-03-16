@@ -856,6 +856,8 @@ def job_routine_market_status():
                 
         # News Intel (Last 1 hour): Telegram + external crypto news synthesized by LLM
         telegram_intel = "최근 1시간 내 주요 뉴스 없음"
+        _news_synthesis_timeout_s = 90  # hard cap: skip news if AI calls hang
+        final_payload: dict = {}  # populated by synthesis thread when successful
         try:
             from agents.ai_router import ai_client
             import time as _time
@@ -896,192 +898,215 @@ def job_routine_market_status():
                 logger.info(
                     f"Routine news synthesis inputs: telegram={len(tg_items)} external={len(ext_items)}"
                 )
-                payload = {
-                    "telegram_messages": tg_items,
-                    "external_news": ext_items,
-                    "utc_now": datetime.now(timezone.utc).isoformat(),
-                }
-                cluster_prompt = (
-                    "Select high-impact crypto news from the input and merge duplicates.\n"
-                    "Return STRICT JSON only with this schema:\n"
-                    "{\n"
-                    "  \"selected\": [\n"
-                    "    {\n"
-                    "      \"headline\": \"short title\",\n"
-                    "      \"claim\": \"single factual claim\",\n"
-                    "      \"sources\": [\"[source - url_or_telegram]\"],\n"
-                    "      \"impact\": 1-5,\n"
-                    "      \"why\": \"one short reason\"\n"
-                    "    }\n"
-                    "  ]\n"
-                    "}\n"
-                    "Rules:\n"
-                    "- Keep at most 6 items.\n"
-                    "- Merge duplicate events and union their sources.\n"
-                    "- Use only provided evidence. No fabrication."
-                )
-                cluster_raw = ai_client.generate_response(
-                    system_prompt="You are a strict JSON market-news selector.",
-                    user_message=f"{cluster_prompt}\n\nINPUT_JSON:\n{json.dumps(payload, ensure_ascii=False)}",
-                    temperature=0.1,
-                    max_tokens=1300,
-                    role="news_cluster",
-                ) or ""
 
-                def _extract_json_object(raw: str) -> dict:
-                    if not raw:
+                # ── AI synthesis in a thread with hard timeout so a hung provider
+                #    doesn't block market summary delivery ──────────────────────
+                _synthesis_result: dict = {"intel": None, "payload": None}
+
+                def _run_news_synthesis() -> None:
+                    def _extract_json_object(raw: str) -> dict:
+                        if not raw:
+                            return {}
+                        raw = raw.strip()
+                        try:
+                            obj = json.loads(raw)
+                            return obj if isinstance(obj, dict) else {}
+                        except Exception:
+                            pass
+                        start = raw.find("{")
+                        if start < 0:
+                            return {}
+                        depth = 0
+                        in_string = False
+                        escape = False
+                        for i in range(start, len(raw)):
+                            ch = raw[i]
+                            if escape:
+                                escape = False
+                                continue
+                            if ch == "\\":
+                                escape = True
+                                continue
+                            if ch == '"':
+                                in_string = not in_string
+                                continue
+                            if in_string:
+                                continue
+                            if ch == "{":
+                                depth += 1
+                            elif ch == "}":
+                                depth -= 1
+                                if depth == 0:
+                                    block = raw[start:i + 1]
+                                    try:
+                                        obj = json.loads(block)
+                                        return obj if isinstance(obj, dict) else {}
+                                    except Exception:
+                                        return {}
                         return {}
-                    raw = raw.strip()
-                    try:
-                        obj = json.loads(raw)
-                        return obj if isinstance(obj, dict) else {}
-                    except Exception:
-                        pass
-                    start = raw.find("{")
-                    if start < 0:
-                        return {}
-                    depth = 0
-                    in_string = False
-                    escape = False
-                    for i in range(start, len(raw)):
-                        ch = raw[i]
-                        if escape:
-                            escape = False
-                            continue
-                        if ch == "\\":
-                            escape = True
-                            continue
-                        if ch == '"':
-                            in_string = not in_string
-                            continue
-                        if in_string:
-                            continue
-                        if ch == "{":
-                            depth += 1
-                        elif ch == "}":
-                            depth -= 1
-                            if depth == 0:
-                                block = raw[start:i + 1]
-                                try:
-                                    obj = json.loads(block)
-                                    return obj if isinstance(obj, dict) else {}
-                                except Exception:
-                                    return {}
-                    return {}
 
-                cluster_obj = _extract_json_object(cluster_raw)
-                selected_items = cluster_obj.get("selected", []) if isinstance(cluster_obj, dict) else []
-                if not isinstance(selected_items, list):
-                    selected_items = []
-                if not selected_items:
-                    selected_items = (ext_items[:4] + tg_items[:2])[:6]
-
-                normalized_items = []
-                for item in selected_items[:6]:
-                    if not isinstance(item, dict):
-                        continue
-                    headline = str(
-                        item.get("headline")
-                        or item.get("title")
-                        or item.get("source")
-                        or "Untitled"
-                    ).strip()
-                    claim = str(
-                        item.get("claim")
-                        or item.get("description")
-                        or item.get("text")
-                        or headline
-                    ).strip()
-                    why = str(item.get("why") or "").strip()
-                    impact = item.get("impact", 3)
-                    try:
-                        impact = int(impact)
-                    except Exception:
-                        impact = 3
-
-                    sources = item.get("sources", [])
-                    if not isinstance(sources, list) or not sources:
-                        source_name = str(item.get("source", "unknown")).strip() or "unknown"
-                        source_ref = "telegram"
-                        if item.get("url"):
-                            source_ref = str(item.get("url", "")).strip()
-                        sources = [f"[{source_name} - {source_ref}]"]
-                    else:
-                        sources = [str(src).strip() for src in sources if str(src).strip()]
-
-                    normalized_items.append({
-                        "headline": headline,
-                        "claim": claim,
-                        "impact": max(1, min(5, impact)),
-                        "why": why,
-                        "sources": sources[:4],
-                    })
-
-                if not normalized_items:
-                    normalized_items = [{
-                        "headline": "최근 1시간 주요 뉴스 없음",
-                        "claim": "유의미한 신규 이벤트 확인되 않았습니다.",
-                        "impact": 1,
-                        "why": "",
-                        "sources": [],
-                    }]
-
-                _time.sleep(1.2)  # avoid burst-call spikes between stage 1 and stage 2
-
-                final_payload = {
-                    "selected_news": normalized_items[:6],
-                    "utc_now": datetime.now(timezone.utc).isoformat(),
-                }
-                final_prompt = (
-                    "Write a concise Korean market briefing based ONLY on selected_news.\n"
-                    "Output plain text only, under 220 words.\n"
-                    "Summarize the top 6 items as short numbered lines.\n"
-                    "Do NOT include raw URLs or long source tags in the summary body.\n"
-                    "Keep each line focused on event + likely market implication.\n"
-                    "If signals conflict, mention the conflict clearly.\n"
-                    "The final sentence MUST end with a full stop."
-                )
-                telegram_intel = ai_client.generate_response(
-                    system_prompt="You are a crypto market briefing writer. No markdown fences.",
-                    user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(final_payload, ensure_ascii=False)}",
-                    temperature=0.2,
-                    max_tokens=900,
-                    role="news_brief_final",
-                ) or ""
-
-                bad_ending = ("에서", "및", "또는", "-", ":", "(", "[", "{", "/", ",")
-                if not telegram_intel.strip() or telegram_intel.strip().endswith(bad_ending):
-                    logger.warning("news_brief_final returned empty/partial text, retrying once.")
-                    _time.sleep(1.0)
-                    telegram_intel = ai_client.generate_response(
-                        system_prompt="You are a crypto market briefing writer. No markdown fences.",
-                        user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(final_payload, ensure_ascii=False)}",
+                    _payload = {
+                        "telegram_messages": tg_items,
+                        "external_news": ext_items,
+                        "utc_now": datetime.now(timezone.utc).isoformat(),
+                    }
+                    cluster_prompt = (
+                        "Select high-impact crypto news from the input and merge duplicates.\n"
+                        "Return STRICT JSON only with this schema:\n"
+                        "{\n"
+                        "  \"selected\": [\n"
+                        "    {\n"
+                        "      \"headline\": \"short title\",\n"
+                        "      \"claim\": \"single factual claim\",\n"
+                        "      \"sources\": [\"[source - url_or_telegram]\"],\n"
+                        "      \"impact\": 1-5,\n"
+                        "      \"why\": \"one short reason\"\n"
+                        "    }\n"
+                        "  ]\n"
+                        "}\n"
+                        "Rules:\n"
+                        "- Keep at most 6 items.\n"
+                        "- Merge duplicate events and union their sources.\n"
+                        "- Use only provided evidence. No fabrication."
+                    )
+                    cluster_raw = ai_client.generate_response(
+                        system_prompt="You are a strict JSON market-news selector.",
+                        user_message=f"{cluster_prompt}\n\nINPUT_JSON:\n{json.dumps(_payload, ensure_ascii=False)}",
                         temperature=0.1,
+                        max_tokens=1300,
+                        role="news_cluster",
+                    ) or ""
+
+                    cluster_obj = _extract_json_object(cluster_raw)
+                    selected_items = cluster_obj.get("selected", []) if isinstance(cluster_obj, dict) else []
+                    if not isinstance(selected_items, list):
+                        selected_items = []
+                    if not selected_items:
+                        selected_items = (ext_items[:4] + tg_items[:2])[:6]
+
+                    normalized_items = []
+                    for item in selected_items[:6]:
+                        if not isinstance(item, dict):
+                            continue
+                        headline = str(
+                            item.get("headline")
+                            or item.get("title")
+                            or item.get("source")
+                            or "Untitled"
+                        ).strip()
+                        claim = str(
+                            item.get("claim")
+                            or item.get("description")
+                            or item.get("text")
+                            or headline
+                        ).strip()
+                        why = str(item.get("why") or "").strip()
+                        impact = item.get("impact", 3)
+                        try:
+                            impact = int(impact)
+                        except Exception:
+                            impact = 3
+                        sources = item.get("sources", [])
+                        if not isinstance(sources, list) or not sources:
+                            source_name = str(item.get("source", "unknown")).strip() or "unknown"
+                            source_ref = "telegram"
+                            if item.get("url"):
+                                source_ref = str(item.get("url", "")).strip()
+                            sources = [f"[{source_name} - {source_ref}]"]
+                        else:
+                            sources = [str(src).strip() for src in sources if str(src).strip()]
+                        normalized_items.append({
+                            "headline": headline,
+                            "claim": claim,
+                            "impact": max(1, min(5, impact)),
+                            "why": why,
+                            "sources": sources[:4],
+                        })
+
+                    if not normalized_items:
+                        normalized_items = [{
+                            "headline": "최근 1시간 주요 뉴스 없음",
+                            "claim": "유의미한 신규 이벤트 확인되 않았습니다.",
+                            "impact": 1,
+                            "why": "",
+                            "sources": [],
+                        }]
+
+                    _time.sleep(1.2)
+
+                    _final_payload = {
+                        "selected_news": normalized_items[:6],
+                        "utc_now": datetime.now(timezone.utc).isoformat(),
+                    }
+                    final_prompt = (
+                        "Write a concise Korean market briefing based ONLY on selected_news.\n"
+                        "Output plain text only, under 220 words.\n"
+                        "Summarize the top 6 items as short numbered lines.\n"
+                        "Do NOT include raw URLs or long source tags in the summary body.\n"
+                        "Keep each line focused on event + likely market implication.\n"
+                        "If signals conflict, mention the conflict clearly.\n"
+                        "The final sentence MUST end with a full stop."
+                    )
+                    _intel = ai_client.generate_response(
+                        system_prompt="You are a crypto market briefing writer. No markdown fences.",
+                        user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}",
+                        temperature=0.2,
                         max_tokens=900,
                         role="news_brief_final",
-                    ) or "최근 1시간 내 주요 뉴스 없음"
-                if _looks_english_dominant(telegram_intel):
-                    logger.warning("news_brief_final returned English-dominant output, rewriting into Korean.")
-                    korean_rewrite_prompt = (
-                        "Rewrite the briefing into natural Korean.\n"
-                        "Output plain text only.\n"
-                        "Keep numbered lines.\n"
-                        "Do not include English lead-in sentences.\n"
-                        "Preserve only factual meaning from the source text."
+                    ) or ""
+
+                    bad_ending = ("에서", "및", "또는", "-", ":", "(", "[", "{", "/", ",")
+                    if not _intel.strip() or _intel.strip().endswith(bad_ending):
+                        logger.warning("news_brief_final returned empty/partial text, retrying once.")
+                        _time.sleep(1.0)
+                        _intel = ai_client.generate_response(
+                            system_prompt="You are a crypto market briefing writer. No markdown fences.",
+                            user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}",
+                            temperature=0.1,
+                            max_tokens=900,
+                            role="news_brief_final",
+                        ) or "최근 1시간 내 주요 뉴스 없음"
+                    if _looks_english_dominant(_intel):
+                        logger.warning("news_brief_final returned English-dominant output, rewriting into Korean.")
+                        korean_rewrite_prompt = (
+                            "Rewrite the briefing into natural Korean.\n"
+                            "Output plain text only.\n"
+                            "Keep numbered lines.\n"
+                            "Do not include English lead-in sentences.\n"
+                            "Preserve only factual meaning from the source text."
+                        )
+                        rewritten = ai_client.generate_response(
+                            system_prompt="You are a Korean crypto market editor. Output Korean only.",
+                            user_message=(
+                                f"{korean_rewrite_prompt}\n\n"
+                                f"SOURCE_TEXT:\n{_intel}\n\n"
+                                f"REFERENCE_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}"
+                            ),
+                            temperature=0.1,
+                            max_tokens=900,
+                            role="news_summarize",
+                        ) or _intel
+                        if rewritten.strip():
+                            _intel = rewritten
+
+                    _synthesis_result["intel"] = _intel
+                    _synthesis_result["payload"] = _final_payload
+
+                import concurrent.futures as _cf_news
+                try:
+                    with _cf_news.ThreadPoolExecutor(max_workers=1) as _news_pool:
+                        _news_fut = _news_pool.submit(_run_news_synthesis)
+                        _news_fut.result(timeout=_news_synthesis_timeout_s)
+                    if _synthesis_result["intel"]:
+                        telegram_intel = _synthesis_result["intel"]
+                        final_payload = _synthesis_result["payload"]
+                except _cf_news.TimeoutError:
+                    logger.warning(
+                        f"News synthesis timed out after {_news_synthesis_timeout_s}s "
+                        "— skipping news briefing, market summary will still be sent"
                     )
-                    rewritten = ai_client.generate_response(
-                        system_prompt="You are a Korean crypto market editor. Output Korean only.",
-                        user_message=(
-                            f"{korean_rewrite_prompt}\n\n"
-                            f"SOURCE_TEXT:\n{telegram_intel}\n\n"
-                            f"REFERENCE_JSON:\n{json.dumps(final_payload, ensure_ascii=False)}"
-                        ),
-                        temperature=0.1,
-                        max_tokens=900,
-                        role="news_summarize",
-                    ) or telegram_intel
-                    if rewritten.strip():
-                        telegram_intel = rewritten
+                except Exception as _se:
+                    logger.warning(f"News synthesis thread error: {_se}")
             else:
                 telegram_intel = "최근 1시간 내 주요 뉴스 없음"
         except Exception as e:
@@ -1137,9 +1162,29 @@ def job_routine_market_status():
                 "TELEGRAM_INTEL": indicators.get("TELEGRAM_INTEL"),
             }
             market_header = f"<b>📊 {symbol} 시장 지표 업데이트</b>"
+            summary = None
             try:
                 summary = market_monitor_agent.summarize_current_status(symbol_indicators)
                 logger.success(f"Market Summary Generated [{symbol}]:\n{summary}")
+            except Exception as e:
+                logger.warning(f"Market summary generation failed [{symbol}]: {e}")
+
+            # AI 실패 시 최소 지표 fallback — 항상 뭔가는 보냄
+            if not summary:
+                ind = indicators.get(symbol, {})
+                price = ind.get("price")
+                funding = ind.get("funding_rate")
+                vol = ind.get("volatility")
+                regime = ind.get("market_regime", "UNKNOWN")
+                summary = (
+                    f"가격: {price:.2f} USDT\n" if isinstance(price, float) else ""
+                ) + (
+                    f"펀딩비: {funding:.4%}\n" if isinstance(funding, float) else ""
+                ) + (
+                    f"변동성(24h): {vol:.2f}%\n" if isinstance(vol, float) else ""
+                ) + f"레짐: {regime}"
+
+            try:
                 execution_repository.enqueue_outbox_event(
                     "telegram_message",
                     {"chat_id": target_chat_id, "text": f"{market_header}\n\n{summary}", "parse_mode": "HTML"},
@@ -1181,7 +1226,7 @@ def job_hourly_swing_charts():
 
         lane_profiles = [
             ("swing", settings.SWING_HISTORY_MONTHS, "SWING", ["4h", "1d"]),
-            ("position", settings.POSITION_HISTORY_MONTHS, "POSITION", ["1w"]),
+            ("position", settings.POSITION_HISTORY_MONTHS, "POSITION", ["1w", "1d"]),
         ]
 
         for symbol in target_symbols:
@@ -1195,10 +1240,17 @@ def job_hourly_swing_charts():
                         )
                         continue
 
+                    all_charts = result.get("charts", []) or []
                     charts = [
-                        chart for chart in (result.get("charts", []) or [])
+                        chart for chart in all_charts
                         if str(chart.get("timeframe", "")).lower() in allowed_timeframes
                     ]
+                    if all_charts and not charts:
+                        generated_tfs = [c.get("timeframe") for c in all_charts]
+                        logger.warning(
+                            f"Hourly {lane} chart for {symbol}: generated {generated_tfs} "
+                            f"but none match allowed {allowed_timeframes} — skipping send"
+                        )
                     total = len(charts)
                     for idx, chart in enumerate(charts, start=1):
                         chart_bytes = base64.b64decode(chart["chart_base64"])
@@ -1369,6 +1421,9 @@ def job_daily_precision():
 
 def job_daily_precision_symbol(symbol: str):
     """Daily UTC single-symbol precision runner."""
+    import concurrent.futures
+    _HARD_TIMEOUT_S = 90 * 60  # 90분 하드 타임아웃
+
     try:
         from config.local_state import state_manager
         normalized_symbol = str(symbol or "").upper()
@@ -1376,8 +1431,22 @@ def job_daily_precision_symbol(symbol: str):
             logger.info(f"Daily precision skipped for {normalized_symbol} (analysis disabled)")
             return
         job_daily_precision_prepare_shared()
-        result = orchestrator.run_daily_playbook_for_symbol(normalized_symbol, TradingMode.POSITION)
-        logger.info(f"Daily precision result for {normalized_symbol}: {result}")
+
+        def _run():
+            return orchestrator.run_daily_playbook_for_symbol(normalized_symbol, TradingMode.POSITION)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_run)
+            try:
+                result = future.result(timeout=_HARD_TIMEOUT_S)
+                logger.info(f"Daily precision result for {normalized_symbol}: {result}")
+            except concurrent.futures.TimeoutError:
+                logger.error(
+                    f"Daily precision TIMEOUT for {normalized_symbol} after {_HARD_TIMEOUT_S // 60}min — "
+                    f"force-resetting precision lock"
+                )
+                # 카운터 강제 해제 (백그라운드 스레드는 계속 실행되지만 잠금은 즉시 해제)
+                orchestrator._exit_daily_precision_run()
     except Exception as e:
         logger.error(f"Daily precision job error for {symbol}: {e}")
 
@@ -1686,12 +1755,30 @@ def main():
         # Reduced to 6h for synthesized catch-up to avoid heavy LLM load on cold start
         telegram_batcher.process_and_ingest(lookback_hours=6)
 
+    def _bootstrap_missing_parquet_cache():
+        """스타트업 시 로컬 캐시에 없는 심볼의 parquet 파일을 GCS에서 다운로드."""
+        try:
+            if not gcs_parquet_store.enabled:
+                logger.info("GCS disabled — parquet cache bootstrap skipped")
+                return
+            for symbol in settings.trading_symbols:
+                for tf, months_back in [("4h", settings.SWING_HISTORY_MONTHS), ("1d", settings.POSITION_HISTORY_MONTHS), ("1w", settings.POSITION_HISTORY_MONTHS)]:
+                    paths = gcs_parquet_store._build_ohlcv_paths(tf, symbol, months_back)
+                    missing = [p for p in paths if not gcs_parquet_store._local_cache_path(p).exists()]
+                    if missing:
+                        logger.info(f"Bootstrapping {len(missing)} missing {tf} parquet files for {symbol}...")
+                        for p in missing:
+                            gcs_parquet_store._download_parquet(p)
+        except Exception as e:
+            logger.warning(f"Parquet cache bootstrap failed (non-fatal): {e}")
+
     _initial_collectors = [
         ("Price + Funding + Microstructure", lambda: (collector.run(), funding_collector.run(), microstructure_collector.run())),
         ("Volatility", lambda: volatility_monitor.run()),
         ("Deribit", lambda: deribit_collector.run()),
         ("Fear & Greed", lambda: fear_greed_collector.run()),
         ("Coin Metrics", lambda: job_daily_coinmetrics()),
+        ("Parquet cache bootstrap", _bootstrap_missing_parquet_cache),
         ("Snapshot prewarm", lambda: job_snapshot_refresh_fast()),
         ("Pressure signal evaluation", lambda: job_pressure_signal_evaluation()),
         ("Telegram catch-up (24h)", _startup_telegram_catchup),

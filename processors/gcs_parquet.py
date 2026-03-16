@@ -232,14 +232,30 @@ class GCSParquetStore:
             query = query.eq(spec.symbol_column, symbol)
         return query.execute()
 
+    def _local_cache_path(self, object_path: str) -> Path:
+        safe_name = object_path.replace("/", "_").replace("\\", "_")
+        return self.cache_dir / safe_name
+
+    def _is_mutable_path(self, object_path: str) -> bool:
+        now_utc = datetime.now(timezone.utc)
+        current_month_dt = now_utc.strftime("%Y-%m")
+        prev_month_dt = (now_utc - timedelta(days=32)).strftime("%Y-%m")
+        return (current_month_dt in object_path) or (prev_month_dt in object_path)
+
+    def _read_local_cache(self, object_path: str) -> Optional[pd.DataFrame]:
+        """로컬 캐시만 읽음 (GCS 미호출). GCS 비활성화 시 fallback용."""
+        try:
+            cache_path = self._local_cache_path(object_path)
+            if cache_path.exists() and not self._is_mutable_path(object_path):
+                return pd.read_parquet(cache_path, engine="pyarrow")
+        except Exception as e:
+            logger.debug(f"Local cache read failed ({object_path}): {e}")
+        return None
+
     def _download_parquet(self, object_path: str) -> Optional[pd.DataFrame]:
         try:
-            now_utc = datetime.now(timezone.utc)
-            current_month_dt = now_utc.strftime("%Y-%m")
-            prev_month_dt = (now_utc - timedelta(days=32)).strftime("%Y-%m")
-            is_mutable = (current_month_dt in object_path) or (prev_month_dt in object_path)
-            safe_name = object_path.replace("/", "_").replace("\\", "_")
-            cache_path = self.cache_dir / safe_name
+            is_mutable = self._is_mutable_path(object_path)
+            cache_path = self._local_cache_path(object_path)
             if cache_path.exists() and not is_mutable:
                 return pd.read_parquet(cache_path, engine="pyarrow")
             blob = self.bucket.blob(object_path)
@@ -478,36 +494,39 @@ class GCSParquetStore:
         logger.info(f"GCS Parquet safe cleanup complete: {summary}")
         return summary
 
-    def load_ohlcv(self, timeframe: str, symbol: str, months_back: int = 3) -> pd.DataFrame:
-        if not self.enabled:
-            return pd.DataFrame()
-        dfs = []
+    def _build_ohlcv_paths(self, timeframe: str, symbol: str, months_back: int) -> list:
+        """타임프레임·기간에 따른 GCS object_path 목록 반환."""
+        paths = []
         now = datetime.now(timezone.utc)
         if timeframe == "1m":
             for day_offset in range(max(1, months_back * 31)):
                 day = (now - timedelta(days=day_offset)).date().isoformat()
-                df = self._download_parquet(f"ohlcv/1m/{symbol}/{day}.parquet")
-                if df is not None:
-                    dfs.append(df)
-            if not dfs:
+                paths.append(f"ohlcv/1m/{symbol}/{day}.parquet")
+            if not paths:
                 for m in range(months_back):
                     month = (now - timedelta(days=30 * m)).strftime("%Y-%m")
-                    df = self._download_parquet(f"ohlcv/1m/{symbol}/{month}.parquet")
-                    if df is not None:
-                        dfs.append(df)
+                    paths.append(f"ohlcv/1m/{symbol}/{month}.parquet")
         elif timeframe in ("1d", "1w"):
             years_back = max(2, (months_back + 11) // 12)
             for year_offset in range(years_back):
                 year = (now - timedelta(days=365 * year_offset)).strftime("%Y")
-                df = self._download_parquet(f"ohlcv/{timeframe}/{symbol}/{year}.parquet")
-                if df is not None:
-                    dfs.append(df)
+                paths.append(f"ohlcv/{timeframe}/{symbol}/{year}.parquet")
         else:
             for m in range(months_back):
                 month = (now - timedelta(days=30 * m)).strftime("%Y-%m")
-                df = self._download_parquet(f"ohlcv/{timeframe}/{symbol}/{month}.parquet")
-                if df is not None:
-                    dfs.append(df)
+                paths.append(f"ohlcv/{timeframe}/{symbol}/{month}.parquet")
+        return paths
+
+    def load_ohlcv(self, timeframe: str, symbol: str, months_back: int = 3) -> pd.DataFrame:
+        paths = self._build_ohlcv_paths(timeframe, symbol, months_back)
+        dfs = []
+        for path in paths:
+            if self.enabled:
+                df = self._download_parquet(path)  # GCS + 로컬 캐시
+            else:
+                df = self._read_local_cache(path)  # 로컬 캐시 only
+            if df is not None:
+                dfs.append(df)
         if not dfs:
             return pd.DataFrame()
         result = pd.concat(dfs, ignore_index=True)
@@ -518,21 +537,23 @@ class GCSParquetStore:
         return result.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
     def load_timeseries(self, prefix: str, symbol: str, months_back: int = 3) -> pd.DataFrame:
-        if not self.enabled:
-            return pd.DataFrame()
         dfs = []
         now = datetime.now(timezone.utc)
+        paths = []
         for day_offset in range(max(1, months_back * 31)):
             day = (now - timedelta(days=day_offset)).date().isoformat()
-            df = self._download_parquet(f"{prefix}/{symbol}/{day}.parquet")
-            if df is not None:
-                dfs.append(df)
-        if not dfs:
+            paths.append(f"{prefix}/{symbol}/{day}.parquet")
+        if not paths:
             for m in range(months_back):
                 month = (now - timedelta(days=30 * m)).strftime("%Y-%m")
-                df = self._download_parquet(f"{prefix}/{symbol}/{month}.parquet")
-                if df is not None:
-                    dfs.append(df)
+                paths.append(f"{prefix}/{symbol}/{month}.parquet")
+        for path in paths:
+            if self.enabled:
+                df = self._download_parquet(path)
+            else:
+                df = self._read_local_cache(path)
+            if df is not None:
+                dfs.append(df)
         if not dfs:
             return pd.DataFrame()
         result = pd.concat(dfs, ignore_index=True, copy=False)
