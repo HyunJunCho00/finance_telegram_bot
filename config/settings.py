@@ -183,11 +183,11 @@ class Settings(BaseSettings):
 
     # 6. RAG extraction (Groq) + News summarize (Cerebras lightweight)
     MODEL_RAG_EXTRACTION: str = "qwen/qwen3-32b"
-    MODEL_NEWS_SUMMARIZE: str = "llama3.1-8b"
+    MODEL_NEWS_SUMMARIZE: str = "llama-3.1-8b-instant"
     MODEL_NEWS_CLUSTER: str = "qwen/qwen3-32b"
     MODEL_NEWS_FINAL: str = "openai/gpt-oss-120b"
     MODEL_NEWS_FINAL_FALLBACK: str = "qwen/qwen3-32b"
-    MODEL_TRIGGER_VETO: str = "llama3.1-8b"
+    MODEL_TRIGGER_VETO: str = "llama-3.1-8b-instant"
 
     # 7. monitor_hourly OpenRouter (free)
     MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
