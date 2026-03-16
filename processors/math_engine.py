@@ -538,31 +538,39 @@ class MathEngine:
                 r['sma50_above_sma200'] = r['sma_50'] > r['sma_200']
 
             # MACD
-            macd_df = ta.macd(close, fast=12, slow=26, signal=9)
-            if macd_df is not None and not macd_df.empty:
-                cols = macd_df.columns.tolist()
-                r['macd_line'] = self._safe_val(macd_df[cols[0]])
-                r['macd_signal'] = self._safe_val(macd_df[cols[1]])
-                r['macd_histogram'] = self._safe_val(macd_df[cols[2]])
-                # Histogram direction change
-                if len(macd_df) > 1:
-                    r['macd_hist_prev'] = self._safe_val(macd_df[cols[2]], -2)
+            try:
+                macd_df = ta.macd(close, fast=12, slow=26, signal=9)
+                if macd_df is not None and not macd_df.empty:
+                    cols = macd_df.columns.tolist()
+                    r['macd_line'] = self._safe_val(macd_df[cols[0]])
+                    r['macd_signal'] = self._safe_val(macd_df[cols[1]])
+                    r['macd_histogram'] = self._safe_val(macd_df[cols[2]])
+                    if len(macd_df) > 1:
+                        r['macd_hist_prev'] = self._safe_val(macd_df[cols[2]], -2)
+            except Exception as e:
+                logger.warning(f"MACD calculation error: {e}")
 
             # ADX
-            adx_df = ta.adx(high, low, close, length=14)
-            if adx_df is not None and not adx_df.empty:
-                cols = adx_df.columns.tolist()
-                r['adx'] = self._safe_val(adx_df[cols[0]])
-                r['di_plus'] = self._safe_val(adx_df[cols[1]])
-                r['di_minus'] = self._safe_val(adx_df[cols[2]])
+            try:
+                adx_df = ta.adx(high, low, close, length=14)
+                if adx_df is not None and not adx_df.empty:
+                    cols = adx_df.columns.tolist()
+                    r['adx'] = self._safe_val(adx_df[cols[0]])
+                    r['di_plus'] = self._safe_val(adx_df[cols[1]])
+                    r['di_minus'] = self._safe_val(adx_df[cols[2]])
+            except Exception as e:
+                logger.warning(f"ADX calculation error: {e}")
 
             # Supertrend
-            st_df = ta.supertrend(high, low, close, length=10, multiplier=3.0)
-            if st_df is not None and not st_df.empty:
-                cols = st_df.columns.tolist()
-                r['supertrend_value'] = self._safe_val(st_df[cols[0]])
-                st_dir = st_df[cols[1]].iloc[-1]
-                r['supertrend_direction'] = int(st_dir) if not pd.isna(st_dir) else None
+            try:
+                st_df = ta.supertrend(high, low, close, length=10, multiplier=3.0)
+                if st_df is not None and not st_df.empty:
+                    cols = st_df.columns.tolist()
+                    r['supertrend_value'] = self._safe_val(st_df[cols[0]])
+                    st_dir = st_df[cols[1]].iloc[-1]
+                    r['supertrend_direction'] = int(st_dir) if not pd.isna(st_dir) else None
+            except Exception as e:
+                logger.warning(f"Supertrend calculation error: {e}")
 
             # Ichimoku
             try:
@@ -580,14 +588,20 @@ class MathEngine:
                 pass
 
             # RSI
-            r['rsi'] = self._safe_val(ta.rsi(close, length=14))
+            try:
+                r['rsi'] = self._safe_val(ta.rsi(close, length=14))
+            except Exception as e:
+                logger.warning(f"RSI calculation error: {e}")
 
             # Stochastic RSI
-            stoch = ta.stochrsi(close, length=14, rsi_length=14, k=3, d=3)
-            if stoch is not None and not stoch.empty:
-                cols = stoch.columns.tolist()
-                r['stoch_rsi_k'] = self._safe_val(stoch[cols[0]])
-                r['stoch_rsi_d'] = self._safe_val(stoch[cols[1]])
+            try:
+                stoch = ta.stochrsi(close, length=14, rsi_length=14, k=3, d=3)
+                if stoch is not None and not stoch.empty:
+                    cols = stoch.columns.tolist()
+                    r['stoch_rsi_k'] = self._safe_val(stoch[cols[0]])
+                    r['stoch_rsi_d'] = self._safe_val(stoch[cols[1]])
+            except Exception as e:
+                logger.warning(f"StochRSI calculation error: {e}")
 
             # In processors/math_engine.py
             import warnings
@@ -605,17 +619,23 @@ class MathEngine:
                 logger.warning(f"Error calculating willr/cci/mfi: {e}")
 
             # Bollinger Bands
-            bb = ta.bbands(close, length=20, std=2.0)
-            if bb is not None and not bb.empty:
-                cols = bb.columns.tolist()
-                r['bb_lower'] = self._safe_val(bb[cols[0]])
-                r['bb_mid'] = self._safe_val(bb[cols[1]])
-                r['bb_upper'] = self._safe_val(bb[cols[2]])
-                r['bb_bandwidth'] = self._safe_val(bb[cols[3]]) if len(cols) > 3 else None
-                r['bb_percent_b'] = self._safe_val(bb[cols[4]]) if len(cols) > 4 else None
+            try:
+                bb = ta.bbands(close, length=20, std=2.0)
+                if bb is not None and not bb.empty:
+                    cols = bb.columns.tolist()
+                    r['bb_lower'] = self._safe_val(bb[cols[0]])
+                    r['bb_mid'] = self._safe_val(bb[cols[1]])
+                    r['bb_upper'] = self._safe_val(bb[cols[2]])
+                    r['bb_bandwidth'] = self._safe_val(bb[cols[3]]) if len(cols) > 3 else None
+                    r['bb_percent_b'] = self._safe_val(bb[cols[4]]) if len(cols) > 4 else None
+            except Exception as e:
+                logger.warning(f"BBands calculation error: {e}")
 
             # ATR
-            r['atr'] = self._safe_val(ta.atr(high, low, close, length=14))
+            try:
+                r['atr'] = self._safe_val(ta.atr(high, low, close, length=14))
+            except Exception as e:
+                logger.warning(f"ATR calculation error: {e}")
 
             # Volume indicators
             try:
@@ -626,8 +646,11 @@ class MathEngine:
                 logger.warning(f"Error calculating volume indicators (obv/vwap/cmf): {e}")
 
             # ----------- HMA (Hull Moving Average) MA EMA -----------
-            r['hma_9'] = self._safe_val(ta.hma(close, length=9))
-            r['hma_21'] = self._safe_val(ta.hma(close, length=21))
+            try:
+                r['hma_9'] = self._safe_val(ta.hma(close, length=9))
+                r['hma_21'] = self._safe_val(ta.hma(close, length=21))
+            except Exception as e:
+                logger.warning(f"HMA calculation error: {e}")
 
             # --------------------- Parabolic SAR ---------------------
             try:
