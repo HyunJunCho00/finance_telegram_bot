@@ -97,7 +97,16 @@ class OutboxDispatcher:
         )
         parse_mode = payload.get("parse_mode")
         bot = Bot(token=settings.TELEGRAM_BOT_TOKEN)
-        self._run_async(bot.send_message, chat_id=chat_id, text=text, parse_mode=parse_mode)
+        try:
+            self._run_async(bot.send_message, chat_id=chat_id, text=text, parse_mode=parse_mode)
+        except Exception as e:
+            # Telegram HTML parser rejects chars like <= in AI-generated text.
+            # Retry as plain text so the message is never silently dropped.
+            if parse_mode and ("parse" in str(e).lower() or "entities" in str(e).lower() or "tag" in str(e).lower()):
+                logger.warning(f"Telegram HTML parse error, retrying as plain text: {e}")
+                self._run_async(bot.send_message, chat_id=chat_id, text=text, parse_mode=None)
+            else:
+                raise
 
     def _send_telegram_payload(self, payload: Dict) -> None:
         from executors.report_generator import report_generator
