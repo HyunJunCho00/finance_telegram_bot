@@ -318,11 +318,15 @@ Rules:
                 })
                 continue
             if key == "vlm_geometry":
+                # Skip if VLM was gated off or detected nothing — saves ~200 tokens
+                anomaly = str(payload.get("anomaly", "none") or "none").lower()
+                if anomaly in ("none", "skipped"):
+                    continue
                 summaries.append({
                     "agent": key,
                     "bias": str(payload.get("directional_bias", "N/A") or "N/A"),
                     "confidence": payload.get("confidence", "N/A"),
-                    "anomaly": str(payload.get("anomaly", "N/A") or "N/A"),
+                    "anomaly": anomaly,
                     "trap_type": str(payload.get("trap_type", "N/A") or "N/A"),
                     "rationale": cls._compact_text(payload.get("rationale", ""), 160),
                 })
@@ -342,6 +346,9 @@ Rules:
                 or payload.get("details")
                 or ""
             )
+            # Skip agents with no meaningful signal — saves ~160 tokens per empty entry
+            if str(verdict).upper() in ("N/A", "NONE", "NEUTRAL") and not str(rationale).strip():
+                continue
             summaries.append({
                 "agent": key,
                 "verdict": str(verdict or "N/A"),

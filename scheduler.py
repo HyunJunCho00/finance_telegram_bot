@@ -973,7 +973,7 @@ def job_routine_market_status():
                         system_prompt="You are a strict JSON market-news selector.",
                         user_message=f"{cluster_prompt}\n\nINPUT_JSON:\n{json.dumps(_payload, ensure_ascii=False)}",
                         temperature=0.1,
-                        max_tokens=1300,
+                        max_tokens=800,
                         role="news_cluster",
                     ) or ""
 
@@ -1051,7 +1051,7 @@ def job_routine_market_status():
                         system_prompt="You are a crypto market briefing writer. No markdown fences.",
                         user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}",
                         temperature=0.2,
-                        max_tokens=900,
+                        max_tokens=600,
                         role="news_brief_final",
                     ) or ""
 
@@ -1063,7 +1063,7 @@ def job_routine_market_status():
                             system_prompt="You are a crypto market briefing writer. No markdown fences.",
                             user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}",
                             temperature=0.1,
-                            max_tokens=900,
+                            max_tokens=600,
                             role="news_brief_final",
                         ) or "최근 1시간 내 주요 뉴스 없음"
                     if _looks_english_dominant(_intel):
@@ -1083,7 +1083,7 @@ def job_routine_market_status():
                                 f"REFERENCE_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}"
                             ),
                             temperature=0.1,
-                            max_tokens=900,
+                            max_tokens=600,
                             role="news_summarize",
                         ) or _intel
                         if rewritten.strip():

@@ -52,6 +52,7 @@ from executors.stats_thresholds import adaptive_std_floor, symbol_liq_min_std_us
 from utils.cooldown import is_on_cooldown, set_cooldown
 from loguru import logger
 import gc
+import hashlib
 import numpy as np
 import pandas as pd
 import json
@@ -66,6 +67,11 @@ _cvd_cache: dict = {}       # {symbol:mode: DataFrame}
 
 _liq_cache: dict = {}       # {symbol:mode: DataFrame}
 _funding_cache: dict = {}   # {symbol:mode: DataFrame}
+
+# VLM result cache: keyed by chart content hash, TTL 4 hours
+# Avoids re-running expensive Gemini Pro VLM call when chart hasn't changed
+_vlm_result_cache: dict = {}   # {chart_hash: (result_dict, timestamp)}
+_VLM_CACHE_TTL_S = 4 * 3600
 
 
 try:
@@ -233,6 +239,7 @@ class AnalysisState(TypedDict):
     liquidation_context: str
     rag_context: str
     telegram_news: str
+    unified_narrative: str  # Deduplicated merge of narrative_text + rag_context + telegram_news
     feedback_text: str
     microstructure_context: str
     macro_context: str
@@ -703,20 +710,108 @@ def node_context_gathering(state: AnalysisState) -> dict:
     return updates
 
 
+def _merge_narrative_sources(
+    narrative_text: str,
+    rag_context: str,
+    telegram_news: str,
+    *,
+    max_chars: int = 1400,
+) -> str:
+    """Deduplicate and merge 3 narrative sources into one compact context string.
+
+    Priority: Perplexity (primary) > LightRAG (secondary) > Telegram (tertiary).
+    Dedup method: 4-char character-level sliding-window fingerprints.
+    Works for both Korean and English without tokenization.
+
+    Savings vs concatenation: ~67% fewer chars (4300 → ~1400).
+    """
+    import re as _re
+
+    def _fingerprints(text: str) -> set:
+        clean = _re.sub(r"\s+", "", text.lower())
+        return {clean[i:i + 4] for i in range(len(clean) - 3)} if len(clean) > 3 else set()
+
+    def _is_duplicate(line: str, seen: set, threshold: float) -> bool:
+        fp = _fingerprints(line)
+        return bool(fp) and len(fp & seen) / len(fp) >= threshold
+
+    seen: set = set()
+    parts: list = []
+    total = 0
+
+    # 1. Perplexity narrative — always primary, hard cap 700 chars
+    if narrative_text:
+        chunk = narrative_text.strip()[:700]
+        parts.append(chunk)
+        seen.update(_fingerprints(chunk))
+        total += len(chunk)
+
+    # 2. LightRAG context — line-level dedup vs Perplexity, cap 400 chars
+    if rag_context and total < max_chars:
+        new_lines: list = []
+        rag_total = 0
+        for line in rag_context.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if not _is_duplicate(line, seen, threshold=0.40):
+                new_lines.append(line)
+                seen.update(_fingerprints(line))
+                rag_total += len(line)
+            if rag_total >= 400:
+                break
+        if new_lines:
+            block = "\n".join(new_lines)
+            parts.append(f"[RAG]\n{block}")
+            total += len(block)
+
+    # 3. Telegram news — top 3 new lines only, cap 300 chars
+    if telegram_news and total < max_chars:
+        new_lines = []
+        for line in telegram_news.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if not _is_duplicate(line, seen, threshold=0.50):
+                new_lines.append(line)
+                seen.update(_fingerprints(line))
+            if len(new_lines) >= 3:
+                break
+        if new_lines:
+            block = "\n".join(new_lines)
+            parts.append(f"[TG]\n{block}")
+
+    result = "\n\n".join(parts)
+    return result[:max_chars]
+
+
+def node_unify_narrative(state: AnalysisState) -> dict:
+    """Merge narrative_text + rag_context + telegram_news into one deduplicated string.
+    Runs once after context_gathering; result reused by meta_agent and judge_agent."""
+    unified = _merge_narrative_sources(
+        state.get("narrative_text", ""),
+        state.get("rag_context", ""),
+        state.get("telegram_news", ""),
+    )
+    logger.debug(
+        f"unified_narrative: {len(unified)} chars "
+        f"(narrative={len(state.get('narrative_text',''))} "
+        f"rag={len(state.get('rag_context',''))} "
+        f"tg={len(state.get('telegram_news',''))})"
+    )
+    return {"unified_narrative": unified}
+
+
 def node_meta_agent(state: AnalysisState) -> dict:
     """Run Meta-Agent to classify market regime and provide trust directives."""
     try:
-        # [NEW] Inject RAG context and Telegram news for Narrative-Aware classification
-        rag_context = state.get("rag_context", "")
-        telegram_news = state.get("telegram_news", "")
-        
         result = meta_agent.classify_regime(
             market_data_compact=state.get("market_data_compact", ""),
             deribit_context=state.get("deribit_context", ""),
             funding_context=state.get("funding_context", ""),
             macro_context=state.get("macro_context", ""),
-            rag_context=rag_context,
-            telegram_news=telegram_news,
+            rag_context=state.get("unified_narrative", "") or state.get("rag_context", ""),
+            telegram_news="",  # already merged into unified_narrative
             onchain_context=state.get("onchain_context", ""),
             mode=TradingMode(state["mode"])
         )
@@ -1031,12 +1126,21 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
     symbol = state.get("symbol", "BTCUSDT")
     mode = TradingMode(state["mode"])
     cache_key = _cache_key(symbol, mode)
-    
+
     if not chart:
         return {"blackboard": {"vlm_geometry": {
             "anomaly": "none", "directional_bias": "NEUTRAL",
             "confidence": 0, "rationale": "No chart available"
         }}}
+
+    # VLM result cache: skip expensive Gemini Pro call if chart hasn't changed
+    _chart_hash = hashlib.sha256(chart.encode()).hexdigest()[:20]
+    _cached = _vlm_result_cache.get(_chart_hash)
+    if _cached is not None:
+        _cached_result, _cached_ts = _cached
+        if time.time() - _cached_ts < _VLM_CACHE_TTL_S:
+            logger.info(f"VLM cache hit for {symbol}/{mode.value} (hash={_chart_hash})")
+            return {"blackboard": {"vlm_geometry": _cached_result}, "chart_image_b64": None, "chart_bytes": None}
 
     # Extract current price from cached market_data for prompt context
     market_data = _market_data_cache.get(cache_key, {})
@@ -1052,9 +1156,11 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
         primary_timeframe=primary_tf,
         higher_timeframe_context=vlm_context_text,
     )
+    # Store in cache (only if analysis succeeded — don't cache default/error results)
+    if result.get("anomaly") not in ("none", None) or result.get("confidence", 0) > 0:
+        _vlm_result_cache[_chart_hash] = (result, time.time())
+
     # [OOM FIX] VLM 분석 완료 후 이미지 데이터를 State에서 즉시 해제
-    # chart_image_b64(~1-2MB b64)와 chart_bytes(~500KB-2MB PNG)가 judge→risk→report까지
-    # LangGraph State에 불필요하게 잔류하는 것을 방지
     return {
         "blackboard": {"vlm_geometry": result},
         "chart_image_b64": None,
@@ -1217,7 +1323,9 @@ def node_judge_agent(state: AnalysisState) -> dict:
     funding_context = state.get("funding_context", "")
     feedback_text = state.get("feedback_text", "")
     open_positions = state.get("open_positions", "")
-    narrative_context = "\n\n".join(filter(None, [
+    # unified_narrative is pre-deduplicated (narrative_text + rag_context + telegram_news).
+    # Fall back to raw join if node_unify_narrative was skipped (snapshot/hot-path calls).
+    narrative_context = state.get("unified_narrative") or "\n\n".join(filter(None, [
         state.get("narrative_text", ""),
         state.get("rag_context", ""),
     ]))
@@ -1882,6 +1990,7 @@ def build_analysis_graph():
     # Add nodes
     graph.add_node("collect_data", node_collect_data)
     graph.add_node("context_gathering", node_context_gathering)
+    graph.add_node("unify_narrative", node_unify_narrative)
     graph.add_node("meta_agent", node_meta_agent)
     
     # Core decision path
@@ -1900,7 +2009,8 @@ def build_analysis_graph():
 
     # Sequential preprocessing
     graph.add_edge("collect_data", "context_gathering")
-    graph.add_edge("context_gathering", "meta_agent")
+    graph.add_edge("context_gathering", "unify_narrative")
+    graph.add_edge("unify_narrative", "meta_agent")
     graph.add_edge("meta_agent", "triage")
 
     graph.add_edge("triage", "generate_chart")
@@ -2326,6 +2436,7 @@ class Orchestrator:
             "liquidation_context": "",
             "rag_context": "",
             "telegram_news": "",
+            "unified_narrative": "",
             "feedback_text": "",
             "microstructure_context": "",
             "macro_context": "",
@@ -2399,6 +2510,7 @@ class Orchestrator:
         for node_fn in [
             node_collect_data,
             node_context_gathering,
+            node_unify_narrative,
             node_meta_agent,
             node_triage,
         ]:
