@@ -286,33 +286,76 @@ class AnalysisState(TypedDict):
 # -------------------- Node functions --------------------
 
 def node_collect_data(state: AnalysisState) -> dict:
-    """Fetch 1m OHLCV data from Supabase + higher TFs from GCS if available."""
+    """1m OHLCV: GCS 로컬 캐시(역사적 데이터) → Supabase gap fill(최근 갭) → 머지.
+
+    데이터 레이어:
+      - 1m bulk  : GCS 로컬 캐시 (cache/gcs_parquet/) — Swing 6개월 / Position 4년
+      - 1m 갭    : Supabase — 캐시 마지막 ts ~ 현재, 최대 43,200개(30일 상한)
+      - 4h/1d/1w : GCS 로컬 캐시 (리샘플링된 고해상도 히스토리)
+    """
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
     cache_key = _cache_key(symbol, mode)
-    candle_limit = settings.POSITION_CANDLE_LIMIT if mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
+    months_back = settings.history_lookback_months_for_mode(mode)
 
-    df = db.get_latest_market_data(symbol, limit=candle_limit)
+    from processors.gcs_parquet import gcs_parquet_store
+
+    # ── 1. GCS 로컬 캐시에서 1m 역사 데이터 로드 ─────────────────────────
+    df_cached = pd.DataFrame()
+    try:
+        df_cached = gcs_parquet_store.load_ohlcv("1m", symbol, months_back=months_back)
+        if not df_cached.empty:
+            logger.info(f"GCS local cache: {len(df_cached):,} rows for {symbol} ({months_back}m)")
+    except Exception as e:
+        logger.warning(f"GCS local cache load failed for {symbol}: {e}")
+
+    # ── 2. Supabase에서 갭 구간만 보충 ────────────────────────────────────
+    if not df_cached.empty:
+        last_cached_ts = df_cached["timestamp"].max()
+        if hasattr(last_cached_ts, 'to_pydatetime'):
+            last_cached_ts = last_cached_ts.to_pydatetime()
+
+        gap_minutes = int((datetime.now(timezone.utc) - last_cached_ts).total_seconds() / 60) + 10
+        gap_limit = min(gap_minutes, settings.SWING_CANDLE_LIMIT)  # 상한: 43,200 (30일)
+
+        logger.info(f"Supabase gap fill: {gap_minutes:,}min gap → fetching up to {gap_limit:,} rows")
+        df_recent = db.get_market_data_gap(symbol, since=last_cached_ts, limit=gap_limit)
+
+        if not df_recent.empty:
+            df = pd.concat([df_cached, df_recent], ignore_index=True)
+            df = df.drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+            logger.info(f"Merged: {len(df_cached):,} (cache) + {len(df_recent):,} (gap) = {len(df):,} rows")
+        else:
+            df = df_cached
+            logger.info(f"No gap data from Supabase, using cache only: {len(df):,} rows")
+    else:
+        # 캐시 없음 → Supabase 전체 fallback (최대 30일)
+        fallback_limit = settings.POSITION_CANDLE_LIMIT if mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
+        logger.warning(f"GCS local cache empty for {symbol}, Supabase fallback (limit={fallback_limit:,})")
+        df = db.get_latest_market_data(symbol, limit=fallback_limit)
+
     if df.empty:
         return {"df_size": 0, "errors": state.get("errors", []) + [f"No market data for {symbol}"]}
 
     # [FIX CRASH-2] Cache for reuse by node_triage, node_generate_chart, node_generate_report
     _df_cache[cache_key] = df
 
-    # Load higher timeframe data from GCS for deeper indicator history
+    # ── 3. 고해상도 TF: GCS 로컬 캐시에서 로드 (4h / 1d / 1w) ──────────
     df_4h, df_1d, df_1w = None, None, None
     try:
-        from processors.gcs_parquet import gcs_parquet_store
-        if gcs_parquet_store.enabled:
-            m_back = settings.history_lookback_months_for_mode(mode)
-            if mode == TradingMode.SWING:
-                df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
-            elif mode == TradingMode.POSITION:
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
-                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
+        if mode == TradingMode.SWING:
+            df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=months_back)
+            df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=months_back)
+        elif mode == TradingMode.POSITION:
+            df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=months_back)
+            df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=months_back)
+        logger.debug(
+            f"GCS TF data — 4h:{len(df_4h) if df_4h is not None and not df_4h.empty else 0} "
+            f"1d:{len(df_1d) if df_1d is not None and not df_1d.empty else 0} "
+            f"1w:{len(df_1w) if df_1w is not None and not df_1w.empty else 0}"
+        )
     except Exception as e:
-        logger.warning(f"GCS load skipped: {e}")
+        logger.warning(f"GCS higher TF load skipped: {e}")
 
     market_data = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
     compact = math_engine.format_compact(market_data)
@@ -330,7 +373,7 @@ def node_collect_data(state: AnalysisState) -> dict:
     # V5: Fetch currently active orders for this symbol to inject into the PM context
     all_active = state_manager.get_active_orders()
     active_for_symbol = [o for o in all_active if o['symbol'] == symbol]
-    
+
     # V7: Fetch open positions to prevent double-ordering
     open_position_text = "No open positions."
     if settings.PAPER_TRADING_MODE:

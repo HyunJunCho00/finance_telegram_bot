@@ -299,19 +299,18 @@ class Settings(BaseSettings):
     CHART_SHOW_CVD_PANEL: bool = False
     CHART_SHOW_CVD_OVERLAY: bool = False
 
-    # ===== Candle Limits per Mode (1m candles needed from DB) =====
-    # SWING: 14400 (10 days) for 1h/4h + needs 1d from GCS
-    # POSITION: 10080 (7 days) for 4h + needs 1d/1w from GCS
-    # SWING: 10000 (approx 1 year of 1h)
-    # POSITION: 60000 (approx 6-7 years of 1h)
-    SWING_CANDLE_LIMIT: int = 10000
-    POSITION_CANDLE_LIMIT: int = 60000
+    # ===== Candle Limits per Mode (Supabase gap-fill 상한) =====
+    # 1m 캔들은 GCS 로컬 캐시(역사적 데이터)에서 로드 후,
+    # 캐시의 마지막 타임스탬프 ~ 현재까지의 갭만 Supabase에서 보충.
+    # Supabase 보존 기간(RETENTION_MARKET_DATA_DAYS=30일) 기준 최대 43,200개.
+    SWING_CANDLE_LIMIT: int = 43200
+    POSITION_CANDLE_LIMIT: int = 43200
 
-    # ===== Historical Window per Mode (for chart/context loading from GCS) =====
-    # SWING: 12 months
-    # POSITION: 60 months (5 years)
-    SWING_HISTORY_MONTHS: int = 12
-    POSITION_HISTORY_MONTHS: int = 60
+    # ===== Historical Window per Mode (GCS 로컬 캐시 로딩 기간) =====
+    # Swing  원칙: 6개월
+    # Position 원칙: 4년 = 48개월
+    SWING_HISTORY_MONTHS: int = 6
+    POSITION_HISTORY_MONTHS: int = 48
 
     # ===== Data Retention (days) =====
     # PostgreSQL(Supabase): 통계용 데이터만 보존 (30일)
@@ -428,11 +427,11 @@ class Settings(BaseSettings):
 
     @property
     def data_lookback_hours(self) -> int:
-        """How far back to look for supplementary data (funding, CVD, liquidations)."""
+        """보조 데이터(funding, CVD, liquidations) 조회 기간. Swing 6개월 / Position 4년 원칙."""
         mode = self.trading_mode
         if mode == TradingMode.POSITION:
-            return 44000  # ~5 years for macro cycle context (1W scale)
-        return 8760   # 1 year for SWING (1D scale)
+            return 35040  # 4년 (48 * 30 * 24)
+        return 4380   # 6개월 (6 * 30 * 24)
 
 
 class SecretManager:

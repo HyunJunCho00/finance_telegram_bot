@@ -721,6 +721,30 @@ class DatabaseClient:
             return df.sort_values('timestamp').reset_index(drop=True)
         return pd.DataFrame()
 
+    def get_market_data_gap(
+        self,
+        symbol: str,
+        since: datetime,
+        limit: int = 43200,
+        exchange: str = "binance",
+        columns: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """GCS 로컬 캐시 이후 갭 구간만 Supabase에서 페이지네이션으로 보충.
+
+        since: GCS 캐시의 마지막 타임스탬프 (이 시점 이후 데이터만 fetch)
+        limit: 최대 row 수 (기본 43,200 = 30일 1분봉 상한)
+        """
+        rows = self._fetch_paginated(
+            "market_data", limit, "timestamp",
+            since=since, columns=columns,
+            symbol=symbol, exchange=exchange,
+        )
+        if rows:
+            df = pd.DataFrame(rows)
+            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
+            return df.sort_values('timestamp').reset_index(drop=True)
+        return pd.DataFrame()
+
     @reconnect_on_error
     def insert_feedback(self, data: Dict) -> Dict:
         return self.client.table("feedback_logs").insert(data).execute()
