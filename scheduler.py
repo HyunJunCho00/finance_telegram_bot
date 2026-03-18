@@ -1761,6 +1761,7 @@ def main():
     def _bootstrap_missing_parquet_cache():
         """스타트업 시 로컬 캐시에 없는 심볼의 parquet 파일을 GCS에서 다운로드."""
         try:
+            from processors.gcs_parquet import gcs_parquet_store
             if not gcs_parquet_store.enabled:
                 logger.info("GCS disabled — parquet cache bootstrap skipped")
                 return
