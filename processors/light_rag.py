@@ -707,7 +707,7 @@ class CloudflareTriage:
     _URL_TEMPLATE = "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/meta/llama-3-8b-instruct-awq"
     _PROMPT = """You are a High-Frequency Crypto News Triage agent.
 Identify if the message contains a time-sensitive market-moving TRIGGER.
-TRIGGER Categories: Listing, Hack, Partnership, Regulation, ETF, Mainnet/Upgrade.
+TRIGGER Categories: Listing, Hack, Transfer/Whale, Partnership, Regulation, ETF, Mainnet/Upgrade.
 Discard: Generic price updates, ads, emotional chatter, old news.
 
 Return EXACTLY JSON: {{ "is_trigger": bool, "category": "string", "confidence": float }}
