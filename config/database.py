@@ -10,9 +10,6 @@ import asyncio
 from loguru import logger
 
 # ----------------- HTTP/2 Cloudflare Patch -----------------
-# httpx HTTP/2 implementation has a known issue with Cloudflare's trailing pseudo-headers
-# resulting in: httpx.LocalProtocolError: Received pseudo-header in trailer
-# We disable HTTP/2 globally for httpx to prevent this when talking to Supabase.
 try:
     _orig_init = httpx.Client.__init__
     def _patched_init(self, *args, **kwargs):
@@ -31,16 +28,45 @@ except Exception:
 
 
 class DatabaseClient:
+    # ── QUANT Project 담당 테이블 (수치 데이터) ───────────────────────────
+    QUANT_TABLES = {
+        "market_data", "cvd_data", "funding_data", "liquidations",
+        "microstructure_data", "liquidation_cascade_features",
+        "liquidation_cascade_predictions", "macro_data", "deribit_data",
+        "fear_greed_data", "onchain_daily_snapshots", "archive_manifests",
+    }
+
+    # ── TEXT Project 담당 테이블 (텍스트/AI 데이터) ───────────────────────
+    TEXT_TABLES = {
+        "telegram_messages", "narrative_data", "ai_reports", "feedback_logs",
+        "trade_executions", "dune_query_results", "daily_playbooks",
+        "monitor_logs", "market_status_events", "evaluation_predictions",
+        "evaluation_outcomes", "evaluation_component_scores",
+        "evaluation_rollups_daily",
+    }
+
     def __init__(self):
         options = ClientOptions(postgrest_client_timeout=60)
-        self.client: Client = create_client(
-            settings.SUPABASE_URL,
-            settings.SUPABASE_KEY,
-            options=options
-        )
+
+        # QUANT 클라이언트 — SUPABASE_URL_QUANT 없으면 기존 URL로 fallback
+        quant_url = getattr(settings, "SUPABASE_URL_QUANT", "") or settings.SUPABASE_URL
+        quant_key = getattr(settings, "SUPABASE_KEY_QUANT", "") or settings.SUPABASE_KEY
+        self.client_quant: Client = create_client(quant_url, quant_key, options=options)
+
+        # TEXT 클라이언트 — SUPABASE_URL_TEXT 없으면 기존 URL로 fallback
+        text_url = getattr(settings, "SUPABASE_URL_TEXT", "") or settings.SUPABASE_URL
+        text_key = getattr(settings, "SUPABASE_KEY_TEXT", "") or settings.SUPABASE_KEY
+        self.client_text: Client = create_client(text_url, text_key, options=options)
+
+        # 하위 호환: gcs_parquet.py 등에서 db.client 직접 참조하는 경우 대비
+        self.client = self.client_quant
+
+    def _client(self, table: str) -> Client:
+        """테이블명으로 적절한 Supabase 클라이언트 반환."""
+        return self.client_text if table in self.TEXT_TABLES else self.client_quant
 
     def reconnect_on_error(func):
-        """Decorator to handle Supabase disconnections, Cloudflare 400s, and retry once."""
+        """Transient error 시 두 클라이언트 모두 재연결 후 1회 재시도."""
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
             try:
@@ -48,26 +74,31 @@ class DatabaseClient:
             except Exception as e:
                 err_msg = str(e).lower()
                 err_type = type(e).__name__.lower()
-                
-                # Catch closed connections, SSL/EOF protocol violations, Cloudflare HTTP2 issues, timeouts, and general connection errors
+
                 transient_keywords = [
-                    "disconnected", "closed", "connection", "eof", "protocol", 
+                    "disconnected", "closed", "connection", "eof", "protocol",
                     "pseudo-header", "timeout", "61", "104", "refused", "reset",
                     "cloudflare", "400 bad request", "json could not be generated",
-                    # postgrest-py model_validate_json 파싱 실패 (비표준 응답 바디)
                     "model_validate_json", "apierrorfromjson", "validation error",
                     "500", "502", "503", "504",
                 ]
-                
+
                 if any(x in err_msg for x in transient_keywords) or "protocol" in err_type or "connection" in err_type:
                     logger.warning(f"Database error ({e.__class__.__name__}: {err_msg}) during {func.__name__}, reconnecting...")
                     try:
                         import time
-                        time.sleep(1.5) # Brief pause for network stabilization
-                        
+                        time.sleep(1.5)
                         options = ClientOptions(postgrest_client_timeout=60)
-                        self.client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY, options=options)
-                        
+
+                        quant_url = getattr(settings, "SUPABASE_URL_QUANT", "") or settings.SUPABASE_URL
+                        quant_key = getattr(settings, "SUPABASE_KEY_QUANT", "") or settings.SUPABASE_KEY
+                        self.client_quant = create_client(quant_url, quant_key, options=options)
+                        self.client = self.client_quant  # 하위 호환 alias 갱신
+
+                        text_url = getattr(settings, "SUPABASE_URL_TEXT", "") or settings.SUPABASE_URL
+                        text_key = getattr(settings, "SUPABASE_KEY_TEXT", "") or settings.SUPABASE_KEY
+                        self.client_text = create_client(text_url, text_key, options=options)
+
                         return func(self, *args, **kwargs)
                     except Exception as retry_e:
                         logger.error(f"Database reconnection/retry failed: {retry_e}")
@@ -75,21 +106,26 @@ class DatabaseClient:
                 raise
         return wrapper
 
+# =====================================================================
+# QUANT PROJECT — 수치 데이터
+# =====================================================================
+
 # ----------------------- Market Data -----------------------
 
     @reconnect_on_error
     def insert_market_data(self, data: Dict) -> Dict:
-        return self.client.table("market_data").insert(data).execute()
+        return self.client_quant.table("market_data").insert(data).execute()
 
     @reconnect_on_error
     def batch_insert_market_data(self, data_list: List[Dict]) -> Dict:
         """Upsert to avoid duplicate errors on (timestamp, symbol, exchange)."""
-        return self.client.table("market_data").upsert(
+        return self.client_quant.table("market_data").upsert(
             data_list, on_conflict="timestamp,symbol,exchange"
         ).execute()
 
     def _fetch_paginated(self, table: str, limit: int, order_col: str, since: Optional[datetime] = None, columns: Optional[str] = None, **eq_filters) -> List[Dict]:
         """Helper to bypass Supabase 1000 row max limit using pagination."""
+        client = self._client(table)
         all_rows = []
         fetched = 0
         page_size = 1000
@@ -97,14 +133,14 @@ class DatabaseClient:
             fetch_size = min(page_size, limit - fetched)
             start = fetched
             end = fetched + fetch_size - 1
-            
-            query = self.client.table(table).select(columns or "*")
+
+            query = client.table(table).select(columns or "*")
             for k, v in eq_filters.items():
                 query = query.eq(k, v)
-                
+
             if since:
                 query = query.gte("timestamp", since.isoformat())
-                
+
             response = query.order(order_col, desc=True).range(start, end).execute()
             rows = response.data if response.data else []
             if not rows:
@@ -120,8 +156,6 @@ class DatabaseClient:
 
     @reconnect_on_error
     def get_latest_market_data(self, symbol: str, limit: int = 1000, exchange: str = "binance", columns: Optional[str] = None) -> pd.DataFrame:
-        # columns=None이면 필수 OHLCV 컬럼만 요청 (egress 절감).
-        # 전체 컬럼이 필요한 경우 columns="*" 를 명시적으로 전달.
         effective_columns = columns if columns is not None else self.MARKET_DATA_OHLCV_COLUMNS
         rows = self._fetch_paginated("market_data", limit, "timestamp", columns=effective_columns, symbol=symbol, exchange=exchange)
         if rows:
@@ -134,22 +168,18 @@ class DatabaseClient:
 
     @reconnect_on_error
     def batch_upsert_cvd_data(self, data_list: List[Dict]) -> Dict:
-        """Upsert CVD (volume delta) data."""
-        return self.client.table("cvd_data").upsert(
+        return self.client_quant.table("cvd_data").upsert(
             data_list, on_conflict="timestamp,symbol"
         ).execute()
 
     @reconnect_on_error
     def get_cvd_data(self, symbol: str, limit: int = 240, since: Optional[datetime] = None, columns: Optional[str] = None) -> pd.DataFrame:
-        """Get recent CVD data for a symbol. Default 240 = 4 hours of 1m data."""
         rows = self._fetch_paginated("cvd_data", limit, "timestamp", since=since, columns=columns, symbol=symbol)
         if rows:
             df = pd.DataFrame(rows)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
             df = df.sort_values('timestamp').reset_index(drop=True)
-            # Calculate cumulative volume delta
             df['cvd'] = df['volume_delta'].cumsum()
-            # Calculate whale CVD if columns exist
             if 'whale_buy_vol' in df.columns and 'whale_sell_vol' in df.columns:
                 df['whale_buy_vol'] = df['whale_buy_vol'].fillna(0)
                 df['whale_sell_vol'] = df['whale_sell_vol'].fillna(0)
@@ -163,24 +193,20 @@ class DatabaseClient:
     @reconnect_on_error
     def batch_upsert_whale_data(self, data_list: List[Dict]) -> Dict:
         """Upsert whale trade data into cvd_data table (whale columns)."""
-        return self.client.table("cvd_data").upsert(
+        return self.client_quant.table("cvd_data").upsert(
             data_list, on_conflict="timestamp,symbol"
         ).execute()
-
-    # (Previous manual retry logic removed in favor of decorator)
 
 # --------------------- Liquidation Data ---------------------
 
     @reconnect_on_error
     def batch_upsert_liquidations(self, data_list: List[Dict]) -> Dict:
-        """Upsert liquidation data."""
-        return self.client.table("liquidations").upsert(
+        return self.client_quant.table("liquidations").upsert(
             data_list, on_conflict="timestamp,symbol"
         ).execute()
 
     @reconnect_on_error
     def get_liquidation_data(self, symbol: str, limit: int = 240, since: Optional[datetime] = None, columns: Optional[str] = None) -> pd.DataFrame:
-        """Get recent liquidation data. Default 240 = 4 hours of 1m data."""
         rows = self._fetch_paginated("liquidations", limit, "timestamp", since=since, columns=columns, symbol=symbol)
         if rows:
             df = pd.DataFrame(rows)
@@ -188,71 +214,32 @@ class DatabaseClient:
             return df.sort_values('timestamp').reset_index(drop=True)
         return pd.DataFrame()
 
-# -------------------- Telegram Messages --------------------
-
-    @reconnect_on_error
-    def upsert_telegram_message(self, data: Dict) -> Dict:
-        """Upsert to avoid duplicate errors on (channel, message_id)."""
-        try:
-            response = self.client.table("telegram_messages").upsert(
-                data, on_conflict="channel,message_id"
-            ).execute()
-            if response.data:
-                msg = data.get("text", "")[:30].replace("\n", " ")
-                logger.info(f"DB: Saved [{data.get('channel')}] ID:{data.get('message_id')} | {msg}...")
-            return response
-        except Exception as e:
-            logger.error(f"DB: Failed to upsert telegram message: {e}")
-            raise
-
-    def insert_telegram_message(self, data: Dict) -> Dict:
-        """Backward compatible - now uses upsert."""
-        return self.upsert_telegram_message(data)
-
-    def get_recent_telegram_messages(self, hours: int = 24, limit: int = 200, columns: Optional[str] = None) -> List[Dict]:
-        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        response = self.client.table("telegram_messages")\
-                        .select(columns or "channel,message_id,text,created_at,timestamp")\
-            .gte("created_at", cutoff)\
-            .order("created_at", desc=True)\
-            .limit(limit)\
-            .execute()
-
-        return response.data if response.data else []
-
-    def get_telegram_messages_for_rag(self, days: int = 7, limit: int = 1000, columns: Optional[str] = None) -> List[Dict]:
-        """Get telegram messages for LightRAG ingestion."""
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        response = self.client.table("telegram_messages")\
-                        .select(columns or "channel,message_id,text,created_at,timestamp")\
-            .gte("created_at", cutoff)\
-            .order("created_at", desc=True)\
-            .limit(limit)\
-            .execute()
-
-        return response.data if response.data else []
-
 # ----------------------- Funding Data -----------------------
 
     @reconnect_on_error
     def upsert_funding_data(self, data: Dict) -> Dict:
-        """Upsert funding data. Uses truncated timestamp to avoid duplication."""
-        return self.client.table("funding_data").upsert(
+        return self.client_quant.table("funding_data").upsert(
             data, on_conflict="timestamp,symbol"
         ).execute()
 
-
+    def get_funding_history(self, symbol: str, limit: int = 100, since: Optional[datetime] = None, columns: Optional[str] = None) -> pd.DataFrame:
+        rows = self._fetch_paginated("funding_data", limit, "timestamp", since=since, columns=columns, symbol=symbol)
+        if rows:
+            df = pd.DataFrame(rows)
+            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
+            return df.sort_values('timestamp').reset_index(drop=True)
+        return pd.DataFrame()
 
 # ------------------- Microstructure Data -------------------
 
     @reconnect_on_error
     def batch_upsert_microstructure_data(self, data_list: List[Dict]) -> Dict:
-        return self.client.table("microstructure_data").upsert(
+        return self.client_quant.table("microstructure_data").upsert(
             data_list, on_conflict="timestamp,symbol,exchange"
         ).execute()
 
     def get_latest_microstructure(self, symbol: str) -> Optional[Dict]:
-        response = self.client.table("microstructure_data")\
+        response = self.client_quant.table("microstructure_data")\
                         .select("*")\
             .eq("symbol", symbol)\
             .order("timestamp", desc=True)\
@@ -271,81 +258,40 @@ class DatabaseClient:
 
     @reconnect_on_error
     def batch_upsert_liquidation_cascade_features(self, data_list: List[Dict]) -> Dict:
-        return self.client.table("liquidation_cascade_features").upsert(
+        return self.client_quant.table("liquidation_cascade_features").upsert(
             data_list, on_conflict="timestamp,symbol,side,feature_version"
         ).execute()
 
     @reconnect_on_error
     def insert_liquidation_cascade_prediction(self, data: Dict) -> Dict:
-        return self.client.table("liquidation_cascade_predictions").insert(data).execute()
+        return self.client_quant.table("liquidation_cascade_predictions").insert(data).execute()
 
 # ------------------------ Macro Data ------------------------
 
     @reconnect_on_error
     def upsert_macro_data(self, data: Dict) -> Dict:
-        return self.client.table("macro_data").upsert(
+        return self.client_quant.table("macro_data").upsert(
             data, on_conflict="timestamp,source"
         ).execute()
 
     def get_latest_macro_data(self) -> Optional[Dict]:
-        response = self.client.table("macro_data")\
+        response = self.client_quant.table("macro_data")\
                         .select("*")\
             .order("timestamp", desc=True)\
             .limit(1)\
             .execute()
-        return response.data[0] if response.data else None
-
-# ---------------------- Narrative Data ----------------------
-
-    @reconnect_on_error
-    def upsert_narrative_data(self, data: Dict) -> Dict:
-        """Upsert Perplexity/market narrative data for auditability."""
-        return self.client.table("narrative_data").upsert(
-            data, on_conflict="timestamp,symbol,source"
-        ).execute()
-
-    def get_latest_narrative_data(self, symbol: str, source: str = "perplexity") -> Optional[Dict]:
-        response = self.client.table("narrative_data")\
-                        .select("*")\
-            .eq("symbol", symbol)\
-            .eq("source", source)\
-            .order("timestamp", desc=True)\
-            .limit(1)\
-            .execute()
-
-        return response.data[0] if response.data else None
-
-
-# --------------------- Dune Query Data ---------------------
-
-    @reconnect_on_error
-    def upsert_dune_query_result(self, data: Dict) -> Dict:
-        """Upsert Dune query snapshot by (query_id, collected_at)."""
-        return self.client.table("dune_query_results").upsert(
-            data, on_conflict="query_id,collected_at"
-        ).execute()
-
-    def get_latest_dune_query_result(self, query_id: int) -> Optional[Dict]:
-        response = self.client.table("dune_query_results")\
-                        .select("*")\
-            .eq("query_id", query_id)\
-            .order("collected_at", desc=True)\
-            .limit(1)\
-            .execute()
-
         return response.data[0] if response.data else None
 
 # ------------------- Deribit Options Data -------------------
 
     @reconnect_on_error
     def upsert_deribit_data(self, data: Dict) -> Dict:
-        """Upsert Deribit options snapshot (DVOL, PCR, IV Term Structure, Skew)."""
-        return self.client.table("deribit_data").upsert(
+        return self.client_quant.table("deribit_data").upsert(
             data, on_conflict="symbol,timestamp"
         ).execute()
 
     def get_latest_deribit_data(self, symbol: str) -> Optional[Dict]:
-        response = self.client.table("deribit_data")\
+        response = self.client_quant.table("deribit_data")\
                         .select("*")\
             .eq("symbol", symbol)\
             .order("timestamp", desc=True)\
@@ -357,30 +303,28 @@ class DatabaseClient:
 
     @reconnect_on_error
     def upsert_fear_greed(self, data: Dict) -> Dict:
-        """Upsert daily Crypto Fear & Greed Index snapshot."""
-        return self.client.table("fear_greed_data").upsert(
+        return self.client_quant.table("fear_greed_data").upsert(
             data, on_conflict="timestamp"
         ).execute()
 
     def get_latest_fear_greed(self) -> Optional[Dict]:
-        response = self.client.table("fear_greed_data")\
+        response = self.client_quant.table("fear_greed_data")\
                         .select("*")\
             .order("timestamp", desc=True)\
             .limit(1)\
             .execute()
         return response.data[0] if response.data else None
 
-    # On-Chain Daily Snapshots
+# ------------------ On-Chain Daily Snapshots ----------------
 
     @reconnect_on_error
     def upsert_onchain_daily_snapshot(self, data: Dict) -> Dict:
-        """Upsert Coin Metrics-derived daily snapshot."""
-        return self.client.table("onchain_daily_snapshots").upsert(
+        return self.client_quant.table("onchain_daily_snapshots").upsert(
             data, on_conflict="symbol,as_of_date,source"
         ).execute()
 
     def get_latest_onchain_snapshot(self, symbol: str, max_age_hours: Optional[int] = 48) -> Optional[Dict]:
-        response = self.client.table("onchain_daily_snapshots")\
+        response = self.client_quant.table("onchain_daily_snapshots")\
                         .select("*")\
             .eq("symbol", symbol)\
             .order("as_of_date", desc=True)\
@@ -394,53 +338,289 @@ class DatabaseClient:
         try:
             as_of_date = datetime.fromisoformat(str(row["as_of_date"]))
             age_hours = (datetime.now(timezone.utc) - as_of_date.replace(tzinfo=timezone.utc)).total_seconds() / 3600.0
-            if age_hours > max_age_hours:
-                row = dict(row)
-                row["is_stale"] = True
-                row["age_hours"] = round(age_hours, 2)
-            else:
-                row = dict(row)
-                row["is_stale"] = False
-                row["age_hours"] = round(age_hours, 2)
+            row = dict(row)
+            row["is_stale"] = age_hours > max_age_hours
+            row["age_hours"] = round(age_hours, 2)
         except Exception:
             row = dict(row)
             row["is_stale"] = None
         return row
+
+# ---------------------- Market Data Gap ---------------------
+
+    @reconnect_on_error
+    def get_market_data_since(
+        self,
+        symbol: str,
+        since: datetime,
+        limit: int = 120,
+        exchange: str = "binance",
+        columns: Optional[str] = None,
+    ) -> pd.DataFrame:
+        response = self.client_quant.table("market_data")\
+            .select(columns or "*")\
+            .eq("symbol", symbol)\
+            .eq("exchange", exchange)\
+            .gte("timestamp", since.isoformat())\
+            .order("timestamp")\
+            .limit(limit)\
+            .execute()
+        rows = response.data if response.data else []
+        if rows:
+            df = pd.DataFrame(rows)
+            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
+            return df.sort_values('timestamp').reset_index(drop=True)
+        return pd.DataFrame()
+
+    def get_market_data_gap(
+        self,
+        symbol: str,
+        since: datetime,
+        limit: int = 43200,
+        exchange: str = "binance",
+        columns: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """GCS 로컬 캐시 이후 갭 구간만 Supabase에서 보충."""
+        rows = self._fetch_paginated(
+            "market_data", limit, "timestamp",
+            since=since, columns=columns,
+            symbol=symbol, exchange=exchange,
+        )
+        if rows:
+            df = pd.DataFrame(rows)
+            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
+            return df.sort_values('timestamp').reset_index(drop=True)
+        return pd.DataFrame()
+
+# --------------------- Archive Manifests --------------------
+
+    @reconnect_on_error
+    def upsert_archive_manifest(self, data: Dict) -> Optional[Dict]:
+        response = self.client_quant.table("archive_manifests").upsert(
+            data,
+            on_conflict="table_name,partition_key"
+        ).execute()
+        return response.data[0] if response.data else None
+
+    def get_archive_manifest(self, table_name: str, partition_key: str) -> Optional[Dict]:
+        response = self.client_quant.table("archive_manifests")\
+                        .select("*")\
+            .eq("table_name", table_name)\
+            .eq("partition_key", partition_key)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
+    @reconnect_on_error
+    def update_archive_manifest(self, manifest_id: int, data: Dict) -> Optional[Dict]:
+        response = self.client_quant.table("archive_manifests")\
+            .update(data)\
+            .eq("id", manifest_id)\
+            .execute()
+        return response.data[0] if response.data else None
+
+    def get_archive_manifests(
+        self,
+        statuses: Optional[List[str]] = None,
+        cleanup_pending_only: bool = False,
+        limit: int = 1000,
+    ) -> List[Dict]:
+        fetched = 0
+        rows: List[Dict] = []
+        page_size = 500
+        while fetched < limit:
+            fetch_size = min(page_size, limit - fetched)
+            query = self.client_quant.table("archive_manifests").select("*")
+            if statuses:
+                query = query.in_("status", statuses)
+            if cleanup_pending_only:
+                query = query.is_("cleanup_completed_at", "null")
+            response = query.order("archive_started_at").range(fetched, fetched + fetch_size - 1).execute()
+            chunk = response.data if response.data else []
+            if not chunk:
+                break
+            rows.extend(chunk)
+            fetched += len(chunk)
+            if len(chunk) < fetch_size:
+                break
+        return rows
+
+# =====================================================================
+# TEXT PROJECT — 텍스트/AI 데이터
+# =====================================================================
+
+# -------------------- Telegram Messages --------------------
+
+    @reconnect_on_error
+    def upsert_telegram_message(self, data: Dict) -> Dict:
+        try:
+            response = self.client_text.table("telegram_messages").upsert(
+                data, on_conflict="channel,message_id"
+            ).execute()
+            if response.data:
+                msg = data.get("text", "")[:30].replace("\n", " ")
+                logger.info(f"DB: Saved [{data.get('channel')}] ID:{data.get('message_id')} | {msg}...")
+            return response
+        except Exception as e:
+            logger.error(f"DB: Failed to upsert telegram message: {e}")
+            raise
+
+    def insert_telegram_message(self, data: Dict) -> Dict:
+        """Backward compatible — now uses upsert."""
+        return self.upsert_telegram_message(data)
+
+    def get_recent_telegram_messages(self, hours: int = 24, limit: int = 200, columns: Optional[str] = None) -> List[Dict]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        response = self.client_text.table("telegram_messages")\
+                        .select(columns or "channel,message_id,text,created_at,timestamp")\
+            .gte("created_at", cutoff)\
+            .order("created_at", desc=True)\
+            .limit(limit)\
+            .execute()
+        return response.data if response.data else []
+
+    def get_telegram_messages_for_rag(self, days: int = 7, limit: int = 1000, columns: Optional[str] = None) -> List[Dict]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        response = self.client_text.table("telegram_messages")\
+                        .select(columns or "channel,message_id,text,created_at,timestamp")\
+            .gte("created_at", cutoff)\
+            .order("created_at", desc=True)\
+            .limit(limit)\
+            .execute()
+        return response.data if response.data else []
+
+# ---------------------- Narrative Data ----------------------
+
+    @reconnect_on_error
+    def upsert_narrative_data(self, data: Dict) -> Dict:
+        return self.client_text.table("narrative_data").upsert(
+            data, on_conflict="timestamp,symbol,source"
+        ).execute()
+
+    def get_latest_narrative_data(self, symbol: str, source: str = "perplexity") -> Optional[Dict]:
+        response = self.client_text.table("narrative_data")\
+                        .select("*")\
+            .eq("symbol", symbol)\
+            .eq("source", source)\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
 
 # ------------------------ AI Reports ------------------------
 
     @reconnect_on_error
     def insert_ai_report(self, data: Dict) -> Optional[str]:
         try:
-            response = self.client.table("ai_reports").insert(data).execute()
+            response = self.client_text.table("ai_reports").insert(data).execute()
             return response.data[0]['id'] if response.data else None
         except Exception as e:
             msg = str(e).lower()
             if "onchain_context" in msg or "onchain_snapshot" in msg:
-                logger.warning(
-                    "ai_reports insert fallback: on-chain columns missing in target schema"
-                )
-                legacy_data = {
-                    key: value
-                    for key, value in data.items()
-                    if key not in {"onchain_context", "onchain_snapshot"}
-                }
-                response = self.client.table("ai_reports").insert(legacy_data).execute()
+                logger.warning("ai_reports insert fallback: on-chain columns missing in target schema")
+                legacy_data = {k: v for k, v in data.items() if k not in {"onchain_context", "onchain_snapshot"}}
+                response = self.client_text.table("ai_reports").insert(legacy_data).execute()
                 return response.data[0]['id'] if response.data else None
             raise
 
     def get_latest_report(self, symbol: str = None) -> Optional[Dict]:
-        query = self.client.table("ai_reports")\
+        query = self.client_text.table("ai_reports")\
                         .select("*")\
             .order("created_at", desc=True)
-
         if symbol:
             query = query.eq("symbol", symbol)
-
         response = query.limit(1).execute()
         return response.data[0] if response.data else None
 
-    # Evaluation Storage
+# --------------------- Dune Query Data ---------------------
+
+    @reconnect_on_error
+    def upsert_dune_query_result(self, data: Dict) -> Dict:
+        return self.client_text.table("dune_query_results").upsert(
+            data, on_conflict="query_id,collected_at"
+        ).execute()
+
+    def get_latest_dune_query_result(self, query_id: int) -> Optional[Dict]:
+        response = self.client_text.table("dune_query_results")\
+                        .select("*")\
+            .eq("query_id", query_id)\
+            .order("collected_at", desc=True)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
+# ----------------------- Feedback ---------------------------
+
+    @reconnect_on_error
+    def insert_feedback(self, data: Dict) -> Dict:
+        return self.client_text.table("feedback_logs").insert(data).execute()
+
+    def get_feedback_history(self, limit: int = 10) -> List[Dict]:
+        response = self.client_text.table("feedback_logs")\
+                        .select("*")\
+            .order("created_at", desc=True)\
+            .limit(limit)\
+            .execute()
+        return response.data if response.data else []
+
+# --------------------- Trade Executions ---------------------
+
+    @reconnect_on_error
+    def insert_trade_execution(self, data: Dict) -> Dict:
+        return self.client_text.table("trade_executions").insert(data).execute()
+
+    def get_trade_execution_by_order_id(self, order_id: str) -> Optional[Dict]:
+        if not order_id:
+            return None
+        response = self.client_text.table("trade_executions")\
+                        .select("*")\
+            .eq("order_id", order_id)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
+    def get_position_status(self, symbol: str) -> Optional[Dict]:
+        response = self.client_text.table("trade_executions")\
+                        .select("*")\
+            .eq("symbol", symbol)\
+            .order("created_at", desc=True)\
+            .limit(1)\
+            .execute()
+        return response.data[0] if response.data else None
+
+# -------------------- Market Status Events ------------------
+
+    @reconnect_on_error
+    def insert_market_status_event(self, data: Dict) -> Dict:
+        return self.client_text.table("market_status_events").insert(data).execute()
+
+    @reconnect_on_error
+    def get_market_status_events(
+        self,
+        symbol: Optional[str] = None,
+        limit: int = 100,
+        hours: Optional[int] = None,
+    ) -> List[Dict]:
+        query = self.client_text.table("market_status_events")\
+                        .select("*")\
+            .order("created_at", desc=True)\
+            .limit(limit)
+        if symbol:
+            query = query.eq("symbol", symbol)
+        if hours is not None:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+            query = query.gte("created_at", cutoff)
+        response = query.execute()
+        return response.data if response.data else []
+
+    @reconnect_on_error
+    def update_market_status_event_technical_snapshot(self, event_id: int, technical_snapshot: Dict) -> Dict:
+        return self.client_text.table("market_status_events")\
+            .update({"technical_snapshot": technical_snapshot})\
+            .eq("id", event_id)\
+            .execute()
+
+# --------------------- Evaluation Storage -------------------
 
     @staticmethod
     def _to_iso(value) -> Optional[str]:
@@ -452,14 +632,13 @@ class DatabaseClient:
 
     @reconnect_on_error
     def upsert_evaluation_prediction(self, data: Dict) -> Optional[Dict]:
-        # source_id가 None이면 PostgreSQL NULL unique 충돌 방지를 위해 스킵
         if data.get("source_id") is None:
             logger.warning(
-                "upsert_evaluation_prediction skipped: source_id is None "
+                f"upsert_evaluation_prediction skipped: source_id is None "
                 f"(symbol={data.get('symbol')}, mode={data.get('mode')})"
             )
             return None
-        response = self.client.table("evaluation_predictions").upsert(
+        response = self.client_text.table("evaluation_predictions").upsert(
             data,
             on_conflict="source_type,source_id,mode"
         ).execute()
@@ -471,7 +650,7 @@ class DatabaseClient:
         source_id: int,
         mode: Optional[str] = None,
     ) -> Optional[Dict]:
-        query = self.client.table("evaluation_predictions")\
+        query = self.client_text.table("evaluation_predictions")\
                         .select("*")\
             .eq("source_type", source_type)\
             .eq("source_id", source_id)
@@ -481,7 +660,7 @@ class DatabaseClient:
         return response.data[0] if response.data else None
 
     def get_evaluation_prediction(self, prediction_id: int) -> Optional[Dict]:
-        response = self.client.table("evaluation_predictions")\
+        response = self.client_text.table("evaluation_predictions")\
                         .select("*")\
             .eq("id", prediction_id)\
             .limit(1)\
@@ -505,7 +684,7 @@ class DatabaseClient:
 
         while fetched < limit:
             fetch_size = min(page_size, limit - fetched)
-            query = self.client.table("evaluation_predictions").select("*")
+            query = self.client_text.table("evaluation_predictions").select("*")
             if symbol:
                 query = query.eq("symbol", symbol)
             if mode:
@@ -528,14 +707,14 @@ class DatabaseClient:
 
     @reconnect_on_error
     def upsert_evaluation_outcome(self, data: Dict) -> Optional[Dict]:
-        response = self.client.table("evaluation_outcomes").upsert(
+        response = self.client_text.table("evaluation_outcomes").upsert(
             data,
             on_conflict="prediction_id,horizon_minutes"
         ).execute()
         return response.data[0] if response.data else None
 
     def get_evaluation_outcome(self, prediction_id: int, horizon_minutes: int) -> Optional[Dict]:
-        response = self.client.table("evaluation_outcomes")\
+        response = self.client_text.table("evaluation_outcomes")\
                         .select("*")\
             .eq("prediction_id", prediction_id)\
             .eq("horizon_minutes", horizon_minutes)\
@@ -557,7 +736,7 @@ class DatabaseClient:
         if prediction_ids:
             for idx in range(0, len(prediction_ids), 200):
                 chunk_ids = prediction_ids[idx:idx + 200]
-                query = self.client.table("evaluation_outcomes").select("*").in_("prediction_id", chunk_ids)
+                query = self.client_text.table("evaluation_outcomes").select("*").in_("prediction_id", chunk_ids)
                 if start_iso:
                     query = query.gte("evaluated_at", start_iso)
                 if end_iso:
@@ -571,7 +750,7 @@ class DatabaseClient:
         page_size = 1000
         while fetched < limit:
             fetch_size = min(page_size, limit - fetched)
-            query = self.client.table("evaluation_outcomes").select("*")
+            query = self.client_text.table("evaluation_outcomes").select("*")
             if start_iso:
                 query = query.gte("evaluated_at", start_iso)
             if end_iso:
@@ -590,7 +769,7 @@ class DatabaseClient:
     def batch_upsert_evaluation_component_scores(self, data_list: List[Dict]) -> Dict:
         if not data_list:
             return {"data": []}
-        return self.client.table("evaluation_component_scores").upsert(
+        return self.client_text.table("evaluation_component_scores").upsert(
             data_list,
             on_conflict="prediction_id,component_type,metric_name,scope_key"
         ).execute()
@@ -601,7 +780,7 @@ class DatabaseClient:
             return rows
         for idx in range(0, len(prediction_ids), 200):
             chunk_ids = prediction_ids[idx:idx + 200]
-            response = self.client.table("evaluation_component_scores")\
+            response = self.client_text.table("evaluation_component_scores")\
                             .select("*")\
                 .in_("prediction_id", chunk_ids)\
                 .order("created_at")\
@@ -612,7 +791,7 @@ class DatabaseClient:
 
     @reconnect_on_error
     def delete_evaluation_rollups_for_date(self, rollup_date: str) -> Dict:
-        return self.client.table("evaluation_rollups_daily")\
+        return self.client_text.table("evaluation_rollups_daily")\
             .delete()\
             .eq("rollup_date", rollup_date)\
             .execute()
@@ -621,345 +800,70 @@ class DatabaseClient:
     def upsert_evaluation_rollups(self, rows: List[Dict]) -> Dict:
         if not rows:
             return {"data": []}
-        return self.client.table("evaluation_rollups_daily").upsert(
+        return self.client_text.table("evaluation_rollups_daily").upsert(
             rows,
             on_conflict="rollup_date,symbol,mode,scope,horizon_minutes,metric_name,bucket_key"
         ).execute()
 
-    # Archive manifests
-
-    @reconnect_on_error
-    def upsert_archive_manifest(self, data: Dict) -> Optional[Dict]:
-        response = self.client.table("archive_manifests").upsert(
-            data,
-            on_conflict="table_name,partition_key"
-        ).execute()
-        return response.data[0] if response.data else None
-
-    def get_archive_manifest(self, table_name: str, partition_key: str) -> Optional[Dict]:
-        response = self.client.table("archive_manifests")\
-                        .select("*")\
-            .eq("table_name", table_name)\
-            .eq("partition_key", partition_key)\
-            .limit(1)\
-            .execute()
-        return response.data[0] if response.data else None
-
-    @reconnect_on_error
-    def update_archive_manifest(self, manifest_id: int, data: Dict) -> Optional[Dict]:
-        response = self.client.table("archive_manifests")\
-            .update(data)\
-            .eq("id", manifest_id)\
-            .execute()
-        return response.data[0] if response.data else None
-
-    def get_archive_manifests(
-        self,
-        statuses: Optional[List[str]] = None,
-        cleanup_pending_only: bool = False,
-        limit: int = 1000,
-    ) -> List[Dict]:
-        fetched = 0
-        rows: List[Dict] = []
-        page_size = 500
-        while fetched < limit:
-            fetch_size = min(page_size, limit - fetched)
-            query = self.client.table("archive_manifests").select("*")
-            if statuses:
-                query = query.in_("status", statuses)
-            if cleanup_pending_only:
-                query = query.is_("cleanup_completed_at", "null")
-            response = query.order("archive_started_at").range(fetched, fetched + fetch_size - 1).execute()
-            chunk = response.data if response.data else []
-            if not chunk:
-                break
-            rows.extend(chunk)
-            fetched += len(chunk)
-            if len(chunk) < fetch_size:
-                break
-        return rows
-
-    @reconnect_on_error
-    def insert_market_status_event(self, data: Dict) -> Dict:
-        """Insert hh:20 market status snapshot + event triggers for tuning."""
-        return self.client.table("market_status_events").insert(data).execute()
-
-# ------------------------- Feedback -------------------------
-
-    @reconnect_on_error
-    def get_market_status_events(
-        self,
-        symbol: Optional[str] = None,
-        limit: int = 100,
-        hours: Optional[int] = None,
-    ) -> List[Dict]:
-        query = self.client.table("market_status_events")\
-                        .select("*")\
-            .order("created_at", desc=True)\
-            .limit(limit)
-        if symbol:
-            query = query.eq("symbol", symbol)
-        if hours is not None:
-            cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-            query = query.gte("created_at", cutoff)
-        response = query.execute()
-        return response.data if response.data else []
-
-    @reconnect_on_error
-    def update_market_status_event_technical_snapshot(self, event_id: int, technical_snapshot: Dict) -> Dict:
-        """Replace technical_snapshot JSONB for a market_status_event row."""
-        return self.client.table("market_status_events")\
-            .update({"technical_snapshot": technical_snapshot})\
-            .eq("id", event_id)\
-            .execute()
-
-    @reconnect_on_error
-    def get_market_data_since(
-        self,
-        symbol: str,
-        since: datetime,
-        limit: int = 120,
-        exchange: str = "binance",
-        columns: Optional[str] = None,
-    ) -> pd.DataFrame:
-        response = self.client.table("market_data")\
-            .select(columns or "*")\
-            .eq("symbol", symbol)\
-            .eq("exchange", exchange)\
-            .gte("timestamp", since.isoformat())\
-            .order("timestamp")\
-            .limit(limit)\
-            .execute()
-        rows = response.data if response.data else []
-        if rows:
-            df = pd.DataFrame(rows)
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-            return df.sort_values('timestamp').reset_index(drop=True)
-        return pd.DataFrame()
-
-    def get_market_data_gap(
-        self,
-        symbol: str,
-        since: datetime,
-        limit: int = 43200,
-        exchange: str = "binance",
-        columns: Optional[str] = None,
-    ) -> pd.DataFrame:
-        """GCS 로컬 캐시 이후 갭 구간만 Supabase에서 페이지네이션으로 보충.
-
-        since: GCS 캐시의 마지막 타임스탬프 (이 시점 이후 데이터만 fetch)
-        limit: 최대 row 수 (기본 43,200 = 30일 1분봉 상한)
-        """
-        rows = self._fetch_paginated(
-            "market_data", limit, "timestamp",
-            since=since, columns=columns,
-            symbol=symbol, exchange=exchange,
-        )
-        if rows:
-            df = pd.DataFrame(rows)
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-            return df.sort_values('timestamp').reset_index(drop=True)
-        return pd.DataFrame()
-
-    @reconnect_on_error
-    def insert_feedback(self, data: Dict) -> Dict:
-        return self.client.table("feedback_logs").insert(data).execute()
-
-    def get_feedback_history(self, limit: int = 10) -> List[Dict]:
-        response = self.client.table("feedback_logs")\
-                        .select("*")\
-            .order("created_at", desc=True)\
-            .limit(limit)\
-            .execute()
-
-        return response.data if response.data else []
-
-# --------------------- Trade Executions ---------------------
-
-    @reconnect_on_error
-    def insert_trade_execution(self, data: Dict) -> Dict:
-        return self.client.table("trade_executions").insert(data).execute()
-
-    def get_trade_execution_by_order_id(self, order_id: str) -> Optional[Dict]:
-        if not order_id:
-            return None
-        response = self.client.table("trade_executions")\
-                        .select("*")\
-            .eq("order_id", order_id)\
-            .limit(1)\
-            .execute()
-        return response.data[0] if response.data else None
-
-    def get_position_status(self, symbol: str) -> Optional[Dict]:
-        response = self.client.table("trade_executions")\
-                        .select("*")\
-            .eq("symbol", symbol)\
-            .order("created_at", desc=True)\
-            .limit(1)\
-            .execute()
-
-        return response.data[0] if response.data else None
-
-# --------------------- Funding History ---------------------
-
-    def get_funding_history(self, symbol: str, limit: int = 100, since: Optional[datetime] = None, columns: Optional[str] = None) -> pd.DataFrame:
-        rows = self._fetch_paginated("funding_data", limit, "timestamp", since=since, columns=columns, symbol=symbol)
-        if rows:
-            df = pd.DataFrame(rows)
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-            return df.sort_values('timestamp').reset_index(drop=True)
-        return pd.DataFrame()
-
-# -------------- Data Cleanup (500MB free tier) --------------
+# =====================================================================
+# Data Cleanup (retention 만료 데이터 삭제)
+# =====================================================================
 
     @reconnect_on_error
     def cleanup_old_data(self) -> Dict:
-        """Delete data older than configured retention days.
-        Uses settings for retention periods. Called daily by the scheduler."""
+        """Delete data older than configured retention days."""
         results = {}
 
+        # ── QUANT tables ──────────────────────────────────────────────
         try:
-            # Market data
-            cutoff = (datetime.now(timezone.utc) - timedelta(
-                days=settings.RETENTION_MARKET_DATA_DAYS
-            )).isoformat()
-            r = self.client.table("market_data")\
-                .delete()\
-                .lt("timestamp", cutoff)\
-                .execute()
-            results['market_data_deleted'] = len(r.data) if r.data else 0
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_MARKET_DATA_DAYS)).isoformat()
+            for table in ("market_data", "funding_data", "liquidations"):
+                r = self.client_quant.table(table).delete().lt("timestamp", cutoff).execute()
+                results[f"{table}_deleted"] = len(r.data) if r.data else 0
 
-            # CVD data
-            cutoff_cvd = (datetime.now(timezone.utc) - timedelta(
-                days=settings.RETENTION_CVD_DAYS
-            )).isoformat()
-            r = self.client.table("cvd_data")\
-                .delete()\
-                .lt("timestamp", cutoff_cvd)\
-                .execute()
-            results['cvd_data_deleted'] = len(r.data) if r.data else 0
+            cutoff_cvd = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_CVD_DAYS)).isoformat()
+            r = self.client_quant.table("cvd_data").delete().lt("timestamp", cutoff_cvd).execute()
+            results["cvd_data_deleted"] = len(r.data) if r.data else 0
 
-            # Funding data
-            r = self.client.table("funding_data")\
-                .delete()\
-                .lt("timestamp", cutoff)\
-                .execute()
-            results['funding_data_deleted'] = len(r.data) if r.data else 0
+            r = self.client_quant.table("microstructure_data").delete().lt("timestamp", cutoff).execute()
+            results["microstructure_deleted"] = len(r.data) if r.data else 0
 
-            # Telegram messages (30 days for LightRAG)
-            cutoff_telegram = (datetime.now(timezone.utc) - timedelta(
-                days=settings.RETENTION_TELEGRAM_DAYS
-            )).isoformat()
-            r = self.client.table("telegram_messages")\
-                .delete()\
-                .lt("created_at", cutoff_telegram)\
-                .execute()
-            results['telegram_deleted'] = len(r.data) if r.data else 0
+            cutoff_long = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_REPORTS_DAYS)).isoformat()
+            r = self.client_quant.table("macro_data").delete().lt("timestamp", cutoff_long).execute()
+            results["macro_deleted"] = len(r.data) if r.data else 0
 
-            # Microstructure data
-            cutoff_micro = (datetime.now(timezone.utc) - timedelta(
-                days=settings.RETENTION_MARKET_DATA_DAYS
-            )).isoformat()
-            r = self.client.table("microstructure_data")\
-                .delete()\
-                .lt("timestamp", cutoff_micro)\
-                .execute()
-            results['microstructure_deleted'] = len(r.data) if r.data else 0
+            r = self.client_quant.table("deribit_data").delete().lt("timestamp", cutoff).execute()
+            results["deribit_deleted"] = len(r.data) if r.data else 0
 
-            # Macro data
-            cutoff_macro = (datetime.now(timezone.utc) - timedelta(
-                days=settings.RETENTION_REPORTS_DAYS
-            )).isoformat()
-            r = self.client.table("macro_data")\
-                .delete()\
-                .lt("timestamp", cutoff_macro)\
-                .execute()
-            results['macro_deleted'] = len(r.data) if r.data else 0
+            r = self.client_quant.table("fear_greed_data").delete().lt("timestamp", cutoff_long).execute()
+            results["fear_greed_deleted"] = len(r.data) if r.data else 0
 
-            # Narrative data
-            cutoff_narrative = (datetime.now(timezone.utc) - timedelta(
-                days=settings.RETENTION_REPORTS_DAYS
-            )).isoformat()
-            r = self.client.table("narrative_data")\
-                .delete()\
-                .lt("timestamp", cutoff_narrative)\
-                .execute()
-            results['narrative_deleted'] = len(r.data) if r.data else 0
-
-            # AI reports (90 days)
-            cutoff_reports = (datetime.now(timezone.utc) - timedelta(
-                days=settings.RETENTION_REPORTS_DAYS
-            )).isoformat()
-            r = self.client.table("ai_reports")\
-                .delete()\
-                .lt("created_at", cutoff_reports)\
-                .execute()
-            results['reports_deleted'] = len(r.data) if r.data else 0
-
-            # Dune snapshots
-            r = self.client.table("dune_query_results")\
-                .delete()\
-                .lt("collected_at", cutoff_reports)\
-                .execute()
-            results['dune_deleted'] = len(r.data) if r.data else 0
-
-            # Liquidations (same retention as market data)
-            try:
-                r = self.client.table("liquidations")\
-                    .delete()\
-                    .lt("timestamp", cutoff)\
-                    .execute()
-                results['liquidations_deleted'] = len(r.data) if r.data else 0
-            except Exception:
-                results['liquidations_deleted'] = 0  # Table may not exist yet
-
-            # Deribit options data (same retention as market data)
-            try:
-                r = self.client.table("deribit_data")\
-                    .delete()\
-                    .lt("timestamp", cutoff)\
-                    .execute()
-                results['deribit_deleted'] = len(r.data) if r.data else 0
-            except Exception:
-                results['deribit_deleted'] = 0
-
-            # Fear & Greed data (keep 90 days same as reports)
-            cutoff_fg = (datetime.now(timezone.utc) - timedelta(
-                days=settings.RETENTION_REPORTS_DAYS
-            )).isoformat()
-            try:
-                r = self.client.table("fear_greed_data")\
-                    .delete()\
-                    .lt("timestamp", cutoff_fg)\
-                    .execute()
-                results['fear_greed_deleted'] = len(r.data) if r.data else 0
-            except Exception:
-                results['fear_greed_deleted'] = 0
-
-            try:
-                cutoff_onchain = (datetime.now(timezone.utc) - timedelta(
-                    days=settings.RETENTION_REPORTS_DAYS
-                )).date().isoformat()
-                r = self.client.table("onchain_daily_snapshots")\
-                    .delete()\
-                    .lt("as_of_date", cutoff_onchain)\
-                    .execute()
-                results['onchain_deleted'] = len(r.data) if r.data else 0
-            except Exception:
-                results['onchain_deleted'] = 0
-
-            logger.info(f"Data cleanup completed: {results}")
-            return results
-
+            cutoff_onchain = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_REPORTS_DAYS)).date().isoformat()
+            r = self.client_quant.table("onchain_daily_snapshots").delete().lt("as_of_date", cutoff_onchain).execute()
+            results["onchain_deleted"] = len(r.data) if r.data else 0
         except Exception as e:
-            logger.error(f"Cleanup error: {e}")
-            return {"error": str(e)}
+            logger.error(f"QUANT cleanup error: {e}")
+
+        # ── TEXT tables ───────────────────────────────────────────────
+        try:
+            cutoff_telegram = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_TELEGRAM_DAYS)).isoformat()
+            r = self.client_text.table("telegram_messages").delete().lt("created_at", cutoff_telegram).execute()
+            results["telegram_deleted"] = len(r.data) if r.data else 0
+
+            cutoff_long = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_REPORTS_DAYS)).isoformat()
+            r = self.client_text.table("narrative_data").delete().lt("timestamp", cutoff_long).execute()
+            results["narrative_deleted"] = len(r.data) if r.data else 0
+
+            r = self.client_text.table("ai_reports").delete().lt("created_at", cutoff_long).execute()
+            results["reports_deleted"] = len(r.data) if r.data else 0
+
+            r = self.client_text.table("dune_query_results").delete().lt("collected_at", cutoff_long).execute()
+            results["dune_deleted"] = len(r.data) if r.data else 0
+        except Exception as e:
+            logger.error(f"TEXT cleanup error: {e}")
+
+        logger.info(f"Data cleanup completed: {results}")
+        return results
 
 
 db = DatabaseClient()
-
-
-
-
-
-

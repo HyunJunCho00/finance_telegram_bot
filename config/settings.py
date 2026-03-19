@@ -30,8 +30,16 @@ class Settings(BaseSettings):
     VERTEX_REGION: str = "global"            # 모델 호출 리전 (Gemini + Claude)
     VERTEX_REGION_GEMINI: str = "global"     # Gemini 전용 (하위호환)
 
-    SUPABASE_URL: str = ""
+    SUPABASE_URL: str = ""        # 하위 호환용 (단일 프로젝트 시절)
     SUPABASE_KEY: str = ""
+
+    # ── Supabase 2-project split ──────────────────────────────────────
+    # QUANT: 수치 데이터 (market, funding, cvd, liquidations, micro, deribit, fear_greed, macro)
+    # TEXT : 텍스트/AI (telegram, narrative, ai_reports, evaluations, trade_executions 등)
+    SUPABASE_URL_QUANT: str = ""
+    SUPABASE_KEY_QUANT: str = ""
+    SUPABASE_URL_TEXT: str = ""
+    SUPABASE_KEY_TEXT: str = ""
 
     # ===== Direct AI API Keys (Multi-LLM) =====
     ANTHROPIC_API_KEY: str = ""
