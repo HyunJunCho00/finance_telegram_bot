@@ -28,6 +28,19 @@ except Exception:
 # ------------------------------------------------------------
 
 
+class _TableRouter:
+    """db.client.table(...) 호출을 테이블명에 따라 올바른 Supabase 클라이언트로 자동 라우팅.
+
+    기존 코드의 db.client.table("xxx") 패턴을 전혀 수정하지 않아도
+    QUANT/TEXT 프로젝트로 자동 분기됨.
+    """
+    def __init__(self, db_instance: "DatabaseClient"):
+        self._db = db_instance
+
+    def table(self, table_name: str):
+        return self._db._client(table_name).table(table_name)
+
+
 class DatabaseClient:
     # ── QUANT Project 담당 테이블 (수치 데이터) ───────────────────────────
     QUANT_TABLES = {
@@ -59,8 +72,8 @@ class DatabaseClient:
         text_key = getattr(settings, "SUPABASE_KEY_TEXT", "") or settings.SUPABASE_KEY
         self.client_text: Client = create_client(text_url, text_key, options=options)
 
-        # 하위 호환: gcs_parquet.py 등에서 db.client 직접 참조하는 경우 대비
-        self.client = self.client_quant
+        # db.client.table("xxx") 호출을 테이블명 기준으로 자동 라우팅
+        self.client = _TableRouter(self)
 
     def _client(self, table: str) -> Client:
         """테이블명으로 적절한 Supabase 클라이언트 반환."""
