@@ -468,6 +468,9 @@ class DatabaseClient:
     @reconnect_on_error
     def upsert_telegram_message(self, data: Dict) -> Dict:
         try:
+            # Strip null bytes — PostgreSQL JSON rejects \x00 (causes 500 "JSON could not be generated")
+            if data.get("text"):
+                data = {**data, "text": data["text"].replace("\x00", "")}
             response = self.client_text.table("telegram_messages").upsert(
                 data, on_conflict="channel,message_id"
             ).execute()
