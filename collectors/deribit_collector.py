@@ -270,9 +270,9 @@ class DeribitCollector:
                     df_local = pd.DataFrame([data])
                     if "timestamp" in df_local.columns:
                         df_local["timestamp"] = pd.to_datetime(df_local["timestamp"], utc=True, errors="coerce")
-                    key = str(data.get("currency", currency)).upper()
+                    key = str(data.get("symbol", currency)).upper()
                     gcs_parquet_store.write_timeseries_to_local(
-                        "deribit", key, df_local, ["timestamp", "currency"]
+                        "deribit", key, df_local, ["timestamp", "symbol"]
                     )
                 except Exception as e:
                     logger.debug(f"[LocalCache] deribit local write skipped: {e}")

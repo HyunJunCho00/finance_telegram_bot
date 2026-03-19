@@ -154,16 +154,25 @@ CREATE TABLE IF NOT EXISTS fear_greed_data (
 );
 CREATE INDEX idx_fear_greed_timestamp ON fear_greed_data(timestamp DESC);
 
-CREATE TABLE IF NOT EXISTS onchain_daily_snapshots (
+CREATE TABLE IF NOT EXISTS public.onchain_daily_snapshots (
     id BIGSERIAL PRIMARY KEY,
-    symbol VARCHAR(20) NOT NULL,
+    symbol TEXT NOT NULL,
+    asset TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'coinmetrics',
     as_of_date DATE NOT NULL,
-    source VARCHAR(40) NOT NULL DEFAULT 'coinmetrics',
-    data JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(symbol, as_of_date, source)
+    raw_metrics JSONB NOT NULL DEFAULT '{}'::jsonb,
+    derived_features JSONB NOT NULL DEFAULT '{}'::jsonb,
+    regime_flags JSONB NOT NULL DEFAULT '{}'::jsonb,
+    bias_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    risk_bias TEXT NOT NULL DEFAULT 'NEUTRAL',
+    data_quality TEXT NOT NULL DEFAULT 'unknown',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (symbol, as_of_date, source)
 );
-CREATE INDEX idx_onchain_daily_symbol_date ON onchain_daily_snapshots(symbol, as_of_date DESC);
+CREATE INDEX IF NOT EXISTS idx_onchain_daily_snapshots_symbol_date
+ON public.onchain_daily_snapshots (symbol, as_of_date DESC);
+CREATE INDEX IF NOT EXISTS idx_onchain_daily_snapshots_risk_bias_date
+ON public.onchain_daily_snapshots (risk_bias, as_of_date DESC);
 
 CREATE TABLE IF NOT EXISTS public.liquidation_cascade_features (
     id BIGSERIAL PRIMARY KEY,
