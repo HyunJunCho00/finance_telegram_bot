@@ -256,13 +256,31 @@ class WebSocketCollector:
                 # 1. Flush liquidations: Only clear if DB write succeeds
                 liq_records = self.liq_buffer.get_data()
                 if liq_records:
+                    # ── 1순위: 로컬 파케이 캐시 ────────────────────────────
+                    try:
+                        import pandas as pd
+                        from processors.gcs_parquet import gcs_parquet_store
+                        df_liq = pd.DataFrame(liq_records)
+                        if "timestamp" in df_liq.columns:
+                            df_liq["timestamp"] = pd.to_datetime(df_liq["timestamp"], utc=True, errors="coerce")
+                        for sym in df_liq["symbol"].unique() if "symbol" in df_liq.columns else []:
+                            gcs_parquet_store.write_timeseries_to_local(
+                                "liquidations", sym,
+                                df_liq[df_liq["symbol"] == sym].copy(),
+                                ["timestamp", "symbol"],
+                            )
+                    except Exception as e:
+                        logger.debug(f"[LocalCache] liquidations local write skipped: {e}")
+
+                    # ── 2순위: Supabase ──────────────────────────────────────
                     try:
                         db.batch_upsert_liquidations(liq_records)
-                        self.liq_buffer.clear() # Success
+                        self.liq_buffer.clear()  # Success
                         total_liq = sum(r["long_liq_usd"] + r["short_liq_usd"] for r in liq_records)
                         logger.info(f"WS flush: {len(liq_records)} liquidation records (${total_liq:,.0f})")
                     except Exception as e:
-                        logger.warning(f"WS liquidation flush failed (data kept in buffer): {e}")
+                        self.liq_buffer.clear()  # 로컬에 저장됐으니 버퍼 비움
+                        logger.warning(f"WS liquidation flush → Supabase skipped (local cache OK): {e}")
 
                 # 2. Flush whale CVD: Only clear if DB write succeeds
                 whale_data = self.whale_buffer.get_data()

@@ -199,13 +199,28 @@ class FundingCollector:
         return results
 
     def save_to_database(self, data: List[Dict]) -> None:
-        if data:
-            try:
-                for record in data:
-                    db.upsert_funding_data(record)
-                logger.info(f"Saved {len(data)} funding data records (global OI)")
-            except Exception as e:
-                logger.error(f"Database save error: {e}")
+        if not data:
+            return
+        # ── 1순위: 로컬 파케이 캐시 (Supabase 장애 시에도 데이터 보존) ────
+        try:
+            import pandas as pd
+            from processors.gcs_parquet import gcs_parquet_store
+            df_local = pd.DataFrame(data)
+            if "timestamp" in df_local.columns:
+                df_local["timestamp"] = pd.to_datetime(df_local["timestamp"], utc=True, errors="coerce")
+            for sym in df_local["symbol"].unique() if "symbol" in df_local.columns else []:
+                sym_df = df_local[df_local["symbol"] == sym].copy()
+                gcs_parquet_store.write_timeseries_to_local("funding", sym, sym_df, ["timestamp", "symbol"])
+        except Exception as e:
+            logger.debug(f"[LocalCache] funding local write skipped: {e}")
+
+        # ── 2순위: Supabase (실패해도 로컬에 이미 저장됨) ─────────────────
+        try:
+            for record in data:
+                db.upsert_funding_data(record)
+            logger.info(f"Saved {len(data)} funding data records (global OI)")
+        except Exception as e:
+            logger.warning(f"[DB] funding_data Supabase write skipped (local cache OK): {e}")
 
     def run(self) -> None:
         data = self.collect_all_funding_data()

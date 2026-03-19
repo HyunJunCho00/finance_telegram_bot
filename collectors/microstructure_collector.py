@@ -107,11 +107,28 @@ class MicrostructureCollector:
         if not rows:
             return
 
+        # ── 1순위: 로컬 파케이 캐시 ─────────────────────────────────────
+        try:
+            import pandas as pd
+            from processors.gcs_parquet import gcs_parquet_store
+            df_local = pd.DataFrame(rows)
+            if "timestamp" in df_local.columns:
+                df_local["timestamp"] = pd.to_datetime(df_local["timestamp"], utc=True, errors="coerce")
+            for sym in df_local["symbol"].unique() if "symbol" in df_local.columns else []:
+                gcs_parquet_store.write_timeseries_to_local(
+                    "microstructure", sym,
+                    df_local[df_local["symbol"] == sym].copy(),
+                    ["timestamp", "symbol"],
+                )
+        except Exception as e:
+            logger.debug(f"[LocalCache] microstructure local write skipped: {e}")
+
+        # ── 2순위: Supabase ──────────────────────────────────────────────
         try:
             db.batch_upsert_microstructure_data(rows)
             logger.info(f"Saved {len(rows)} microstructure rows")
         except Exception as e:
-            logger.error(f"Microstructure DB save error: {e}")
+            logger.warning(f"[DB] microstructure Supabase write skipped (local cache OK): {e}")
 
 
 microstructure_collector = MicrostructureCollector()

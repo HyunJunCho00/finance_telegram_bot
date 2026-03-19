@@ -13,11 +13,39 @@ from agents.market_monitor_agent import market_monitor_agent
 
 
 class MCPTools:
+    def _load_1m_gcs_first(self, symbol: str, months_back: float = 0.2) -> pd.DataFrame:
+        """GCS-first 1m loader: local parquet cache + Supabase gap-fill only (≤1440 rows)."""
+        from datetime import datetime, timedelta, timezone as tz
+        settings = get_settings()
+        df = pd.DataFrame()
+        try:
+            df = gcs_parquet_store.load_ohlcv("1m", symbol, months_back=months_back)
+        except Exception as e:
+            logger.debug(f"[MCP] GCS 1m load skipped ({symbol}): {e}")
+
+        if not df.empty and "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            last_ts = df["timestamp"].max()
+            gap_minutes = int((pd.Timestamp.now(tz="UTC") - last_ts).total_seconds() / 60) + 60
+            gap_limit = max(gap_minutes, 60)  # no hard cap — fetch actual gap size
+            try:
+                df_gap = db.get_market_data_gap(symbol, since=last_ts, limit=gap_limit)
+                if df_gap is not None and not df_gap.empty:
+                    df_gap["timestamp"] = pd.to_datetime(df_gap["timestamp"], utc=True, errors="coerce")
+                    df = pd.concat([df, df_gap]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+            except Exception:
+                pass
+        else:
+            try:
+                df = db.get_latest_market_data(symbol, limit=settings.SWING_CANDLE_LIMIT)
+            except Exception:
+                pass
+        return df
+
     def _load_chart_context(self, symbol: str, mode: TradingMode) -> Optional[Dict]:
         settings = get_settings()
-        limit = settings.SWING_CANDLE_LIMIT
 
-        df = db.get_latest_market_data(symbol, limit=limit)
+        df = self._load_1m_gcs_first(symbol, months_back=settings.SWING_HISTORY_MONTHS / 12)
         if df.empty:
             return None
 
@@ -103,7 +131,7 @@ class MCPTools:
         """Get mode-specific market analysis. Raw data only."""
         try:
             settings = get_settings()
-            df = db.get_latest_market_data(symbol, limit=settings.candle_limit)
+            df = self._load_1m_gcs_first(symbol, months_back=settings.SWING_HISTORY_MONTHS / 12)
             if df.empty:
                 return {"error": "No market data available"}
 
@@ -385,7 +413,7 @@ class MCPTools:
         """Return compact indicator bundle (PSAR, KC, Aroon, HMA, etc.)."""
         try:
             settings = get_settings()
-            df = db.get_latest_market_data(symbol, limit=settings.candle_limit)
+            df = self._load_1m_gcs_first(symbol, months_back=0.1)
             if df.empty:
                 return {"error": "No market data available"}
 

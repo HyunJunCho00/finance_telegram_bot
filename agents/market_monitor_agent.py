@@ -13,7 +13,7 @@ Every hour:
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional
 
 import pandas as pd
@@ -79,11 +79,50 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             logger.warning(f"Playbook load error ({symbol}/{mode}): {e}")
         return None
 
+    def _load_recent_df(self, symbol: str, lookback_days: int = 3) -> pd.DataFrame:
+        """GCS-first pattern: local parquet cache + small Supabase gap-fill only.
+        Supabase egress = at most today's 1m candles (≤1440 rows) regardless of lookback.
+        """
+        from processors.gcs_parquet import gcs_parquet_store
+        months_back = max(lookback_days / 30.0, 0.07)  # min ~2 days
+        df = pd.DataFrame()
+        try:
+            df = gcs_parquet_store.load_ohlcv("1m", symbol, months_back=months_back)
+        except Exception as e:
+            logger.debug(f"[Monitor] GCS 1m load skipped ({symbol}): {e}")
+
+        if not df.empty and "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            last_ts = df["timestamp"].max()
+            gap_minutes = int((datetime.now(timezone.utc) - last_ts).total_seconds() / 60) + 60
+            gap_limit = max(gap_minutes, 60)  # no hard cap — fetch actual gap size
+            try:
+                df_gap = db.get_market_data_gap(symbol, since=last_ts, limit=gap_limit)
+                if df_gap is not None and not df_gap.empty:
+                    df_gap["timestamp"] = pd.to_datetime(df_gap["timestamp"], utc=True, errors="coerce")
+                    df = pd.concat([df, df_gap]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+            except Exception as e:
+                logger.debug(f"[Monitor] Supabase gap-fill failed ({symbol}): {e}")
+        else:
+            # GCS cache miss — fallback to direct Supabase with reduced limit
+            try:
+                df = db.get_latest_market_data(symbol, limit=lookback_days * 1440)
+            except Exception:
+                pass
+
+        # Trim to lookback window
+        if not df.empty and "timestamp" in df.columns:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            df = df[df["timestamp"] >= cutoff].reset_index(drop=True)
+
+        return df
+
     def _get_live_indicators(self, symbol: str) -> Dict:
         """Fetch minimal live indicators for trigger evaluation."""
         indicators = {}
         try:
-            df = db.get_latest_market_data(symbol, limit=1800)
+            df = self._load_recent_df(symbol, lookback_days=2)  # GCS-first, ≤1440 rows from Supabase
             if not df.empty:
                 indicators["price"] = float(df["close"].iloc[-1])
                 p_now = indicators["price"]
@@ -166,7 +205,9 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         """Load the current deterministic scenario state for revision / invalidation checks."""
         try:
             monitor_mode = TradingMode(mode)
-            df = db.get_latest_market_data(symbol, limit=settings.SWING_CANDLE_LIMIT)
+            # GCS-first: 3 days sufficient for scenario_engine structure detection
+            # Supabase egress = today's gap only (≤1440 rows) instead of 43,200
+            df = self._load_recent_df(symbol, lookback_days=3)
             if df is None or df.empty:
                 return {}
 
@@ -418,7 +459,6 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
 
         # TTL check
         try:
-            from datetime import timedelta
             import dateutil.parser
             created_at = dateutil.parser.parse(playbook.get("created_at", ""))
             if datetime.now(timezone.utc) - created_at > timedelta(hours=24):
@@ -602,7 +642,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 direction = str(playbook.get("source_decision", "HOLD") or "HOLD").upper()
                 if direction in ("LONG", "SHORT"):
                     monitor_mode = TradingMode(mode)
-                    df = db.get_latest_market_data(symbol, limit=settings.SWING_CANDLE_LIMIT)
+                    df = self._load_recent_df(symbol, lookback_days=3)  # GCS-first
                     if df is not None and not df.empty:
                         market_data = math_engine.analyze_market(df, monitor_mode)
                         current_price = float(df["close"].iloc[-1])

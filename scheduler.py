@@ -331,8 +331,29 @@ def _build_mode_technical_snapshot(symbol: str, mode: TradingMode) -> dict:
     """Build deterministic mode-specific technical snapshot for hourly Telegram status."""
     snapshot = {}
     try:
-        limit = settings.SWING_CANDLE_LIMIT
-        df = db.get_latest_market_data(symbol, limit=limit)
+        # GCS-first: local parquet cache + Supabase gap-fill only (≤1440 rows)
+        from processors.gcs_parquet import gcs_parquet_store
+        import pandas as pd
+        df = pd.DataFrame()
+        try:
+            df = gcs_parquet_store.load_ohlcv("1m", symbol, months_back=0.2)
+        except Exception:
+            pass
+        if not df.empty and "timestamp" in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            last_ts = df["timestamp"].max()
+            from datetime import datetime, timezone
+            gap_minutes = int((datetime.now(timezone.utc) - last_ts).total_seconds() / 60) + 60
+            gap_limit = max(gap_minutes, 60)  # no hard cap — fetch actual gap size
+            try:
+                df_gap = db.get_market_data_gap(symbol, since=last_ts, limit=gap_limit)
+                if df_gap is not None and not df_gap.empty:
+                    df_gap["timestamp"] = pd.to_datetime(df_gap["timestamp"], utc=True, errors="coerce")
+                    df = pd.concat([df, df_gap]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+            except Exception:
+                pass
+        if df is None or df.empty:
+            df = db.get_latest_market_data(symbol, limit=settings.SWING_CANDLE_LIMIT)  # fallback
         if df is None or df.empty:
             return snapshot
 

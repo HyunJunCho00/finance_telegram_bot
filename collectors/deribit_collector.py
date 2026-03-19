@@ -263,6 +263,21 @@ class DeribitCollector:
         for currency in self.currencies:
             data = self.collect_for_currency(currency)
             if data:
+                # ── 1순위: 로컬 파케이 캐시 ──────────────────────────────
+                try:
+                    import pandas as pd
+                    from processors.gcs_parquet import gcs_parquet_store
+                    df_local = pd.DataFrame([data])
+                    if "timestamp" in df_local.columns:
+                        df_local["timestamp"] = pd.to_datetime(df_local["timestamp"], utc=True, errors="coerce")
+                    key = str(data.get("currency", currency)).upper()
+                    gcs_parquet_store.write_timeseries_to_local(
+                        "deribit", key, df_local, ["timestamp", "currency"]
+                    )
+                except Exception as e:
+                    logger.debug(f"[LocalCache] deribit local write skipped: {e}")
+
+                # ── 2순위: Supabase ──────────────────────────────────────
                 try:
                     db.upsert_deribit_data(data)
                     logger.info(
@@ -272,7 +287,7 @@ class DeribitCollector:
                         f"Skew_1m={data.get('skew_1m')}"
                     )
                 except Exception as e:
-                    logger.error(f"Deribit DB save error ({currency}): {e}")
+                    logger.warning(f"[DB] deribit Supabase write skipped (local cache OK): {e}")
 
 
 deribit_collector = DeribitCollector()
