@@ -321,6 +321,7 @@ class Settings(BaseSettings):
     # --------------- Neo4j/Milvus / (cleanup ) ---------------
     RETENTION_MARKET_DATA_DAYS: int = 30
     RETENTION_TELEGRAM_DAYS: int = 20  # 원본 텍스트 (Neo4j/Milvus에도 장됨)
+    RETENTION_MARKET_STATUS_DAYS: int = 30  # market_status_events 보존 기간
     RETENTION_REPORTS_DAYS: int = 365  # AI 리포트 (영구히 깝게)
     RETENTION_CVD_DAYS: int = 30
     RETENTION_EXECUTIONS_DAYS: int = 365

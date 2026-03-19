@@ -2100,7 +2100,7 @@ def node_generate_playbook(state) -> dict:
     swing_plan = dual_plan.get("swing_plan")
     position_plan = dual_plan.get("position_plan")
     if isinstance(swing_plan, dict) or isinstance(position_plan, dict):
-        for lane_mode, raw_plan in [("swing", swing_plan), ("position", position_plan)]:
+        for lane_mode, raw_plan in [("swing", swing_plan)]:
             if isinstance(raw_plan, dict):
                 if "monitoring_playbook" in raw_plan and isinstance(raw_plan["monitoring_playbook"], dict):
                     raw_plan = raw_plan["monitoring_playbook"]
@@ -3076,22 +3076,19 @@ class Orchestrator:
                     from executors.outbox_dispatcher import outbox_dispatcher as _dispatcher
                     target_chat_id = state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
                     swing_res = lane_results.get("SWING", {})
-                    pos_res = lane_results.get("POSITION", {})
                     swing_status = swing_res.get("status", "NO_ACTION")
-                    pos_status = pos_res.get("status", "NO_ACTION")
                     msg = (
                         f"<b>Hourly Monitor</b>\n"
                         f"<code>{symbol}</code>\n"
                         f"AI Analysis: {'ON' if analysis_enabled else 'OFF'}\n"
-                        f"{_lane_line('SWING', swing_res)}\n"
-                        f"{_lane_line('POSITION', pos_res)}"
+                        f"{_lane_line('SWING', swing_res)}"
                     )
                     _dispatcher._run_async(trading_bot.send_message, target_chat_id, msg)
 
                     try:
                         from mcp_server.tools import mcp_tools
                         import base64
-                        for lane, status in [("swing", swing_status), ("position", pos_status)]:
+                        for lane, status in [("swing", swing_status)]:
                             if status in ["WATCH", "TRIGGER", "SOFT_TRIGGER"]:
                                 chart_res = mcp_tools.get_chart_images(symbol, lane=lane)
                                 if "charts" in chart_res:

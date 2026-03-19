@@ -831,6 +831,7 @@ def job_routine_market_status():
             # Volatility
             indicators[symbol]["volatility"] = volatility_monitor.calculate_price_change(symbol)
             swing_snapshot = _build_mode_technical_snapshot(symbol, TradingMode.SWING)
+            position_snapshot = _build_mode_technical_snapshot(symbol, TradingMode.POSITION)
             latest_regime = _get_recent_market_regime(symbol)
             indicators[symbol]["market_regime"] = latest_regime
             indicators[symbol]["technical_snapshot"] = {
@@ -1384,6 +1385,22 @@ def job_daily_safe_cleanup():
         logger.info(f"LightRAG stats: {stats}")
     except Exception as e:
         logger.error(f"Daily safe cleanup job error: {e}")
+
+    # Time-based Supabase cleanup (GCS archive 여부와 무관하게 항상 실행)
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_TELEGRAM_DAYS)).isoformat()
+        r = db.client.table("telegram_messages").delete().lt("created_at", cutoff).execute()
+        logger.info(f"Telegram messages cleanup: deleted rows older than {settings.RETENTION_TELEGRAM_DAYS}d")
+    except Exception as e:
+        logger.warning(f"telegram_messages cleanup failed: {e}")
+
+    try:
+        market_status_days = int(getattr(settings, "RETENTION_MARKET_STATUS_DAYS", 30))
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=market_status_days)).isoformat()
+        db.client.table("market_status_events").delete().lt("created_at", cutoff).execute()
+        logger.info(f"market_status_events cleanup: deleted rows older than {market_status_days}d")
+    except Exception as e:
+        logger.warning(f"market_status_events cleanup failed: {e}")
 
 
 
