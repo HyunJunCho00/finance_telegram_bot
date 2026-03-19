@@ -3,6 +3,7 @@
 import base64
 import json
 import mimetypes
+import re
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
@@ -446,7 +447,15 @@ class AIClient:
                 role=role,
             )
             self._last_call_timestamp = time.time()
-            return result
+            return self._strip_thinking_tags(result)
+
+    @staticmethod
+    def _strip_thinking_tags(text: str) -> str:
+        """Strip <think>...</think> blocks produced by reasoning models (Qwen3, DeepSeek-R1, etc.)."""
+        if not text or "<think>" not in text:
+            return text
+        stripped = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+        return stripped.strip()
 
     def _execute_routed_call(
         self,
