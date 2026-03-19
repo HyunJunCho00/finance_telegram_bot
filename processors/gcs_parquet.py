@@ -253,17 +253,30 @@ class GCSParquetStore:
         return None
 
     def _download_parquet(self, object_path: str) -> Optional[pd.DataFrame]:
+        """로컬 캐시 우선 → GCS fallback.
+
+        price_collector가 ohlcv/1m 과 cvd 경로에 매분 직접 기록하므로
+        mutable 경로라도 로컬 캐시가 있으면 GCS 다운로드를 건너뜁니다.
+        → Supabase/GCS egress 0.
+        """
         try:
-            is_mutable = self._is_mutable_path(object_path)
             cache_path = self._local_cache_path(object_path)
-            if cache_path.exists() and not is_mutable:
+            is_mutable = self._is_mutable_path(object_path)
+
+            # 로컬 캐시 우선 (mutable 포함)
+            if cache_path.exists():
                 return pd.read_parquet(cache_path, engine="pyarrow")
+
+            # 로컬 없으면 GCS fallback
+            if not self.enabled:
+                return None
             blob = self.bucket.blob(object_path)
             if not blob.exists():
                 return None
             payload = blob.download_as_bytes()
             df = pd.read_parquet(BytesIO(payload), engine="pyarrow")
-            if not is_mutable and not df.empty:
+            # GCS에서 받은 데이터도 로컬에 저장 (이후 재요청 시 로컬 hit)
+            if not df.empty:
                 try:
                     cache_path.write_bytes(payload)
                 except Exception as e:
@@ -564,6 +577,60 @@ class GCSParquetStore:
             if not pd.api.types.is_datetime64_any_dtype(result[time_col]):
                 result[time_col] = pd.to_datetime(result[time_col], format="mixed", utc=True, errors="coerce")
         return result.sort_values(time_col).reset_index(drop=True)
+
+
+    # ------------------------------------------------------------------
+    # 로컬 직접 쓰기 API (price_collector 전용)
+    # Supabase / GCS 없이 VM 로컬 disk에 기록 → load_ohlcv/load_timeseries
+    # 가 동일 경로를 읽으므로 분석 파이프라인 변경 불필요.
+    # ------------------------------------------------------------------
+
+    def _merge_to_local_cache(self, object_path: str, new_df: pd.DataFrame, dedup_cols: List[str]) -> int:
+        """로컬 캐시 parquet에 merge-upsert."""
+        try:
+            cache_path = self._local_cache_path(object_path)
+            if cache_path.exists():
+                existing = pd.read_parquet(cache_path, engine="pyarrow")
+                merged = pd.concat([existing, new_df], ignore_index=True)
+                merged = merged.drop_duplicates(subset=dedup_cols, keep="last")
+                merged = merged.sort_values(dedup_cols[0]).reset_index(drop=True)
+            else:
+                merged = new_df.sort_values(dedup_cols[0]).reset_index(drop=True)
+            payload, _ = self._build_parquet_payload(merged)
+            cache_path.write_bytes(payload)
+            return len(merged)
+        except Exception as e:
+            logger.error(f"_merge_to_local_cache failed ({object_path}): {e}")
+            return 0
+
+    def write_ohlcv_to_local(self, symbol: str, df: pd.DataFrame) -> int:
+        """OHLCV 1m 데이터를 오늘 날짜 로컬 캐시 parquet에 merge 기록.
+
+        경로: cache/gcs_parquet/ohlcv_1m_{symbol}_{today}.parquet
+        → load_ohlcv("1m", symbol) 가 동일 파일을 읽음.
+        """
+        if df is None or df.empty:
+            return 0
+        df = df.copy()
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+        today = datetime.now(timezone.utc).date().isoformat()
+        object_path = f"ohlcv/1m/{symbol}/{today}.parquet"
+        return self._merge_to_local_cache(object_path, df, ["timestamp"])
+
+    def write_timeseries_to_local(
+        self, prefix: str, symbol: str, df: pd.DataFrame, dedup_cols: List[str]
+    ) -> int:
+        """CVD / funding 등 시계열을 오늘 날짜 로컬 캐시 parquet에 merge 기록.
+
+        경로: cache/gcs_parquet/{prefix}_{symbol}_{today}.parquet
+        → load_timeseries(prefix, symbol) 가 동일 파일을 읽음.
+        """
+        if df is None or df.empty:
+            return 0
+        df = df.copy()
+        today = datetime.now(timezone.utc).date().isoformat()
+        object_path = f"{prefix}/{symbol}/{today}.parquet"
+        return self._merge_to_local_cache(object_path, df, dedup_cols)
 
 
 gcs_parquet_store = GCSParquetStore()

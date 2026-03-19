@@ -53,7 +53,10 @@ class DatabaseClient:
                 transient_keywords = [
                     "disconnected", "closed", "connection", "eof", "protocol", 
                     "pseudo-header", "timeout", "61", "104", "refused", "reset",
-                    "cloudflare", "400 bad request", "json could not be generated"
+                    "cloudflare", "400 bad request", "json could not be generated",
+                    # postgrest-py model_validate_json 파싱 실패 (비표준 응답 바디)
+                    "model_validate_json", "apierrorfromjson", "validation error",
+                    "500", "502", "503", "504",
                 ]
                 
                 if any(x in err_msg for x in transient_keywords) or "protocol" in err_type or "connection" in err_type:
@@ -112,9 +115,15 @@ class DatabaseClient:
                 break
         return all_rows
 
+    # OHLCV 분석에 필요한 최소 컬럼 집합 (egress 절감)
+    MARKET_DATA_OHLCV_COLUMNS = "timestamp,symbol,exchange,open,high,low,close,volume,taker_buy_volume,taker_sell_volume"
+
     @reconnect_on_error
     def get_latest_market_data(self, symbol: str, limit: int = 1000, exchange: str = "binance", columns: Optional[str] = None) -> pd.DataFrame:
-        rows = self._fetch_paginated("market_data", limit, "timestamp", columns=columns, symbol=symbol, exchange=exchange)
+        # columns=None이면 필수 OHLCV 컬럼만 요청 (egress 절감).
+        # 전체 컬럼이 필요한 경우 columns="*" 를 명시적으로 전달.
+        effective_columns = columns if columns is not None else self.MARKET_DATA_OHLCV_COLUMNS
+        rows = self._fetch_paginated("market_data", limit, "timestamp", columns=effective_columns, symbol=symbol, exchange=exchange)
         if rows:
             df = pd.DataFrame(rows)
             df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
@@ -443,6 +452,13 @@ class DatabaseClient:
 
     @reconnect_on_error
     def upsert_evaluation_prediction(self, data: Dict) -> Optional[Dict]:
+        # source_id가 None이면 PostgreSQL NULL unique 충돌 방지를 위해 스킵
+        if data.get("source_id") is None:
+            logger.warning(
+                "upsert_evaluation_prediction skipped: source_id is None "
+                f"(symbol={data.get('symbol')}, mode={data.get('mode')})"
+            )
+            return None
         response = self.client.table("evaluation_predictions").upsert(
             data,
             on_conflict="source_type,source_id,mode"

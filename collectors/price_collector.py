@@ -17,6 +17,7 @@ CVD Calculation:
 
 import ccxt
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional
 import pandas as pd
 import pytz
@@ -127,12 +128,31 @@ class PriceCollector:
             logger.error(f"Upbit fetch error for {symbol}: {e}")
             return pd.DataFrame()
 
+
     def _latest_db_timestamp_ms(self, db_symbol: str, exchange: str) -> Optional[int]:
-        """Read last stored candle timestamp (UTC ms) for symbol/exchange."""
-        df = db.get_latest_market_data(db_symbol, limit=1, exchange=exchange)
-        if df.empty:
-            return None
-        return int(df.iloc[-1]['timestamp'].timestamp() * 1000)
+        """마지막 저장 캔들 타임스탬프(UTC ms) 조회.
+
+        우선순위: 로컬 parquet 캐시 → Supabase fallback
+        """
+        # 1순위: 로컬 parquet 캐시 (Binance 심볼 전용 — 분석에 사용되는 경로)
+        if exchange == 'binance':
+            try:
+                from processors.gcs_parquet import gcs_parquet_store
+                df_local = gcs_parquet_store.load_ohlcv("1m", db_symbol, months_back=1)
+                if not df_local.empty:
+                    return int(df_local.iloc[-1]['timestamp'].timestamp() * 1000)
+            except Exception as e:
+                logger.debug(f"Local parquet ts lookup failed for {db_symbol}: {e}")
+
+        # 2순위: Supabase
+        try:
+            df = db.get_latest_market_data(db_symbol, limit=1, exchange=exchange)
+            if not df.empty:
+                return int(df.iloc[-1]['timestamp'].timestamp() * 1000)
+        except Exception as e:
+            logger.debug(f"Supabase ts lookup failed for {db_symbol}: {e}")
+
+        return None
 
     def _collect_binance_symbol_gap(self, symbol: str) -> List[Dict]:
         """Backfill gap from latest DB candle to now, using 1m pagination."""
@@ -248,45 +268,85 @@ class PriceCollector:
         return all_data
 
     def save_to_database(self, data: List[Dict]) -> None:
-        if data:
+        """수집된 데이터 저장.
+
+        Binance OHLCV + CVD:
+          1순위 → 로컬 GCS parquet 캐시 직접 기록
+                   (분석 파이프라인이 동일 경로를 읽으므로 Supabase 불필요)
+          2순위 → Supabase (실패해도 무방, quota 초과 시 skip)
+
+        Upbit OHLCV:
+          → Supabase만 기록 (분석에 미사용, 소량)
+        """
+        if not data:
+            return
+
+        from processors.gcs_parquet import gcs_parquet_store
+
+        binance_market: Dict[str, List[Dict]] = {}   # symbol → rows
+        binance_cvd: Dict[str, List[Dict]] = {}      # symbol → rows
+        upbit_market: List[Dict] = []
+
+        for r in data:
+            ts = r['timestamp']
+            sym = r['symbol']
+            exc = r.get('exchange', '')
+
+            if exc == 'binance':
+                binance_market.setdefault(sym, []).append({
+                    'timestamp': ts, 'symbol': sym, 'exchange': exc,
+                    'open': r['open'], 'high': r['high'], 'low': r['low'],
+                    'close': r['close'], 'volume': r['volume'],
+                })
+                if r.get('volume_delta') is not None:
+                    binance_cvd.setdefault(sym, []).append({
+                        'timestamp': ts, 'symbol': sym,
+                        'taker_buy_volume': r.get('taker_buy_volume', 0),
+                        'taker_sell_volume': r.get('taker_sell_volume', 0),
+                        'volume_delta': r.get('volume_delta', 0),
+                    })
+            else:  # upbit
+                upbit_market.append({
+                    'timestamp': ts, 'symbol': sym, 'exchange': exc,
+                    'open': r['open'], 'high': r['high'], 'low': r['low'],
+                    'close': r['close'], 'volume': r['volume'],
+                })
+
+        # ── 1순위: 로컬 parquet 캐시 직접 기록 (Binance) ─────────────────
+        total_market = total_cvd = 0
+        for sym, rows in binance_market.items():
+            df = pd.DataFrame(rows)
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+            total_market += gcs_parquet_store.write_ohlcv_to_local(sym, df)
+
+        for sym, rows in binance_cvd.items():
+            df = pd.DataFrame(rows)
+            df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True, errors='coerce')
+            total_cvd += gcs_parquet_store.write_timeseries_to_local(
+                "cvd", sym, df, ["timestamp", "symbol"]
+            )
+
+        if total_market or total_cvd:
+            logger.info(
+                f"[LocalCache] {total_market} OHLCV + {total_cvd} CVD rows "
+                f"written to local parquet cache"
+            )
+
+        # ── 2순위: Supabase (실패해도 무방) ──────────────────────────────
+        all_market = [r for rows in binance_market.values() for r in rows] + upbit_market
+        all_cvd    = [r for rows in binance_cvd.values() for r in rows]
+
+        if all_market:
             try:
-                # Separate market_data fields from CVD fields
-                market_records = []
-                cvd_records = []
-
-                for r in data:
-                    # Standard market data (backward compatible)
-                    market_record = {
-                        'timestamp': r['timestamp'],
-                        'symbol': r['symbol'],
-                        'exchange': r['exchange'],
-                        'open': r['open'],
-                        'high': r['high'],
-                        'low': r['low'],
-                        'close': r['close'],
-                        'volume': r['volume'],
-                    }
-                    market_records.append(market_record)
-
-                    # CVD data (Binance only)
-                    if r.get('volume_delta') is not None:
-                        cvd_records.append({
-                            'timestamp': r['timestamp'],
-                            'symbol': r['symbol'],
-                            'taker_buy_volume': r.get('taker_buy_volume', 0),
-                            'taker_sell_volume': r.get('taker_sell_volume', 0),
-                            'volume_delta': r.get('volume_delta', 0),
-                        })
-
-                db.batch_insert_market_data(market_records)
-
-                # Save CVD data
-                if cvd_records:
-                    db.batch_upsert_cvd_data(cvd_records)
-
-                logger.info(f"Saved {len(market_records)} market + {len(cvd_records)} CVD records")
+                db.batch_insert_market_data(all_market)
             except Exception as e:
-                logger.error(f"Database save error: {e}")
+                logger.warning(f"[DB] market_data Supabase write skipped: {e}")
+
+        if all_cvd:
+            try:
+                db.batch_upsert_cvd_data(all_cvd)
+            except Exception as e:
+                logger.warning(f"[DB] cvd_data Supabase write skipped: {e}")
 
     def run(self) -> None:
         data = self.collect_all_prices()
