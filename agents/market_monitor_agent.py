@@ -166,8 +166,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         """Load the current deterministic scenario state for revision / invalidation checks."""
         try:
             monitor_mode = TradingMode(mode)
-            candle_limit = settings.POSITION_CANDLE_LIMIT if monitor_mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
-            df = db.get_latest_market_data(symbol, limit=candle_limit)
+            df = db.get_latest_market_data(symbol, limit=settings.SWING_CANDLE_LIMIT)
             if df is None or df.empty:
                 return {}
 
@@ -292,6 +291,124 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             logger.warning(f"lightweight_veto_check failed ({symbol}/{mode}): {e}")
         return {"action": "PASS", "reason": "저비용 호출 실패로 기본 통과", "risk_flags": []}
 
+    def _evaluate_retest_quality(
+        self,
+        live: Dict,
+        scenario_snapshot: Dict,
+        pb_data: Dict,
+        playbook_direction: str,
+    ) -> Dict:
+        """쉽알남 원칙: 리테스트 후 진입 — 추격 금지, 되돌림 확인 필수.
+
+        Entry gate logic:
+        - EXTENDED  (>3% past entry level)  → gated=True  (chasing, wait for retest)
+        - PULLING_BACK (price hasn't reached level yet) → gated=True (wait)
+        - RETESTING (within 2% but direction not confirmed) → gated=True (wait for candle close)
+        - HOLDING   (within 2% AND 1h candle confirms direction) → gated=False (entry OK)
+        """
+        direction = playbook_direction.upper()
+        if direction not in ("LONG", "SHORT"):
+            return {"retest_status": "NO_DIRECTION", "gated": False}
+
+        current_price = live.get("price")
+        if not isinstance(current_price, (int, float)):
+            return {"retest_status": "NO_PRICE", "gated": False}
+
+        # Derive the key entry level from the playbook's price-based entry condition
+        retest_level: Optional[float] = None
+        for ec in (pb_data.get("entry_conditions") or []):
+            if isinstance(ec, dict) and ec.get("metric") == "price":
+                try:
+                    retest_level = float(ec["value"])
+                except Exception:
+                    pass
+                break
+
+        if retest_level is None or retest_level <= 0:
+            return {"retest_status": "NO_LEVEL", "gated": False}
+
+        # Signed distance: positive = price above level, negative = price below level
+        dist_pct = (float(current_price) - retest_level) / retest_level * 100.0
+        price_chg_1h = float(live.get("price_chg_pct_1h", 0) or 0)
+
+        RETEST_WINDOW_PCT = 2.0    # within 2% of level = retest zone
+        CHASE_THRESHOLD_PCT = 3.0  # beyond 3% without retest = chasing
+
+        if direction == "LONG":
+            if dist_pct > CHASE_THRESHOLD_PCT:
+                return {
+                    "retest_status": "EXTENDED",
+                    "gated": True,
+                    "reason": f"진입 레벨({retest_level:,.0f}) 대비 {dist_pct:.1f}% 상방 — 추격 구간, 리테스트 대기",
+                    "retest_level": round(retest_level, 2),
+                    "dist_pct": round(dist_pct, 2),
+                }
+            elif 0 <= dist_pct <= CHASE_THRESHOLD_PCT:
+                # Price is at or just above the entry level
+                if price_chg_1h > 0.2:
+                    # Bouncing from level — retest is holding
+                    return {
+                        "retest_status": "HOLDING",
+                        "gated": False,
+                        "reason": f"리테스트 레벨({retest_level:,.0f}) 근처 반등 확인 (+{price_chg_1h:.2f}%/1h)",
+                        "retest_level": round(retest_level, 2),
+                        "dist_pct": round(dist_pct, 2),
+                    }
+                else:
+                    return {
+                        "retest_status": "RETESTING",
+                        "gated": True,
+                        "reason": f"리테스트 레벨({retest_level:,.0f}) 도달했으나 반등 미확인 (1h: {price_chg_1h:.2f}%)",
+                        "retest_level": round(retest_level, 2),
+                        "dist_pct": round(dist_pct, 2),
+                    }
+            else:
+                # dist_pct < 0: price is below the long entry level (still pulling back)
+                return {
+                    "retest_status": "PULLING_BACK",
+                    "gated": True,
+                    "reason": f"진입 레벨({retest_level:,.0f}) 미도달 (현재 {dist_pct:.1f}%)",
+                    "retest_level": round(retest_level, 2),
+                    "dist_pct": round(dist_pct, 2),
+                }
+        else:  # SHORT
+            if dist_pct < -CHASE_THRESHOLD_PCT:
+                return {
+                    "retest_status": "EXTENDED",
+                    "gated": True,
+                    "reason": f"진입 레벨({retest_level:,.0f}) 대비 {abs(dist_pct):.1f}% 하방 — 추격 구간, 리테스트 대기",
+                    "retest_level": round(retest_level, 2),
+                    "dist_pct": round(dist_pct, 2),
+                }
+            elif -CHASE_THRESHOLD_PCT <= dist_pct <= 0:
+                # Price is at or just below the entry level (short side)
+                if price_chg_1h < -0.2:
+                    # Rejecting from level — retest is holding
+                    return {
+                        "retest_status": "HOLDING",
+                        "gated": False,
+                        "reason": f"리테스트 레벨({retest_level:,.0f}) 근처 하락 확인 ({price_chg_1h:.2f}%/1h)",
+                        "retest_level": round(retest_level, 2),
+                        "dist_pct": round(dist_pct, 2),
+                    }
+                else:
+                    return {
+                        "retest_status": "RETESTING",
+                        "gated": True,
+                        "reason": f"리테스트 레벨({retest_level:,.0f}) 도달했으나 거부 미확인 (1h: {price_chg_1h:.2f}%)",
+                        "retest_level": round(retest_level, 2),
+                        "dist_pct": round(dist_pct, 2),
+                    }
+            else:
+                # dist_pct > 0: price is above the short entry level (still bouncing up)
+                return {
+                    "retest_status": "PULLING_BACK",
+                    "gated": True,
+                    "reason": f"진입 레벨({retest_level:,.0f}) 미도달 (현재 +{dist_pct:.1f}%)",
+                    "retest_level": round(retest_level, 2),
+                    "dist_pct": round(dist_pct, 2),
+                }
+
     def evaluate(self, symbol: str, mode: str) -> Dict:
         """Core evaluation: compare live indicators to playbook conditions deterministically."""
         playbook = self._load_playbook(symbol, mode)
@@ -413,6 +530,33 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         }
 
         playbook_direction = str(playbook.get("source_decision", "HOLD") or "HOLD").upper()
+
+        # ── Retest Gate (쉽알남: 리테스트 확인 후 진입, 추격 금지) ────────────
+        if result["status"] in ["TRIGGER", "SOFT_TRIGGER"] and playbook_direction in ("LONG", "SHORT"):
+            try:
+                retest = self._evaluate_retest_quality(live, scenario_snapshot, pb_data, playbook_direction)
+                result["retest_quality"] = retest
+                if retest.get("gated"):
+                    if result["status"] == "TRIGGER":
+                        result["status"] = "WATCH"
+                    result["reasoning"] = (
+                        f"{result['reasoning']} 리테스트 게이트: {retest.get('reason', '')}"
+                    ).strip()
+                    logger.info(
+                        f"Monitor [{symbol}/{mode}]: Retest GATED "
+                        f"retest_status={retest.get('retest_status')} "
+                        f"dist={retest.get('dist_pct')}% "
+                        f"level={retest.get('retest_level')}"
+                    )
+                else:
+                    logger.info(
+                        f"Monitor [{symbol}/{mode}]: Retest PASSED "
+                        f"retest_status={retest.get('retest_status')} "
+                        f"dist={retest.get('dist_pct')}%"
+                    )
+            except Exception as e:
+                logger.warning(f"Retest gate error ({symbol}/{mode}): {e}")
+
         active_side = str((scenario_snapshot.get("active_setup", {}) or {}).get("side", "")).upper()
         if result_status in ["TRIGGER", "SOFT_TRIGGER"] and active_side and playbook_direction in ("LONG", "SHORT") and active_side != playbook_direction:
             result["status"] = "WATCH"
@@ -458,8 +602,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 direction = str(playbook.get("source_decision", "HOLD") or "HOLD").upper()
                 if direction in ("LONG", "SHORT"):
                     monitor_mode = TradingMode(mode)
-                    candle_limit = settings.POSITION_CANDLE_LIMIT if monitor_mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
-                    df = db.get_latest_market_data(symbol, limit=candle_limit)
+                    df = db.get_latest_market_data(symbol, limit=settings.SWING_CANDLE_LIMIT)
                     if df is not None and not df.empty:
                         market_data = math_engine.analyze_market(df, monitor_mode)
                         current_price = float(df["close"].iloc[-1])
@@ -467,7 +610,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                             "decision": direction,
                             "entry_price": current_price,
                             "leverage": 1,
-                            "target_exchange": "SPLIT" if monitor_mode == TradingMode.POSITION else "BINANCE",
+                            "target_exchange": "BINANCE",
                             "reasoning": {"final_logic": "Hourly monitor policy re-check."},
                         }
                         raw_funding = {}

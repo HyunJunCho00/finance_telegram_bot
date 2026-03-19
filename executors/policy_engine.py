@@ -69,7 +69,7 @@ class PolicyEngine:
         if not isinstance(dual_plan, dict):
             dual_plan = {}
 
-        lane_key = mode.value if mode in (TradingMode.SWING, TradingMode.POSITION) else "position"
+        lane_key = "swing"
         canonical_lane_key = f"{lane_key}_plan"
         primary_lane = dual_plan.get(canonical_lane_key) or dual_plan.get(lane_key)
         if not self._has_meaningful_playbook(primary_lane):
@@ -110,7 +110,7 @@ class PolicyEngine:
         return round(float(value), digits)
 
     def _primary_tf(self, mode: TradingMode) -> str:
-        return "1d" if mode == TradingMode.POSITION else "4h"
+        return "4h"
 
     def _effective_wallet_and_loss_per_alloc_pct(self, target_exchange: str, leverage: float) -> tuple[float, float]:
         target_exchange = str(target_exchange or "BINANCE").lower()

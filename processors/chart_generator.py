@@ -53,10 +53,7 @@ class ChartGenerator:
 
     @staticmethod
     def _lane_lookback_months(mode: TradingMode) -> int:
-        settings = get_settings()
-        if mode == TradingMode.POSITION:
-            return int(settings.POSITION_HISTORY_MONTHS)
-        return int(settings.SWING_HISTORY_MONTHS)
+        return int(get_settings().SWING_HISTORY_MONTHS)
 
     @staticmethod
     def _tail_candles_for_rule(months: int, resample_rule: str) -> int:
@@ -100,10 +97,7 @@ class ChartGenerator:
         analysis = self._filter_active_elements(current_price, analysis)
 
         timeframe_norm = (timeframe or "").lower().strip()
-        is_lane_chart = prefer_lane and (
-            (mode == TradingMode.SWING and timeframe_norm in ("", "4h")) or
-            (mode == TradingMode.POSITION and timeframe_norm in ("", "1d"))
-        )
+        is_lane_chart = prefer_lane and timeframe_norm in ("", "4h")
         if is_lane_chart:
             return self._generate_lane_chart(
                 df, analysis, symbol, mode,
@@ -122,18 +116,8 @@ class ChartGenerator:
     def _get_mode_config(self, mode: TradingMode, timeframe: Optional[str] = None) -> Dict:
         """Per-mode or per-timeframe chart configuration."""
         # 1. Base config determined by Mode (for Overlays / MTFA)
-        if mode == TradingMode.POSITION:
-            config = {
-                'resample_rule': '1D',
-                'tail_candles': 1600,   # ~4.5 years (2021 ATH ~ 2026-03)
-                'min_candles': 20,
-                'title_suffix': '1D POSITION',
-                'fib_tf': '1w',          # Macro Fibonacci retracements (Weekly)
-                'structure_tfs': ['1w', '1d'], # View both Weekly & Daily structures
-                'swing_tf': '1d',        # Swing liquidity based on Daily nodes
-                'is_custom': False
-            }
-        else:  # SWING (default)
+        # Swing config (4h execution + 1w context)
+        if True:
             config = {
                 'resample_rule': '4h',
                 'tail_candles': 600,    # ~3.5 months (Q4 2025 ~ 2026-03)
@@ -174,64 +158,6 @@ class ChartGenerator:
     def _get_lane_panel_configs(self, mode: TradingMode) -> List[Dict]:
         lookback_months = self._lane_lookback_months(mode)
         execution_profile = bool(getattr(get_settings(), 'use_execution_philosophy', False))
-        if mode == TradingMode.POSITION:
-            return [
-                {
-                    'resample_rule': '1W-MON',
-                    'tail_candles': self._tail_candles_for_rule(lookback_months, '1W-MON'),
-                    'min_candles': 30,
-                    'title_suffix': f'TOP 1W STRUCTURE ({lookback_months}M)',
-                    'panel_label': f'Top: 1W Structure ({lookback_months}M)',
-                    'fib_tf': '1w',
-                    'structure_tfs': ['1w'],
-                    'swing_tf': None,
-                    'is_custom': False,
-                    'draw_pivots': False,
-                    'draw_market_structure_labels': False,
-                    'draw_structure_events': False,
-                    'draw_ema200': True,
-                    'draw_diagonal_lines': True,
-                    'draw_fibonacci': True,
-                    'draw_swing_levels': False,
-                    'draw_confluence': True,
-                    'draw_execution_plan': False,
-                    'draw_volume_profile': execution_profile,
-                    'draw_liquidations': False,
-                    'draw_fvg': execution_profile,
-                    'draw_macro_order_blocks': execution_profile,
-                    'draw_avwap': execution_profile,
-                    'draw_macro_alpha': False,
-                    'draw_session_breaks': False,
-                },
-                {
-                    'resample_rule': '1D',
-                    'tail_candles': self._tail_candles_for_rule(lookback_months, '1D'),
-                    'min_candles': 40,
-                    'title_suffix': f'BOTTOM 1D EXECUTION ({lookback_months}M)',
-                    'panel_label': f'Bottom: 1D Execution ({lookback_months}M)',
-                    'fib_tf': '1d',
-                    'structure_tfs': ['1d'],
-                    'swing_tf': '1d',
-                    'is_custom': False,
-                    'draw_pivots': False,
-                    'draw_market_structure_labels': False,
-                    'draw_structure_events': True,
-                    'draw_ema200': True,
-                    'draw_diagonal_lines': True,
-                    'draw_fibonacci': True,
-                    'draw_swing_levels': True,
-                    'draw_confluence': True,
-                    'draw_execution_plan': True,
-                    'draw_volume_profile': execution_profile,
-                    'draw_liquidations': False,
-                    'draw_fvg': execution_profile,
-                    'draw_macro_order_blocks': execution_profile,
-                    'draw_avwap': execution_profile,
-                    'draw_macro_alpha': False,
-                    'draw_session_breaks': False,
-                },
-            ]
-
         return [
             {
                 'resample_rule': '1D',
@@ -707,7 +633,7 @@ class ChartGenerator:
                 addplot=apds,
                 title='',  # We will draw a custom title
                 ylabel='Price',
-                figsize=(15, 12 if num_panels > 3 else 10),
+                figsize=(self.width / self.dpi, (self.height / self.dpi) * (1.3 if num_panels > 3 else 1.0)),
                 panel_ratios=tuple(p_ratios),
                 datetime_format='%Y-%m-%d',
                 xrotation=0,
@@ -731,7 +657,7 @@ class ChartGenerator:
                          color=text_color, alpha=0.03, ha='center', va='center', zorder=0)
 
             # ---- Overlay 1 Pivot Points (turning points) SWING only ----
-            if config.get('draw_pivots', mode != TradingMode.POSITION):
+            if config.get('draw_pivots', True):
                 self._draw_pivot_points(price_ax, chart_df)
 
             # ---- Overlay 2 Market Structure Labels (HH/HL/LH/LL) ----
@@ -790,7 +716,7 @@ class ChartGenerator:
                 self._draw_volume_profile_histogram(price_ax, chart_df)
 
             # ------- Overlay 8 Liquidation Markers SWING only -------
-            if config.get('draw_liquidations', mode != TradingMode.POSITION) and liquidation_df is not None and not liquidation_df.empty:
+            if config.get('draw_liquidations', True) and liquidation_df is not None and not liquidation_df.empty:
                 self._draw_liquidation_markers(price_ax, chart_df, liquidation_df)
 
             # ------------ Overlay 9 Fair Value Gaps (FVG) ------------
@@ -818,7 +744,7 @@ class ChartGenerator:
             self._draw_header_legend(price_ax, chart_df, symbol, config, text_color)
 
             # ---- PRO Overlay 14 Session Breaks (Day dividers) SWING only ----
-            if config.get('draw_session_breaks', mode != TradingMode.POSITION):
+            if config.get('draw_session_breaks', True):
                 self._draw_session_breaks(price_ax, chart_df)
             
             # ---- PRO Overlay 15 Current Price Label (On Y axis) ----
@@ -1740,7 +1666,7 @@ class ChartGenerator:
             n = len(chart_df)
             if n < 3:
                 return
-            min_gap_pct = 1.0 if mode == TradingMode.POSITION else 0.0
+            min_gap_pct = 0.0
 
             bull_gaps = []
             bear_gaps = []

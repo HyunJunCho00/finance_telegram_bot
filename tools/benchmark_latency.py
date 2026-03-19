@@ -150,7 +150,7 @@ def build_report_state(symbol: str = "BTCUSDT", mode: TradingMode = TradingMode.
     }
 
 
-def build_hot_path_bundle(symbol: str = "BTCUSDT", mode: TradingMode = TradingMode.POSITION) -> dict:
+def build_hot_path_bundle(symbol: str = "BTCUSDT", mode: TradingMode = TradingMode.SWING) -> dict:
     now = "2026-03-09T00:00:00Z"
     later = "2099-01-01T00:00:00Z"
     return {

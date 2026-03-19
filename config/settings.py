@@ -11,12 +11,10 @@ load_dotenv()
 
 
 class TradingMode(str, Enum):
-    """Two trading modes with distinct timeframes and analysis intervals.
-    SWING: days~2weeks, 4h analysis cycle
-    POSITION: weeks~months, 1d analysis cycle
+    """Swing trading mode — days to 2 weeks, 4h analysis cycle.
+    Weekly/daily structure is loaded as read-only context for big-picture awareness.
     """
     SWING = "swing"
-    POSITION = "position"
 
 
 class Settings(BaseSettings):
@@ -277,8 +275,8 @@ class Settings(BaseSettings):
     MAX_INPUT_CHARS_TRIGGER_VETO: int = 6000
 
     # ===== Trading Mode =====
-    # "swing"       = multi-day (days~2weeks), 4h analysis cycle
-    # "position"    = long-term (weeks~months), 1d analysis cycle
+    # "swing" = multi-day (days~2weeks), 4h analysis cycle
+    # Weekly/daily structure loaded as context for big-picture awareness
     TRADING_MODE: str = "swing"
     PHILOSOPHY_PROFILE: str = "inbum_shipalnam"
 
@@ -288,9 +286,9 @@ class Settings(BaseSettings):
     #   SCALP mode: no images (text-only, pure speed)
     USE_CHART_IMAGES: bool = True
     CHART_LOW_RES: bool = False  # Set to False for premium quality
-    CHART_IMAGE_WIDTH: int = 1280
-    CHART_IMAGE_HEIGHT: int = 800
-    CHART_IMAGE_DPI: int = 150
+    CHART_IMAGE_WIDTH: int = 800
+    CHART_IMAGE_HEIGHT: int = 500
+    CHART_IMAGE_DPI: int = 96
     CHART_THEME: str = "dark_premium"  # [NEW] dark_premium | light_premium
     # Derivative panel toggles (visual quality-first defaults)
     CHART_SHOW_OI_PANEL: bool = False
@@ -304,13 +302,11 @@ class Settings(BaseSettings):
     # 캐시의 마지막 타임스탬프 ~ 현재까지의 갭만 Supabase에서 보충.
     # Supabase 보존 기간(RETENTION_MARKET_DATA_DAYS=30일) 기준 최대 43,200개.
     SWING_CANDLE_LIMIT: int = 43200
-    POSITION_CANDLE_LIMIT: int = 43200
 
-    # ===== Historical Window per Mode (GCS 로컬 캐시 로딩 기간) =====
-    # Swing  원칙: 6개월
-    # Position 원칙: 4년 = 48개월
+    # ===== Historical Window (GCS 로컬 캐시 로딩 기간) =====
+    # Swing: 6개월 (1m 세부 분석)
+    # HTF context: 1d/1w 구조는 6개월치면 충분
     SWING_HISTORY_MONTHS: int = 6
-    POSITION_HISTORY_MONTHS: int = 48
 
     # ===== Data Retention (days) =====
     # PostgreSQL(Supabase): 통계용 데이터만 보존 (30일)
@@ -355,9 +351,6 @@ class Settings(BaseSettings):
 
     @property
     def candle_limit(self) -> int:
-        mode = self.trading_mode
-        if mode == TradingMode.POSITION:
-            return self.POSITION_CANDLE_LIMIT
         return self.SWING_CANDLE_LIMIT
 
     @property
@@ -371,32 +364,21 @@ class Settings(BaseSettings):
 
     @property
     def chart_timeframe(self) -> str:
-        """Primary chart timeframe per mode."""
-        mode = self.trading_mode
-        if mode == TradingMode.POSITION:
-            return "1d"
+        """Primary chart timeframe: 4h for swing analysis."""
         return "4h"
 
     @property
     def analysis_timeframes(self) -> list:
-        """Timeframes to analyze per mode."""
-        mode = self.trading_mode
-        if mode == TradingMode.POSITION:
-            return ["4h", "1d", "1w"]
-        return ["1h", "4h", "1d"]
+        """Timeframes to analyze: 1h/4h execution + 1d/1w big-picture context."""
+        return ["1h", "4h", "1d", "1w"]
 
     @property
     def history_lookback_months(self) -> int:
-        """Mode-specific historical lookback window (months)."""
-        mode = self.trading_mode
-        if mode == TradingMode.POSITION:
-            return self.POSITION_HISTORY_MONTHS
+        """Historical lookback window (months)."""
         return self.SWING_HISTORY_MONTHS
 
     def history_lookback_months_for_mode(self, mode: TradingMode) -> int:
-        """Historical lookback window (months) for an explicit mode."""
-        if mode == TradingMode.POSITION:
-            return self.POSITION_HISTORY_MONTHS
+        """Historical lookback window — always Swing."""
         return self.SWING_HISTORY_MONTHS
 
     @property
@@ -427,10 +409,7 @@ class Settings(BaseSettings):
 
     @property
     def data_lookback_hours(self) -> int:
-        """보조 데이터(funding, CVD, liquidations) 조회 기간. Swing 6개월 / Position 4년 원칙."""
-        mode = self.trading_mode
-        if mode == TradingMode.POSITION:
-            return 35040  # 4년 (48 * 30 * 24)
+        """보조 데이터(funding, CVD, liquidations) 조회 기간 — Swing 6개월."""
         return 4380   # 6개월 (6 * 30 * 24)
 
 

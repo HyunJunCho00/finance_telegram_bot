@@ -85,7 +85,7 @@ Output Format (Strict JSON):
                 allocation *= mult
                 note_parts.append(f"LONG size x{mult:.2f} by on-chain gate")
             if gate.get("chase_long_blocked"):
-                leverage = min(leverage, 1.0 if mode == TradingMode.POSITION else 2.0)
+                leverage = min(leverage, 2.0)
                 note_parts.append("chase-long blocked")
         elif direction == "SHORT":
             mult = float(gate.get("short_size_multiplier", 1.0) or 1.0)
@@ -215,26 +215,10 @@ Output Format (Strict JSON):
         
         # Fast-pass: If PM already voted HOLD or CANCEL_AND_CLOSE, CRO just agrees.
         dec = draft_decision.get('decision', 'HOLD')
-        # Hard rule for compounding-oriented architecture:
-        # POSITION mode never allows SHORT.
-        if mode == TradingMode.POSITION and dec == 'SHORT':
-            draft_decision['decision'] = 'HOLD'
-            draft_decision['allocation_pct'] = 0
-            draft_decision['leverage'] = 1
-            draft_decision['cro_veto_applied'] = True
-            draft_decision['risk_manager_note'] = "POSITION mode hard rule: SHORT disabled by CRO."
-            return draft_decision
 
-        # Venue policy hard rules:
-        # - SWING: futures only (BINANCE), LONG/SHORT allowed
-        # - POSITION: spot style (SPLIT), LONG/HOLD only, leverage 1x
-        if mode == TradingMode.SWING:
-            if dec in ['LONG', 'SHORT']:
-                draft_decision['target_exchange'] = 'BINANCE'
-        elif mode == TradingMode.POSITION:
-            if dec == 'LONG':
-                draft_decision['target_exchange'] = 'SPLIT'
-                draft_decision['leverage'] = 1
+        # Venue policy: Swing futures only (BINANCE), LONG/SHORT both allowed
+        if dec in ['LONG', 'SHORT']:
+            draft_decision['target_exchange'] = 'BINANCE'
 
         if dec in ['HOLD', 'CANCEL_AND_CLOSE']:
             draft_decision['cro_veto_applied'] = False
@@ -271,21 +255,10 @@ Please execute your Risk Management oversight and output the final, safe JSON.""
             final = self._parse_decision(response, draft_decision)
             final = self._apply_scenario_overrides(final, scenario_context, mode)
             final = self._apply_onchain_overrides(final, onchain_gate, mode)
-            if mode == TradingMode.POSITION and final.get('decision') == 'SHORT':
-                final['decision'] = 'HOLD'
-                final['allocation_pct'] = 0
-                final['leverage'] = 1
-                final['cro_veto_applied'] = True
-                final['risk_manager_note'] = "POSITION mode hard rule: SHORT disabled by CRO."
-                return final
 
             # Re-apply venue policy after LLM output parsing.
-            if mode == TradingMode.SWING and final.get('decision') in ['LONG', 'SHORT']:
+            if final.get('decision') in ['LONG', 'SHORT']:
                 final['target_exchange'] = 'BINANCE'
-            elif mode == TradingMode.POSITION:
-                if final.get('decision') == 'LONG':
-                    final['target_exchange'] = 'SPLIT'
-                    final['leverage'] = 1
             return final
             
         except Exception as e:

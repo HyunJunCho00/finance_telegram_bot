@@ -115,6 +115,16 @@ CRITICAL V5 RULE: You will be given a list of ACTIVE_ORDERS (e.g. pending DCA ch
 Be aware of your previous decision for consistency."""
 
     SWING_RULES = """Professional SWING trading principles you should consider:
+
+ENTRY GATE — 근거 중첩 필수 (쉽알남 원칙):
+The `confluence_gate` entry in your expert_verdicts shows a structural confluence count.
+- gate_passed=True  (score ≥ 3): Entry is PERMITTED if all other conditions are met.
+- gate_passed=False (score < 3): You MUST output "HOLD" regardless of other signals.
+  State "근거 중첩 부족 (N/3)" in final_logic and explain what is missing.
+  A lone narrative signal or a single timeframe breakout is NOT enough to enter.
+Confluence factors counted: HTF structure (1d/1w), active setup direction,
+  near confluence zone, Fibonacci confluence, funding extreme, volume breakout.
+
 - Top-down analysis: 1d determines bias, 4h defines the setup and confirms the entry
 - Fibonacci 38.2%/50%/61.8% are key retracement entry zones
 - Invalidation is more important than precise entry. If invalidation is unclear, choose HOLD.
@@ -299,12 +309,24 @@ Rules:
             return []
 
         summaries: list[Dict[str, Any]] = []
-        preferred_order = ["macro", "liquidity", "microstructure", "chart_rules", "vlm_geometry"]
+        preferred_order = ["confluence_score", "macro", "liquidity", "microstructure", "chart_rules", "vlm_geometry"]
         ordered_keys = preferred_order + [k for k in blackboard.keys() if k not in preferred_order]
 
         for key in ordered_keys:
             payload = blackboard.get(key)
             if not isinstance(payload, dict):
+                continue
+            if key == "confluence_score":
+                gate = payload.get("gate_passed", False)
+                summaries.append({
+                    "agent": "confluence_gate",
+                    "score": payload.get("score", 0),
+                    "max_score": 6,
+                    "direction": payload.get("direction", "NEUTRAL"),
+                    "factors": payload.get("factors", []),
+                    "gate_passed": gate,
+                    "verdict": f"{'GATE_OPEN' if gate else 'GATE_CLOSED'} — {payload.get('score', 0)}/3 minimum factors met",
+                })
                 continue
             if key == "chart_rules":
                 signals = payload.get("signals", {}) if isinstance(payload.get("signals"), dict) else {}
@@ -425,7 +447,7 @@ Rules:
     ) -> Dict:
         active_orders = active_orders or []  # Guard against mutable default
         mode_str = mode.value.upper()
-        mode_rules = self.POSITION_RULES if mode == TradingMode.POSITION else self.SWING_RULES
+        mode_rules = self.SWING_RULES
         # Wait, format() evaluates all curly braces. self.DEBATE_APPENDIX contains raw JSON templates!
         # Instead of formatting the whole concatenated string, format the components individually.
         base_formatted = self.BASE_PROMPT.format(mode_upper=mode_str, mode_specific_rules=mode_rules)

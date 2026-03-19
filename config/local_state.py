@@ -273,7 +273,7 @@ class LocalStateManager:
     def set_trading_mode(self, mode: str):
         """Persist trading mode to SQLite so it survives process restarts."""
         mode = mode.lower().strip()
-        if mode not in ('swing', 'position'):
+        if mode not in ('swing',):
             raise ValueError(f"Invalid trading mode: {mode}")
         execution_repository.set_system_config("trading_mode", mode)
         logger.info(f"System Config: Trading Mode set to {mode.upper()}")

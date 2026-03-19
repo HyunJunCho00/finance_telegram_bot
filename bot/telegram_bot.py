@@ -680,7 +680,7 @@ class TradingBot:
             result = await asyncio.to_thread(
                 orchestrator.run_analysis_with_mode,
                 symbol,
-                TradingMode.POSITION,
+                TradingMode.SWING,
                 False,
                 True,
                 True,
@@ -691,7 +691,7 @@ class TradingBot:
                 confidence = result.get('confidence', result.get('win_probability_pct', 0))
                 await update.message.reply_text(
                     f"Analysis complete for {symbol}\n"
-                    f"POSITION: {decision} ({confidence}%)\n"
+                    f"SWING: {decision} ({confidence}%)\n"
                     f"Report sent to chat."
                 )
             else:
@@ -938,9 +938,7 @@ class TradingBot:
                 if report:
                     from executors.report_generator import report_generator
                     # Determine mode - default to current settings if not found
-                    mode = settings.trading_mode 
-                    if "POSITION" in report.get('final_decision', ''):
-                        mode = TradingMode.POSITION
+                    mode = TradingMode.SWING
 
                     detail_text = report_generator.format_detail_message(report, mode)
                     chat_id = getattr(query.message.chat, "id", None)

@@ -330,7 +330,7 @@ def node_collect_data(state: AnalysisState) -> dict:
             logger.info(f"No gap data from Supabase, using cache only: {len(df):,} rows")
     else:
         # 캐시 없음 → Supabase 전체 fallback (최대 30일)
-        fallback_limit = settings.POSITION_CANDLE_LIMIT if mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
+        fallback_limit = settings.SWING_CANDLE_LIMIT
         logger.warning(f"GCS local cache empty for {symbol}, Supabase fallback (limit={fallback_limit:,})")
         df = db.get_latest_market_data(symbol, limit=fallback_limit)
 
@@ -343,12 +343,10 @@ def node_collect_data(state: AnalysisState) -> dict:
     # ── 3. 고해상도 TF: GCS 로컬 캐시에서 로드 (4h / 1d / 1w) ──────────
     df_4h, df_1d, df_1w = None, None, None
     try:
-        if mode == TradingMode.SWING:
-            df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=months_back)
-            df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=months_back)
-        elif mode == TradingMode.POSITION:
-            df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=months_back)
-            df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=months_back)
+        # Swing: 4h/1d for execution, 1w for big-picture structural context
+        df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=months_back)
+        df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=months_back)
+        df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=months_back)
         logger.debug(
             f"GCS TF data — 4h:{len(df_4h) if df_4h is not None and not df_4h.empty else 0} "
             f"1d:{len(df_1d) if df_1d is not None and not df_1d.empty else 0} "
@@ -868,6 +866,133 @@ def node_meta_agent(state: AnalysisState) -> dict:
         return {"market_regime": "RANGE_BOUND", "regime_context": {}}
 
 
+def _compute_confluence_score(
+    market_data: dict,
+    anomalies: list,
+    raw_funding: dict,
+) -> dict:
+    """쉽알남 '근거 중첩 필수' — count structural factors pointing in the same direction.
+    Requires ≥3 aligned factors before LONG/SHORT is considered actionable.
+    Returns: {score, direction, factors, gate_passed, long_score, short_score}
+    """
+    long_factors: list = []
+    short_factors: list = []
+
+    current_price = market_data.get("current_price")
+    if not isinstance(current_price, (int, float)) or current_price <= 0:
+        return {"score": 0, "direction": "NEUTRAL", "factors": [], "gate_passed": False, "long_score": 0, "short_score": 0}
+
+    # 1. HTF Structure: 1d/1w CHoCH or MSB direction
+    market_struct = market_data.get("market_structure", {}) or {}
+    for tf in ("1d", "1w"):
+        info = market_struct.get(tf)
+        if not isinstance(info, dict):
+            continue
+        for struct_key in ("choch", "msb"):
+            s = info.get(struct_key)
+            if not isinstance(s, dict):
+                continue
+            stype = str(s.get("type", "")).lower()
+            if any(kw in stype for kw in ("bull", "high", "up")):
+                long_factors.append(f"htf_{tf}_structure")
+                break
+            elif any(kw in stype for kw in ("bear", "low", "down")):
+                short_factors.append(f"htf_{tf}_structure")
+                break
+
+    # 2. Active Setup Bias (scenario_engine confirmed directional setup)
+    scenario_engine = market_data.get("scenario_engine", {}) or {}
+    active_setup = scenario_engine.get("active_setup", {}) or {}
+    side = str(active_setup.get("side", "")).upper()
+    if side == "LONG":
+        long_factors.append("active_setup")
+    elif side == "SHORT":
+        short_factors.append("active_setup")
+
+    # 3. Near Confluence Zone with multi-TF agreement (level_count >= 2, within 1.5%)
+    confluence_zones = market_data.get("confluence_zones", []) or []
+    for zone in confluence_zones:
+        price = zone.get("price")
+        if not isinstance(price, (int, float)):
+            continue
+        dist_pct = abs(float(current_price) - float(price)) / float(current_price) * 100.0
+        if dist_pct <= 1.5 and int(zone.get("level_count", 0)) >= 2:
+            zone_type = str(zone.get("type", "")).lower()
+            if "support" in zone_type:
+                long_factors.append("near_confluence_support")
+            elif "resist" in zone_type:
+                short_factors.append("near_confluence_resistance")
+            else:
+                # Ambiguous zone — assign to whichever directional side is active
+                if side == "SHORT":
+                    short_factors.append("near_confluence_zone")
+                else:
+                    long_factors.append("near_confluence_zone")
+            break
+
+    # 4. Fibonacci Confluence (price within 1% of 38.2/50/61.8 retracement)
+    fib_data = market_data.get("fibonacci", {}) or {}
+    key_fibs = {"fib_382", "fib_500", "fib_618"}
+    nearest_fib_dist = None
+    for _tf, fib_levels in fib_data.items():
+        if not isinstance(fib_levels, dict):
+            continue
+        for key, val in fib_levels.items():
+            if key not in key_fibs or not isinstance(val, (int, float)):
+                continue
+            dist_pct = abs(float(current_price) - float(val)) / float(current_price) * 100.0
+            if nearest_fib_dist is None or dist_pct < nearest_fib_dist:
+                nearest_fib_dist = dist_pct
+    if nearest_fib_dist is not None and nearest_fib_dist <= 1.0:
+        if side == "SHORT":
+            short_factors.append("fib_confluence")
+        else:
+            long_factors.append("fib_confluence")
+
+    # 5. Funding Rate Extreme (contrarian reversal signal)
+    funding_rate = float(raw_funding.get("funding_rate", 0) or 0)
+    if funding_rate > 0.05:        # Crowded long → SHORT reversal candidate
+        short_factors.append("funding_extreme_high")
+    elif funding_rate < -0.02:     # Crowded short → LONG reversal candidate
+        long_factors.append("funding_extreme_low")
+
+    # 6. Volume-Backed Breakout (already detected in triage Vol+OI check)
+    if "true_breakout" in anomalies:
+        if side == "SHORT":
+            short_factors.append("volume_breakout")
+        else:
+            long_factors.append("volume_breakout")
+
+    # Deduplicate while preserving order
+    long_factors = list(dict.fromkeys(long_factors))
+    short_factors = list(dict.fromkeys(short_factors))
+
+    long_score = len(long_factors)
+    short_score = len(short_factors)
+
+    if long_score > short_score:
+        direction = "LONG"
+        score = long_score
+        active_factors = long_factors
+    elif short_score > long_score:
+        direction = "SHORT"
+        score = short_score
+        active_factors = short_factors
+    else:
+        direction = "NEUTRAL"
+        score = 0
+        active_factors = []
+
+    return {
+        "score": score,
+        "direction": direction,
+        "factors": active_factors,
+        "gate_passed": score >= 3,
+        "long_score": long_score,
+        "short_score": short_score,
+    }
+
+
 def node_triage(state: AnalysisState) -> dict:
     """Evaluate Python/Pandas rules for Anomaly Detection before waking LLMs."""
     anomalies = []
@@ -1030,8 +1155,30 @@ def node_triage(state: AnalysisState) -> dict:
     if state.get("is_emergency") and not anomalies:
         anomalies.append("manual_emergency_trigger")
 
+    # ── Confluence Score (쉽알남 "근거 중첩 필수") ──────────────────────────
+    # Computed here so it's available on the blackboard when Judge reads it.
+    deduplicated_anomalies = list(set(anomalies))
+    try:
+        _cs_market = _market_data_cache.get(_cache_key(symbol, mode), {}) or {}
+        _cs_funding = state.get("raw_funding", {}) or {}
+        confluence_score_payload = _compute_confluence_score(
+            market_data=_cs_market,
+            anomalies=deduplicated_anomalies,
+            raw_funding=_cs_funding,
+        )
+        logger.info(
+            f"[Triage/Confluence] {symbol} score={confluence_score_payload['score']} "
+            f"dir={confluence_score_payload['direction']} "
+            f"gate={'OPEN' if confluence_score_payload['gate_passed'] else 'CLOSED'} "
+            f"factors={confluence_score_payload['factors']}"
+        )
+    except Exception as e:
+        logger.error(f"Confluence score computation error: {e}")
+        confluence_score_payload = {"score": 0, "direction": "NEUTRAL", "factors": [], "gate_passed": False, "long_score": 0, "short_score": 0}
+
     return {
-        "anomalies": list(set(anomalies)), # deduplicate
+        "anomalies": deduplicated_anomalies,
+        "blackboard": {"confluence_score": confluence_score_payload},
     }
 
 def node_rule_based_chart(state: AnalysisState) -> dict:
@@ -1217,7 +1364,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
     symbol = state["symbol"]
     mode = TradingMode(state["mode"])
     cache_key = _cache_key(symbol, mode)
-    candle_limit = settings.POSITION_CANDLE_LIMIT if mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
+    candle_limit = settings.SWING_CANDLE_LIMIT
 
     # [FIX CRASH-2] Use cached DataFrame from node_collect_data
     df = _df_cache.get(cache_key)
@@ -1232,12 +1379,9 @@ def node_generate_chart(state: AnalysisState) -> dict:
         from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
             m_back = settings.history_lookback_months_for_mode(mode)
-            if mode == TradingMode.SWING:
-                df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
-            elif mode == TradingMode.POSITION:
-                df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
-                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
+            df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
+            df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
+            df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
     except Exception as e:
         logger.warning(f"GCS load for chart skipped: {e}")
 
@@ -1464,16 +1608,10 @@ def node_judge_agent(state: AnalysisState) -> dict:
     direction = str(decision.get("decision", "HOLD")).upper()
     if direction == "HOLD" and hold_override and ev >= min_ev and win_prob_pct >= min_win and rr >= min_rr:
         inferred = _infer_direction_from_context(blackboard, regime_ctx)
-        if mode == TradingMode.POSITION and inferred == "SHORT":
-            inferred = "HOLD"
         if inferred in ("LONG", "SHORT"):
             decision["decision"] = inferred
-            decision["allocation_pct"] = float(
-                getattr(settings, "JUDGE_OVERRIDE_ALLOC_POSITION_PCT", 5.0)
-                if mode == TradingMode.POSITION
-                else getattr(settings, "JUDGE_OVERRIDE_ALLOC_SWING_PCT", 8.0)
-            )
-            decision["leverage"] = 1 if mode == TradingMode.POSITION else max(1, int(_to_float(decision.get("leverage", 1), 1)))
+            decision["allocation_pct"] = float(getattr(settings, "JUDGE_OVERRIDE_ALLOC_SWING_PCT", 8.0))
+            decision["leverage"] = max(1, int(_to_float(decision.get("leverage", 1), 1)))
             current_price = _to_float((_market_data_cache.get(cache_key, {}) or {}).get("current_price"), 0.0)
             if current_price > 0:
                 decision["entry_price"] = _to_float(decision.get("entry_price"), current_price) or current_price
@@ -1783,7 +1921,7 @@ def node_generate_report(state: AnalysisState) -> dict:
     mode = TradingMode(state["mode"])
     cache_key = _cache_key(symbol, mode)
 
-    candle_limit = settings.POSITION_CANDLE_LIMIT if mode == TradingMode.POSITION else settings.SWING_CANDLE_LIMIT
+    candle_limit = settings.SWING_CANDLE_LIMIT
     # [FIX CRASH-2] Use cached DataFrame from node_collect_data
     df = _df_cache.get(cache_key)
     if df is None:
@@ -2618,11 +2756,9 @@ class Orchestrator:
         return state.get("final_decision", {})
 
     def run_scheduled_analysis(self) -> None:
-        logger.info("Running scheduled dual-mode analysis (SWING=futures, POSITION=spot)")
-        modes = [TradingMode.SWING, TradingMode.POSITION]
-
+        logger.info("Running scheduled Swing analysis")
         for symbol in self.symbols:
-            for mode in modes:
+            for mode in [TradingMode.SWING]:
                 try:
                     self.run_analysis_with_mode(
                         symbol,
@@ -2749,7 +2885,7 @@ class Orchestrator:
             logger.exception(f"Daily playbook error {symbol}/{mode.value}")
             return result
 
-    def run_daily_playbook_for_symbol(self, symbol: str, mode: TradingMode = TradingMode.POSITION) -> Dict:
+    def run_daily_playbook_for_symbol(self, symbol: str, mode: TradingMode = TradingMode.SWING) -> Dict:
         lock_key = f"daily_precision:{str(symbol).upper()}:{mode.value}"
         lock = self._analysis_locks.setdefault(lock_key, threading.Lock())
         if not lock.acquire(blocking=False):
@@ -2783,7 +2919,7 @@ class Orchestrator:
             logger.warning("Daily Precision Run already active; skipping duplicate request.")
             return
 
-        schedule = [(symbol, TradingMode.POSITION) for symbol in settings.trading_symbols]
+        schedule = [(symbol, TradingMode.SWING) for symbol in settings.trading_symbols]
         logger.info("=== Daily Precision Run ===")
         self._enter_daily_precision_run()
         daily_results = []
@@ -2843,7 +2979,7 @@ class Orchestrator:
             lane_results = {}
             analysis_enabled = state_manager.is_analysis_enabled()
 
-            for mode in [TradingMode.SWING, TradingMode.POSITION]:
+            for mode in [TradingMode.SWING]:
                 try:
                     result = market_monitor_agent.evaluate(symbol, mode.value)
                     status = result.get("status", "NO_ACTION")

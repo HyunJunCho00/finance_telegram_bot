@@ -176,8 +176,6 @@ class ReportGenerator:
 
     @staticmethod
     def _chart_profile(mode: TradingMode) -> tuple[str, str]:
-        if mode == TradingMode.POSITION:
-            return ("1W/1D", "60M")
         return ("1D/4H", "12M")
 
     @staticmethod

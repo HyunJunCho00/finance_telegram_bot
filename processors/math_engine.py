@@ -159,7 +159,7 @@ class MathEngine:
     def calculate_diagonal_support(self, df: pd.DataFrame, mode: TradingMode = TradingMode.SWING) -> Optional[Dict]:
         """TD Point-based Support Trendline."""
         try:
-            n = 12 if mode == TradingMode.POSITION else 5
+            n = 5
             local_min_idx, _ = self.find_td_points(df, n=n)
             
             if len(local_min_idx) < 2:
@@ -206,7 +206,7 @@ class MathEngine:
     def calculate_diagonal_resistance(self, df: pd.DataFrame, mode: TradingMode = TradingMode.SWING) -> Optional[Dict]:
         """TD Point-based Resistance Trendline."""
         try:
-            n = 12 if mode == TradingMode.POSITION else 5
+            n = 5
             _, local_max_idx = self.find_td_points(df, n=n)
             
             if len(local_max_idx) < 2:
@@ -797,8 +797,7 @@ class MathEngine:
         lows = df['low'].astype(float).values
         current_price = float(df.iloc[-1]['close'])
         
-        # In POSITION mode, filter out small FVGs (<1%)
-        min_gap_pct = 1.0 if mode == TradingMode.POSITION else 0.0
+        min_gap_pct = 0.0
 
         for i in range(len(df) - 2):
             # Bullish FVG: candle3.low > candle1.high (gap up)
@@ -887,7 +886,7 @@ class MathEngine:
             low   = working_df['low'].astype(float).values
             close = working_df['close'].astype(float).values
 
-            order = max(8, min(18, len(working_df) // 10)) if mode == TradingMode.POSITION else max(3, min(12, len(working_df) // 14))
+            order = max(3, min(12, len(working_df) // 14))
             min_idx = argrelextrema(low,  np.less,    order=order)[0]
             max_idx = argrelextrema(high, np.greater, order=order)[0]
 
@@ -1551,8 +1550,8 @@ class MathEngine:
         if current_price <= 0:
             return {}
 
-        execution_tf = "1d" if mode == TradingMode.POSITION else "4h"
-        higher_tf = "1w" if mode == TradingMode.POSITION else "1d"
+        execution_tf = "4h"
+        higher_tf = "1d"
 
         market_structure = analysis.get("market_structure", {}) or {}
         exec_struct = market_structure.get(execution_tf, {}) or {}
@@ -1835,10 +1834,10 @@ class MathEngine:
         # Structure on 1d
         tf_1d = timeframes.get('1d', pd.DataFrame())
         if len(tf_1d) >= 20:
-            result['structure']['support_1d']    = self.calculate_diagonal_support(tf_1d, mode=TradingMode.POSITION)
-            result['structure']['resistance_1d'] = self.calculate_diagonal_resistance(tf_1d, mode=TradingMode.POSITION)
+            result['structure']['support_1d']    = self.calculate_diagonal_support(tf_1d, mode=TradingMode.SWING)
+            result['structure']['resistance_1d'] = self.calculate_diagonal_resistance(tf_1d, mode=TradingMode.SWING)
             result['structure']['divergence_1d'] = self.detect_divergences(tf_1d)
-            result['market_structure']['1d']     = self.detect_market_structure(tf_1d, mode=TradingMode.POSITION)
+            result['market_structure']['1d']     = self.detect_market_structure(tf_1d, mode=TradingMode.SWING)
             if result['structure'].get('support_1d'):
                 result['structure']['support_1d']['timeframe'] = '1d'
             if result['structure'].get('resistance_1d'):
@@ -1854,10 +1853,9 @@ class MathEngine:
 
         tf_1w = timeframes.get('1w', pd.DataFrame())
         if len(tf_1w) >= 10:
-            result['market_structure']['1w'] = self.detect_market_structure(tf_1w, mode=TradingMode.POSITION)
-            # Structure on 1w (chart overlay: POSITION chart draws 1W candles)
-            result['structure']['support_1w']    = self.calculate_diagonal_support(tf_1w, mode=TradingMode.POSITION)
-            result['structure']['resistance_1w'] = self.calculate_diagonal_resistance(tf_1w, mode=TradingMode.POSITION)
+            result['market_structure']['1w'] = self.detect_market_structure(tf_1w, mode=TradingMode.SWING)
+            result['structure']['support_1w']    = self.calculate_diagonal_support(tf_1w, mode=TradingMode.SWING)
+            result['structure']['resistance_1w'] = self.calculate_diagonal_resistance(tf_1w, mode=TradingMode.SWING)
             if result['structure'].get('support_1w'):
                 result['structure']['support_1w']['timeframe'] = '1w'
             if result['structure'].get('resistance_1w'):
@@ -1889,7 +1887,7 @@ class MathEngine:
 
         # Multi-TF confluence zones
         result['confluence_zones'] = self.detect_confluence_zones(result)
-        result['scenario_engine'] = self.build_scenario_engine(result, TradingMode.POSITION, raw_timeframes=timeframes)
+        result['scenario_engine'] = self.build_scenario_engine(result, TradingMode.SWING, raw_timeframes=timeframes)
 
         # Recent 1d candles
         if len(tf_1d) >= 3:
@@ -1963,7 +1961,7 @@ class MathEngine:
                 if 'trendline_quality' not in result: result['trendline_quality'] = {}
                 result['trendline_quality'][key] = self.score_trendline_quality(tf_df, line, t)
 
-        mode_hint = TradingMode.POSITION if timeframe.lower() in ('1d', '1w', '3d') else TradingMode.SWING
+        mode_hint = TradingMode.SWING
         result['scenario_engine'] = self.build_scenario_engine(result, mode_hint, raw_timeframes={timeframe: tf_df})
         return result
 
@@ -1972,12 +1970,20 @@ class MathEngine:
                        df_1d: Optional[pd.DataFrame] = None,
                        df_1w: Optional[pd.DataFrame] = None,
                        timeframe: Optional[str] = None) -> Dict:
-        """Unified entry point. Calculates base HTF structure and merges LTF if requested."""
-        # 1. Base analysis determined by Mode (HTF)
-        if mode == TradingMode.POSITION:
-            result = self.analyze_market_position(df_1m, df_1d=df_1d, df_1w=df_1w)
-        else:
-            result = self.analyze_market_swing(df_1m, df_1d=df_1d, df_4h=df_4h)
+        """Unified entry point. Calculates Swing HTF structure and merges 1w big-picture context."""
+        # Always Swing analysis (4h execution + 1d/1w context)
+        result = self.analyze_market_swing(df_1m, df_1d=df_1d, df_4h=df_4h)
+
+        # Merge 1w big-picture structure as read-only context
+        if df_1w is not None and not df_1w.empty:
+            try:
+                tf_1w = self.merge_history(self.resample_to_timeframe(df_1m, '1w'), df_1w)
+                if len(tf_1w) >= 10:
+                    result['market_structure']['1w'] = self.detect_market_structure(tf_1w, mode=TradingMode.SWING)
+                    result['structure']['support_1w'] = self.calculate_diagonal_support(tf_1w, mode=TradingMode.SWING)
+                    result['structure']['resistance_1w'] = self.calculate_diagonal_resistance(tf_1w, mode=TradingMode.SWING)
+            except Exception:
+                pass
             
         # 2. Add custom LTF data if requested (MTFA overlay)
         if timeframe and timeframe not in (None, 'auto'):

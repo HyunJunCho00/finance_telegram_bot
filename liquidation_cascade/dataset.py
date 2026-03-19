@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import pandas as pd
 
@@ -16,6 +18,14 @@ LIQUIDATION_COLUMNS = "timestamp,symbol,long_liq_usd,short_liq_usd,long_liq_coun
 FUNDING_COLUMNS = "timestamp,symbol,funding_rate,open_interest_value,basis_pct"
 MICRO_COLUMNS = "timestamp,symbol,spread_bps,slippage_buy_100k_bps"
 CVD_COLUMNS = "timestamp,symbol,volume_delta"
+
+# Incremental panel cache: keyed by "SYMBOL:lookback_minutes"
+# Only used for short-horizon real-time calls (≤ 1 day).
+# Large one-off training/materialisation calls bypass the cache entirely.
+_CACHE_MAX_LOOKBACK = 1440   # minutes — anything larger is a one-off batch call
+_CACHE_OVERLAP      = 3      # minutes of overlap on each incremental fetch (safety margin)
+_panel_cache: dict[str, tuple[pd.DataFrame, datetime]] = {}
+_panel_cache_lock = threading.Lock()
 
 
 def _merge_panel(
@@ -54,19 +64,69 @@ def _merge_panel(
     return merged
 
 
-def load_minute_panel(symbol: str, lookback_minutes: int = 360) -> pd.DataFrame:
-    since = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
-    row_limit = lookback_minutes + 5
-    market_df = db.get_market_data_since(symbol=symbol, since=since, limit=row_limit, columns=MARKET_COLUMNS)
-    liq_df = db.get_liquidation_data(symbol=symbol, limit=row_limit, since=since, columns=LIQUIDATION_COLUMNS)
+def _fetch_panel_since(symbol: str, since: datetime, row_limit: int) -> pd.DataFrame:
+    """Fetch and merge all panel tables from `since` up to `row_limit` rows each."""
+    market_df  = db.get_market_data_since(symbol=symbol, since=since, limit=row_limit, columns=MARKET_COLUMNS)
+    liq_df     = db.get_liquidation_data(symbol=symbol, limit=row_limit, since=since, columns=LIQUIDATION_COLUMNS)
     funding_df = db.get_funding_history(symbol=symbol, limit=row_limit, since=since, columns=FUNDING_COLUMNS)
-    cvd_df = db.get_cvd_data(symbol=symbol, limit=row_limit, since=since, columns=CVD_COLUMNS)
-    micro_df = db.get_microstructure_history(symbol=symbol, limit=row_limit, since=since, columns=MICRO_COLUMNS)
+    cvd_df     = db.get_cvd_data(symbol=symbol, limit=row_limit, since=since, columns=CVD_COLUMNS)
+    micro_df   = db.get_microstructure_history(symbol=symbol, limit=row_limit, since=since, columns=MICRO_COLUMNS)
     panel = _merge_panel(market_df, liq_df, funding_df, micro_df, cvd_df)
-    if panel.empty:
-        return panel
-    panel["symbol"] = panel["symbol"].astype(str)
+    if not panel.empty:
+        panel["symbol"] = panel["symbol"].astype(str)
+        panel["timestamp"] = pd.to_datetime(panel["timestamp"], utc=True, errors="coerce")
     return panel
+
+
+def load_minute_panel(symbol: str, lookback_minutes: int = 360) -> pd.DataFrame:
+    """Load a merged OHLCV+liq+funding+micro+cvd panel.
+
+    For real-time callers (lookback ≤ 1 day) the first call does a full fetch and
+    subsequent calls only pull the incremental rows since the last fetch, then
+    append+trim in memory.  This cuts egress by ~100-300x versus fetching the
+    entire window every minute.
+
+    Large one-off calls (training / feature materialisation) bypass the cache so
+    they always receive fresh, complete data.
+    """
+    now    = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=lookback_minutes)
+
+    # Bypass cache for large batch/training calls
+    if lookback_minutes > _CACHE_MAX_LOOKBACK:
+        return _fetch_panel_since(symbol, cutoff, lookback_minutes + 5)
+
+    cache_key = f"{symbol.upper()}:{lookback_minutes}"
+
+    with _panel_cache_lock:
+        cached_entry: Optional[tuple[pd.DataFrame, datetime]] = _panel_cache.get(cache_key)
+
+        if cached_entry is None:
+            # Cold start: full fetch
+            panel = _fetch_panel_since(symbol, cutoff, lookback_minutes + 5)
+            _panel_cache[cache_key] = (panel.copy() if not panel.empty else panel, now)
+            return panel
+
+        cached_df, cached_at = cached_entry
+
+        # Incremental: fetch only rows newer than (last fetch - overlap)
+        since_incr = cached_at - timedelta(minutes=_CACHE_OVERLAP)
+        incr_limit = int((now - since_incr).total_seconds() / 60) + 10
+        new_panel  = _fetch_panel_since(symbol, since_incr, incr_limit)
+
+        if not new_panel.empty:
+            combined = (
+                pd.concat([cached_df, new_panel], ignore_index=True)
+                .drop_duplicates(subset=["timestamp"], keep="last")
+                .sort_values("timestamp")
+            )
+        else:
+            combined = cached_df.copy()
+
+        # Trim to lookback window
+        combined = combined[combined["timestamp"] >= cutoff].reset_index(drop=True)
+        _panel_cache[cache_key] = (combined.copy(), now)
+        return combined
 
 
 def build_training_dataset(

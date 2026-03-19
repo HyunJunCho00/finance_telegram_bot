@@ -15,7 +15,7 @@ from agents.market_monitor_agent import market_monitor_agent
 class MCPTools:
     def _load_chart_context(self, symbol: str, mode: TradingMode) -> Optional[Dict]:
         settings = get_settings()
-        limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.POSITION_CANDLE_LIMIT
+        limit = settings.SWING_CANDLE_LIMIT
 
         df = db.get_latest_market_data(symbol, limit=limit)
         if df.empty:
@@ -27,11 +27,9 @@ class MCPTools:
         if gcs_parquet_store.enabled:
             try:
                 m_back = settings.history_lookback_months_for_mode(mode)
-                if mode == TradingMode.SWING:
-                    df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
+                df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
                 df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
-                if mode == TradingMode.POSITION:
-                    df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
+                df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
 
                 m_back_timeseries = m_back
                 db_limit = 45000
@@ -118,11 +116,9 @@ class MCPTools:
             if gcs_parquet_store.enabled:
                 try:
                     m_back = settings.history_lookback_months_for_mode(mode)
-                    if mode == TradingMode.SWING:
-                        df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
+                    df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
                     df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
-                    if mode == TradingMode.POSITION:
-                        df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
+                    df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
 
                     # Also load CVD/Funding history for a complete analysis
                     cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
@@ -314,10 +310,7 @@ class MCPTools:
     def get_chart_image(self, symbol: str, lane: Optional[str] = None) -> Dict:
         try:
             lane_norm = (lane or "swing").lower().strip()
-            if lane_norm not in ("swing", "position"):
-                return {"error": "Invalid lane. Use 'swing' or 'position'."}
-
-            mode = TradingMode.SWING if lane_norm == "swing" else TradingMode.POSITION
+            mode = TradingMode.SWING
             ctx = self._load_chart_context(symbol, mode)
             if not ctx:
                 return {"error": "No market data available"}
@@ -349,10 +342,7 @@ class MCPTools:
     def get_chart_images(self, symbol: str, lane: Optional[str] = None) -> Dict:
         try:
             lane_norm = (lane or "swing").lower().strip()
-            if lane_norm not in ("swing", "position"):
-                return {"error": "Invalid lane. Use 'swing' or 'position'."}
-
-            mode = TradingMode.SWING if lane_norm == "swing" else TradingMode.POSITION
+            mode = TradingMode.SWING
             ctx = self._load_chart_context(symbol, mode)
             if not ctx:
                 return {"error": "No market data available"}

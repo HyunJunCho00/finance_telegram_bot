@@ -154,22 +154,22 @@ def _refresh_snapshots_for_modes(
 
 
 def job_snapshot_refresh_fast():
-    """Warm hot-path snapshots for both lanes without slow web narrative calls."""
+    """Warm hot-path snapshots for Swing lane without slow web narrative calls."""
     if _should_defer_heavy_job("Snapshot fast refresh"):
         return
     _refresh_snapshots_for_modes(
-        [TradingMode.SWING, TradingMode.POSITION],
+        [TradingMode.SWING],
         allow_perplexity=False,
         label="Snapshot fast refresh",
     )
 
 
 def job_snapshot_refresh_narrative():
-    """Refresh slower narrative/RAG-rich snapshots on a looser cadence."""
+    """Refresh narrative/RAG-rich snapshots for Swing lane."""
     if _should_defer_heavy_job("Snapshot narrative refresh"):
         return
     _refresh_snapshots_for_modes(
-        [TradingMode.POSITION],
+        [TradingMode.SWING],
         allow_perplexity=True,
         label="Snapshot narrative refresh",
     )
@@ -331,7 +331,7 @@ def _build_mode_technical_snapshot(symbol: str, mode: TradingMode) -> dict:
     """Build deterministic mode-specific technical snapshot for hourly Telegram status."""
     snapshot = {}
     try:
-        limit = settings.SWING_CANDLE_LIMIT if mode == TradingMode.SWING else settings.POSITION_CANDLE_LIMIT
+        limit = settings.SWING_CANDLE_LIMIT
         df = db.get_latest_market_data(symbol, limit=limit)
         if df is None or df.empty:
             return snapshot
@@ -810,17 +810,11 @@ def job_routine_market_status():
             # Volatility
             indicators[symbol]["volatility"] = volatility_monitor.calculate_price_change(symbol)
             swing_snapshot = _build_mode_technical_snapshot(symbol, TradingMode.SWING)
-            position_snapshot = _build_mode_technical_snapshot(symbol, TradingMode.POSITION)
             latest_regime = _get_recent_market_regime(symbol)
             indicators[symbol]["market_regime"] = latest_regime
             indicators[symbol]["technical_snapshot"] = {
                 "swing": swing_snapshot,
-                "position": position_snapshot,
-                "realtime_pressure": (
-                    swing_snapshot.get("realtime_pressure")
-                    or position_snapshot.get("realtime_pressure")
-                    or {}
-                ),
+                "realtime_pressure": swing_snapshot.get("realtime_pressure") or {},
                 "events": _detect_technical_events(
                     symbol=symbol,
                     swing=swing_snapshot,
@@ -1228,8 +1222,7 @@ def job_hourly_swing_charts():
             target_symbols = settings.trading_symbols[:2]
 
         lane_profiles = [
-            ("swing", settings.SWING_HISTORY_MONTHS, "SWING", ["4h", "1d"]),
-            ("position", settings.POSITION_HISTORY_MONTHS, "POSITION", ["1w", "1d"]),
+            ("swing", settings.SWING_HISTORY_MONTHS, "SWING", ["4h", "1d", "1w"]),
         ]
 
         for symbol in target_symbols:
@@ -1436,7 +1429,7 @@ def job_daily_precision_symbol(symbol: str):
         job_daily_precision_prepare_shared()
 
         def _run():
-            return orchestrator.run_daily_playbook_for_symbol(normalized_symbol, TradingMode.POSITION)
+            return orchestrator.run_daily_playbook_for_symbol(normalized_symbol, TradingMode.SWING)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_run)
@@ -1658,7 +1651,7 @@ def main():
     # Async-DAG snapshot prewarm for fast report hot path
     scheduler_config.scheduler.add_job(
         job_snapshot_refresh_fast,
-        CronTrigger(minute='*/5'),
+        CronTrigger(minute='*/15'),
         id='job_snapshot_refresh_fast',
         max_instances=1,
     )
@@ -1766,7 +1759,7 @@ def main():
                 logger.info("GCS disabled — parquet cache bootstrap skipped")
                 return
             for symbol in settings.trading_symbols:
-                for tf, months_back in [("4h", settings.SWING_HISTORY_MONTHS), ("1d", settings.POSITION_HISTORY_MONTHS), ("1w", settings.POSITION_HISTORY_MONTHS)]:
+                for tf, months_back in [("4h", settings.SWING_HISTORY_MONTHS), ("1d", settings.SWING_HISTORY_MONTHS), ("1w", settings.SWING_HISTORY_MONTHS)]:
                     paths = gcs_parquet_store._build_ohlcv_paths(tf, symbol, months_back)
                     missing = [p for p in paths if not gcs_parquet_store._local_cache_path(p).exists()]
                     if missing:

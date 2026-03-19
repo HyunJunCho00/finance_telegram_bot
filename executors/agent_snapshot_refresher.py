@@ -77,7 +77,7 @@ def refresh_market_snapshot(symbol: str, mode: TradingMode, *, wait_budget_s: fl
         "open_positions": state.get("open_positions", ""),
         "df_size": state.get("df_size", 0),
     }
-    expires_at = _iso_after(minutes=30 if mode == TradingMode.POSITION else 5)
+    expires_at = _iso_after(minutes=5)
     latency_ms = (time.perf_counter() - started) * 1000.0
     agent_state_store.upsert_agent_state(
         symbol,
@@ -138,7 +138,7 @@ def refresh_context_bundle(
         mode.value,
         "market_snapshot_agent",
         market_payload,
-        expires_at=_iso_after(minutes=30 if mode == TradingMode.POSITION else 5),
+        expires_at=_iso_after(minutes=5),
         latency_ms=(time.perf_counter() - started) * 1000.0,
     )
 
@@ -251,7 +251,7 @@ def refresh_chart_bundle(
         mode.value,
         "chart_prep_agent",
         chart_payload,
-        expires_at=_iso_after(minutes=30 if mode == TradingMode.POSITION else 5),
+        expires_at=_iso_after(minutes=5),
         latency_ms=(time.perf_counter() - started) * 1000.0,
     )
     performance_telemetry.log_snapshot_refresh(
