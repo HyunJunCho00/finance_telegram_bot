@@ -8,8 +8,8 @@ User=crypto_trader
 WorkingDirectory=/opt/app
 Environment="PYTHONUNBUFFERED=1"
 Environment="USE_SECRET_MANAGER=true"
-Environment="PROJECT_ID=your-gcp-project-id"
-Environment="VERTEX_REGION=us-central1"
+Environment="PROJECT_ID=mcpknu"
+Environment="VERTEX_REGION=global"
 Environment="ENABLE_GCS_ARCHIVE=true"
 ExecStart=/opt/app/venv/bin/python scheduler.py
 Restart=always
