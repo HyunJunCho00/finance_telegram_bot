@@ -1141,14 +1141,12 @@ def job_routine_market_status():
         _hour_bucket = _now_utc.strftime("%Y%m%d%H")  # e.g. "2026031421"
 
         # Message 1: News Briefing (only if news exists)
-        import html as _html
         if telegram_intel and "주요 뉴스 없음" not in telegram_intel:
             news_header = "<b>📰 최근 1시간 뉴스 브리핑 (Synthesized)</b>"
-            _safe_intel = _html.escape(telegram_intel)
             try:
                 execution_repository.enqueue_outbox_event(
                     "telegram_message",
-                    {"chat_id": target_chat_id, "text": f"{news_header}\n\n{_safe_intel}", "parse_mode": "HTML"},
+                    {"chat_id": target_chat_id, "text": f"{news_header}\n\n{telegram_intel}", "parse_mode": "HTML"},
                     idempotency_key=f"telegram:routine_news:{_hour_bucket}:"
                     + hashlib.sha256(f"{news_header}\n\n{telegram_intel}".encode("utf-8")).hexdigest()[:16],
                 )
@@ -1201,11 +1199,10 @@ def job_routine_market_status():
                     f"변동성(24h): {vol:.2f}%\n" if isinstance(vol, float) else ""
                 ) + f"레짐: {regime}"
 
-            _safe_summary = _html.escape(summary)
             try:
                 execution_repository.enqueue_outbox_event(
                     "telegram_message",
-                    {"chat_id": target_chat_id, "text": f"{market_header}\n\n{_safe_summary}", "parse_mode": "HTML"},
+                    {"chat_id": target_chat_id, "text": f"{market_header}\n\n{summary}", "parse_mode": "HTML"},
                     idempotency_key=f"telegram:routine_market_summary:{symbol}:{_hour_bucket}:"
                     + hashlib.sha256(f"{market_header}\n\n{summary}".encode("utf-8")).hexdigest()[:16],
                 )
