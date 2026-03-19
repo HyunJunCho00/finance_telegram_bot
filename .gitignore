@@ -50,6 +50,9 @@ old_backup
 *.zip
 *.tar.gz
 
+# Local notes (not for version control)
+COMMANDS.md
+
 # Tests and Temporary Scripts
 test/
 test*
