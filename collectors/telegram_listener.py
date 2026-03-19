@@ -321,8 +321,12 @@ class TelegramListener:
         logger.info("Backfill completed.")
 
     def _get_max_id(self, channel: str) -> int:
-        res = db.client.table("telegram_messages").select("message_id").eq("channel", channel).order("message_id", desc=True).limit(1).execute()
-        return res.data[0]["message_id"] if res.data else 0
+        try:
+            res = db.client.table("telegram_messages").select("message_id").eq("channel", channel).order("message_id", desc=True).limit(1).execute()
+            return res.data[0]["message_id"] if res.data else 0
+        except Exception as e:
+            logger.warning(f"_get_max_id failed for {channel}, starting from 0: {e}")
+            return 0
 
     async def _process_single_message(self, message, sender_name):
         text = message.message or ""
