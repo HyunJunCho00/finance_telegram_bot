@@ -438,6 +438,10 @@ class SecretManager:
         secret_names = [
             "SUPABASE_URL",
             "SUPABASE_KEY",
+            "SUPABASE_URL_QUANT",
+            "SUPABASE_KEY_QUANT",
+            "SUPABASE_URL_TEXT",
+            "SUPABASE_KEY_TEXT",
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
             "VOYAGE_API_KEY",
