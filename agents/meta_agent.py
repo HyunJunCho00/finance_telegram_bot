@@ -78,7 +78,7 @@ Analyze the data and classify the current Market Regime. Provide a clear rationa
                 user_message=user_message,
                 temperature=0.2,
                 max_tokens=800,
-                role="meta_regime",  # Cerebras gpt-oss-120b
+                role="meta_regime",  # Cerebras qwen-3-235b-a22b-instruct-2507
             )
 
             # Robust JSON parsing

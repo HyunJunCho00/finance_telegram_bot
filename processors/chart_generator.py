@@ -1031,10 +1031,9 @@ class ChartGenerator:
                 except Exception:
                     pass
 
-            ax.text(x_vals[-1] - 1.5, y_plot[-1], f' {label_text}', color=color,
-                    fontsize=8, fontweight='bold', va='bottom', ha='right',
-                    bbox=dict(facecolor=text_color if theme == 'light_premium' else '#131722',
-                              alpha=0.7, edgecolor='none', pad=1))
+            # [VLM OPT] No text label on trendline — line color conveys support/resistance.
+            # VLM reads slope direction + color semantics (green=support, red=resistance).
+            # Exact level values are injected into VLM prompt via text context.
 
         except Exception as e:
             logger.debug(f"Trendline draw error: {e}")
@@ -1062,27 +1061,25 @@ class ChartGenerator:
             if isinstance(val, (int, float)):
                 ax.axhline(val, color=color, linestyle='--', linewidth=1.2,
                            alpha=alpha, zorder=2)
-                ax.text(n - 0.5, val, f' {label}',
-                        color=color, fontsize=8, va='center', ha='left',
-                        alpha=1.0, fontweight='bold',
-                        bbox=dict(facecolor='black', alpha=0.4, edgecolor='none', pad=1))
+                # [VLM OPT] Label on LEFT side only — avoids right-side label traffic jam
+                # Strip tf prefix to keep compact (e.g. "FIB 61.8" not "1D FIB 61.8")
+                short_label = label.split(' ', 1)[-1] if ' ' in label else label
+                ax.text(2, val, f' {short_label}',
+                        color=color, fontsize=7, va='center', ha='left',
+                        alpha=0.85, fontweight='bold',
+                        bbox=dict(facecolor='#131722', alpha=0.5, edgecolor='none', pad=1))
 
-        # Draw anchor markers so VLM can identify exact swing_high / swing_low used for Fib
-        # Without these markers, VLM must guess anchors → fibonacci_context.anchor_high/low unreliable
+        # Anchor lines only — no text label needed.
+        # VLM reads the line extent (top boundary = swing_high, bottom = swing_low).
+        # Numeric values are passed via text prompt context instead.
         anchor_high = fib.get('swing_high')
         anchor_low = fib.get('swing_low')
         if isinstance(anchor_high, (int, float)):
             ax.axhline(anchor_high, color='#F39C12', linestyle='-', linewidth=1.0,
                        alpha=0.5, zorder=3)
-            ax.text(1, anchor_high, f' {tf_prefix}FIB HIGH',
-                    color='#F39C12', fontsize=7, va='bottom', ha='left',
-                    fontweight='bold', alpha=0.9)
         if isinstance(anchor_low, (int, float)):
             ax.axhline(anchor_low, color='#F39C12', linestyle='-', linewidth=1.0,
                        alpha=0.5, zorder=3)
-            ax.text(1, anchor_low, f' {tf_prefix}FIB LOW',
-                    color='#F39C12', fontsize=7, va='top', ha='left',
-                    fontweight='bold', alpha=0.9)
 
     def _draw_swing_levels(self, ax, chart_df: pd.DataFrame, swing: Optional[Dict], tf_label: Optional[str] = None):
         """Draw horizontal lines and shaded zones at swing highs/lows (liquidity pools)."""
@@ -1118,29 +1115,21 @@ class ChartGenerator:
 
         for idx, high in enumerate(_select_levels(swing.get('swing_highs', []))):
             if isinstance(high, (int, float)):
-                # Draw main line
+                # [VLM OPT] Line + shaded zone only — no text label.
+                # Red horizontal line = resistance/liquidity pocket above price.
                 ax.axhline(high, color='#C0392B', linestyle='-', linewidth=0.8,
                            alpha=0.4, zorder=2)
-                # Draw subtle shaded zone for "Liquidity Pool" (+/- 0.3% range)
-                ax.axhspan(high * 0.997, high * 1.003, color='#C0392B', 
+                ax.axhspan(high * 0.997, high * 1.003, color='#C0392B',
                            alpha=0.08, zorder=1)
-                if idx == 0:
-                    ax.text(2, high, f" {tf_prefix}SWING HIGH", color='#C0392B', 
-                            fontsize=7, fontweight='bold', va='bottom', alpha=1.0,
-                            bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
 
         for idx, low in enumerate(_select_levels(swing.get('swing_lows', []))):
             if isinstance(low, (int, float)):
-                # Draw main line
+                # [VLM OPT] Line + shaded zone only — no text label.
+                # Green horizontal line = support/liquidity pocket below price.
                 ax.axhline(low, color='#27AE60', linestyle='-', linewidth=0.8,
                            alpha=0.4, zorder=2)
-                # Draw subtle shaded zone for "Liquidity Pool" (+/- 0.3% range)
-                ax.axhspan(low * 0.997, low * 1.003, color='#27AE60', 
+                ax.axhspan(low * 0.997, low * 1.003, color='#27AE60',
                            alpha=0.08, zorder=1)
-                if idx == 0:
-                    ax.text(2, low, f" {tf_prefix}SWING LOW", color='#27AE60', 
-                            fontsize=7, fontweight='bold', va='top', alpha=1.0,
-                            bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
 
     def _draw_structure_events(self, ax, chart_df: pd.DataFrame, market_structure: Optional[Dict], tf_label: str):
         """Draw execution-panel structure events such as CHoCH/MSB and last swing bounds."""
@@ -1150,19 +1139,15 @@ class ChartGenerator:
         tf_prefix = str(tf_label or '').upper()
         n = len(chart_df)
 
+        # [VLM OPT] Structure event lines only — no text labels.
+        # VLM infers CHoCH/MSB from line breaks + color semantics in the prompt context.
         last_high = market_structure.get('last_swing_high')
         if isinstance(last_high, (int, float)):
             ax.axhline(last_high, color='#C0392B', linestyle=':', linewidth=1.0, alpha=0.45, zorder=2)
-            ax.text(n - 1, last_high, f' {tf_prefix} LAST HIGH', color='#C0392B',
-                    fontsize=7, fontweight='bold', va='bottom', ha='right',
-                    bbox=dict(facecolor='black', alpha=0.25, edgecolor='none', pad=1))
 
         last_low = market_structure.get('last_swing_low')
         if isinstance(last_low, (int, float)):
             ax.axhline(last_low, color='#27AE60', linestyle=':', linewidth=1.0, alpha=0.45, zorder=2)
-            ax.text(n - 1, last_low, f' {tf_prefix} LAST LOW', color='#27AE60',
-                    fontsize=7, fontweight='bold', va='top', ha='right',
-                    bbox=dict(facecolor='black', alpha=0.25, edgecolor='none', pad=1))
 
         current_price = float(chart_df['close'].iloc[-1])
         choch = market_structure.get('choch')
@@ -1176,22 +1161,20 @@ class ChartGenerator:
             and isinstance(msb_price, (int, float))
             and abs(float(choch['price']) - float(msb_price)) <= (current_price * 0.004)
         )
+        # Draw CHoCH line with color only (blue=bullish break, red=bearish break)
         if isinstance(choch, dict) and isinstance(choch.get('price'), (int, float)):
             choch_type = str(choch.get('type', '')).lower()
-            direction = 'BULLISH' if 'bullish' in choch_type else 'BEARISH'
-            color = '#3498DB' if direction == 'BULLISH' else '#E74C3C'
+            color = '#3498DB' if 'bullish' in choch_type else '#E74C3C'
             if not prices_too_close:
-                ax.text(n - 2, float(choch['price']), f' {tf_prefix} {direction} CHOCH', color=color,
-                        fontsize=8, fontweight='bold', va='center', ha='right',
-                        bbox=dict(facecolor='black', alpha=0.35, edgecolor='none', pad=1))
+                ax.axhline(float(choch['price']), color=color, linestyle='--',
+                           linewidth=1.0, alpha=0.55, zorder=3)
 
+        # Draw MSB line with color only
         if isinstance(msb, dict) and isinstance(msb_price, (int, float)):
             msb_type = str(msb.get('type', '')).lower()
-            direction = 'BULLISH' if 'bullish' in msb_type else 'BEARISH'
-            color = '#3498DB' if direction == 'BULLISH' else '#E74C3C'
-            ax.text(n - 2, float(msb_price), f' {tf_prefix} {direction} MSB', color=color,
-                    fontsize=8, fontweight='bold', va='center', ha='right',
-                    bbox=dict(facecolor='black', alpha=0.35, edgecolor='none', pad=1))
+            color = '#3498DB' if 'bullish' in msb_type else '#E74C3C'
+            ax.axhline(float(msb_price), color=color, linestyle='-.',
+                       linewidth=1.1, alpha=0.6, zorder=3)
 
     def _draw_confluence_zones(self, ax, chart_df: pd.DataFrame, zones: List[Dict], focus_tfs: List[str]):
         """Draw up to two visible confluence zones for the active panel timeframes."""
@@ -1226,12 +1209,9 @@ class ChartGenerator:
         for zone in visible[:2]:
             low = float(zone['price_low'])
             high = float(zone['price_high'])
-            label_tfs = "/".join(str(tf).upper() for tf in zone.get('timeframes', [])[:2])
-            label = f"{(label_tfs or 'HTF')} CONFLUENCE".strip()
+            # [VLM OPT] Yellow shaded zone only — no text label.
+            # Yellow zone = multi-timeframe confluence; VLM identifies by color.
             ax.axhspan(low, high, color='#F1C40F', alpha=0.14, zorder=1)
-            ax.text(len(chart_df) - 1, high, f' {label}', color='#F1C40F',
-                    fontsize=7, fontweight='bold', va='bottom', ha='right',
-                    bbox=dict(facecolor='black', alpha=0.25, edgecolor='none', pad=1))
 
     def _draw_scenario_liquidity_map(self, ax, chart_df: pd.DataFrame, analysis: Dict):
         """Draw only the active scenario's liquidity hints with low visual noise."""
@@ -1874,50 +1854,26 @@ class ChartGenerator:
             logger.debug(f"Alpha markers draw error: {e}")
 
     def _draw_header_legend(self, ax, chart_df: pd.DataFrame, symbol: str, config: Dict, text_color: str):
-        """Draw a professional TradingView-style header legend in the top-left."""
+        """Draw a minimal TradingView-style header for VLM context.
+
+        [VLM OPT] Only the bare minimum is drawn on the chart itself:
+          - Symbol + timeframe + window range (tells VLM what it's looking at)
+          - Current price (already shown via _draw_current_price_label)
+        All numeric indicator values (EMA200, RSI, etc.) are passed via text
+        prompt context OUTSIDE the image — VLM should not try to read from chart.
+        """
         try:
-            last_candle = chart_df.iloc[-1]
             tf_str = config.get('title_suffix', '4H').split(' ')[0]
             panel_label = config.get('panel_label', '')
-            
-            # 1. Main Header: SYMBOL TF EXCHANGE (Data up to: TIMESTAMP)
+
+            # Single compact header line: SYMBOL | TF | Window START -> END
             first_ts_str = chart_df.index[0].strftime('%Y-%m-%d %H:%M')
             last_ts_str = chart_df.index[-1].strftime('%Y-%m-%d %H:%M')
-            header_text = f"{symbol} | {tf_str} | {panel_label} | Window {first_ts_str} -> {last_ts_str}"
-            ax.text(0.01, 0.98, header_text, transform=ax.transAxes, 
-                    fontsize=10, fontweight='bold', color=text_color, alpha=0.9,
-                    ha='left', va='top')
-            
-            # 2. Price Info: O H L C
-            price_text = (f"O{last_candle['open']:.2f}  H{last_candle['high']:.2f}  "
-                         f"L{last_candle['low']:.2f}  C{last_candle['close']:.2f}")
-            ax.text(0.01, 0.94, price_text, transform=ax.transAxes,
-                    fontsize=8, color=text_color, alpha=0.7,
-                    ha='left', va='top')
-            
-            # 3. Indicators Legend
-            indicators = []
-            if config.get('draw_ema200', True) and 'ema200' in chart_df.columns:
-                ema_val = last_candle['ema200']
-                if not pd.isna(ema_val):
-                    indicators.append(f"EMA 200: {ema_val:.2f}")
-            
-            if indicators:
-                ind_text = "  /  ".join(indicators)
-                ax.text(0.01, 0.90, ind_text, transform=ax.transAxes,
-                        fontsize=8, color='#787B86', alpha=0.8,
-                        ha='left', va='top')
-            
-            # 4. [VLM OPT] Analytical Overlay Guide (Rosetta Stone)
-            # This helps VLM map visual colors to semantic concepts
-            overlay_guide = (
-                "LEGEND: Green=Support  Red=Resistance  Orange=Fib  Yellow=Confluence  "
-                "Blue=Bullish Structure"
-            )
-            ax.text(0.01, 0.02, overlay_guide, transform=ax.transAxes,
-                    fontsize=7, color=text_color, alpha=0.5,
-                    ha='left', va='bottom', fontweight='bold',
-                    bbox=dict(facecolor='black', alpha=0.3, edgecolor='none', pad=1))
+            header_text = f"{symbol} | {tf_str} | Window {first_ts_str} -> {last_ts_str}"
+            ax.text(0.01, 0.98, header_text, transform=ax.transAxes,
+                    fontsize=9, fontweight='bold', color=text_color, alpha=0.85,
+                    ha='left', va='top',
+                    bbox=dict(facecolor='#131722', alpha=0.5, edgecolor='none', pad=2))
         except Exception as e:
             logger.debug(f"Header legend draw error: {e}")
 

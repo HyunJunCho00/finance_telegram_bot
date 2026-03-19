@@ -109,6 +109,10 @@ CREATE TABLE IF NOT EXISTS macro_data (
     nasdaq DECIMAL(20, 4),
     gold DECIMAL(20, 4),
     oil DECIMAL(20, 4),
+    btc_cme_basis DECIMAL(20, 4),
+    btc_cme_basis_pct DECIMAL(10, 6),
+    eth_cme_basis DECIMAL(20, 4),
+    eth_cme_basis_pct DECIMAL(10, 6),
     created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(timestamp, source)
 );

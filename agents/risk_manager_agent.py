@@ -250,7 +250,7 @@ Please execute your Risk Management oversight and output the final, safe JSON.""
                 user_message=user_message,
                 temperature=0.1,  # Very strict, less creative
                 max_tokens=600,
-                role="risk_eval"  # Cerebras gpt-oss-120b; fallback to Groq
+                role="risk_eval"  # Cerebras qwen-3-235b-a22b-instruct-2507; fallback to Groq
             )
             final = self._parse_decision(response, draft_decision)
             final = self._apply_scenario_overrides(final, scenario_context, mode)

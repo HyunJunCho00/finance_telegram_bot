@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY_JUDGE: str = ""    # Project A -- Judge (gemini-3.1-pro-preview)
     GEMINI_API_KEY_VLM: str = ""      # Project B -- VLM Geometric (gemini-3-flash-preview)
     GROQ_API_KEY: str = ""
-    CEREBRAS_API_KEY: str = ""        # Cerebras -> meta_regime + risk_eval (gpt-oss-120b)
+    CEREBRAS_API_KEY: str = ""        # Cerebras -> meta_regime + risk_eval (qwen-3-235b-a22b-instruct-2507)
     OPENROUTER_API_KEY: str = ""      # OpenRouter -> hourly monitor (free tier)
     OPEN_ROUTER_API_KEY: str = ""     # .env alias for OPENROUTER_API_KEY
 
@@ -179,10 +179,10 @@ class Settings(BaseSettings):
     MODEL_VLM_TELEGRAM_CHART: str = "gemini-3-flash-preview"
 
     # 3. meta_regime Cerebras
-    MODEL_META_REGIME: str = "gpt-oss-120b"
+    MODEL_META_REGIME: str = "qwen-3-235b-a22b-instruct-2507"
 
     # 4. risk_eval Cerebras
-    MODEL_RISK_EVAL: str = "gpt-oss-120b"
+    MODEL_RISK_EVAL: str = "qwen-3-235b-a22b-instruct-2507"
 
     # 5. risk_eval_fallback Groq
     MODEL_RISK_EVAL_FALLBACK: str = "qwen/qwen3-32b"
@@ -195,8 +195,8 @@ class Settings(BaseSettings):
     MODEL_NEWS_FINAL_FALLBACK: str = "qwen/qwen3-32b"
     MODEL_TRIGGER_VETO: str = "llama-3.1-8b-instant"
 
-    # 7. monitor_hourly OpenRouter (free)
-    MODEL_MONITOR_HOURLY: str = "gpt-oss-120b"
+    # 7. monitor_hourly Cerebras
+    MODEL_MONITOR_HOURLY: str = "llama3.1-8b"
     MONITOR_SOFT_TRIGGER_THRESHOLD: float = 0.7
     MARKET_STATUS_PREFER_DETERMINISTIC: bool = True
     ENABLE_SNAPSHOT_HOT_PATH_DAILY: bool = True
