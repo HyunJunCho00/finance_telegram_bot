@@ -1921,7 +1921,7 @@ class ChartGenerator:
         return base64.b64encode(chart_bytes).decode('utf-8')
 
     def resize_for_low_res(self, chart_bytes: bytes, max_dim: int = 768) -> bytes:
-        """Resize for VLM analysis. 
+        """Resize for VLM analysis.
         2026 SOTA models like Gemini 3.1 Pro handle 768px-1024px with perfect precision.
         Using 768px as default balance between cost and visual fidelity.
         """
@@ -1937,5 +1937,127 @@ class ChartGenerator:
             logger.error(f"Image resize error: {e}")
             return chart_bytes
 
+    def generate_chart_in_process(
+        self,
+        df,
+        analysis: dict,
+        symbol: str,
+        mode,
+        timeframe: str,
+        liquidation_df=None,
+        cvd_df=None,
+        funding_df=None,
+        df_4h=None,
+        df_1d=None,
+        df_1w=None,
+        timeout: int = 30,
+    ):
+        """mpf.plot을 별도 프로세스에서 실행 — 메인 프로세스 GIL 블로킹 방지.
+
+        forkserver: 부모의 스레드(APScheduler, Telegram bot 등)를 상속하지 않아
+        멀티스레드 fork 데드락 위험 없음.
+        """
+        from concurrent.futures import TimeoutError as _FutureTimeout
+
+        def _recs(d):
+            if d is None:
+                return None
+            if hasattr(d, "empty") and d.empty:
+                return None
+            return d.to_dict("records")
+
+        fut = _chart_proc_pool.submit(
+            _chart_worker_fn,
+            _recs(df),
+            analysis,
+            symbol,
+            mode.value,
+            timeframe,
+            _recs(liquidation_df),
+            _recs(cvd_df),
+            _recs(funding_df),
+            _recs(df_4h),
+            _recs(df_1d),
+            _recs(df_1w),
+            self.width,
+            self.height,
+            self.dpi,
+        )
+        try:
+            return fut.result(timeout=timeout)
+        except _FutureTimeout:
+            logger.warning(f"ProcessPool chart timed out after {timeout}s — falling back to inline")
+            fut.cancel()
+        except Exception as e:
+            logger.warning(f"ProcessPool chart failed: {e} — falling back to inline")
+
+        # fallback: 프로세스 풀 실패 시 메인 스레드에서 직접 실행
+        try:
+            return self.generate_chart(
+                df, analysis, symbol, mode=mode, timeframe=timeframe,
+                liquidation_df=liquidation_df, cvd_df=cvd_df, funding_df=funding_df,
+                df_4h=df_4h, df_1d=df_1d, df_1w=df_1w, prefer_lane=False,
+            )
+        except Exception as e:
+            logger.error(f"Chart generation fallback also failed: {e}")
+            return None
+
 
 chart_generator = ChartGenerator()
+
+
+# ── ProcessPool 설정 (chart_generator 인스턴스 생성 이후에 배치) ──────────────
+import multiprocessing as _mp
+from concurrent.futures import ProcessPoolExecutor as _ProcessPoolExecutor
+
+# forkserver: 부모 프로세스 스레드를 상속하지 않는 안전한 시작 방식
+# max_workers=2: BTC/ETH 동시 차트 생성 커버, 메모리 과다 방지
+_mp_context = _mp.get_context("forkserver")
+_chart_proc_pool = _ProcessPoolExecutor(max_workers=2, mp_context=_mp_context)
+
+
+def _chart_worker_fn(
+    df_records,
+    analysis,
+    symbol,
+    mode_value,
+    timeframe,
+    liq_records,
+    cvd_records,
+    funding_records,
+    df_4h_records,
+    df_1d_records,
+    df_1w_records,
+    width,
+    height,
+    dpi,
+):
+    """최상위 워커 함수 — ProcessPool에서 실행. mpf.plot GIL을 메인 프로세스와 완전 분리."""
+    import pandas as pd
+    from config.settings import TradingMode
+
+    def _to_df(records):
+        if records is None:
+            return None
+        d = pd.DataFrame(records)
+        return d if not d.empty else None
+
+    gen = ChartGenerator.__new__(ChartGenerator)
+    gen.width = width
+    gen.height = height
+    gen.dpi = dpi
+
+    return gen.generate_chart(
+        df=_to_df(df_records),
+        analysis=analysis,
+        symbol=symbol,
+        mode=TradingMode(mode_value),
+        timeframe=timeframe,
+        liquidation_df=_to_df(liq_records),
+        cvd_df=_to_df(cvd_records),
+        funding_df=_to_df(funding_records),
+        df_4h=_to_df(df_4h_records),
+        df_1d=_to_df(df_1d_records),
+        df_1w=_to_df(df_1w_records),
+        prefer_lane=False,
+    )

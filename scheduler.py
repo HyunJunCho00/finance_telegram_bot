@@ -831,7 +831,6 @@ def job_routine_market_status():
             # Volatility
             indicators[symbol]["volatility"] = volatility_monitor.calculate_price_change(symbol)
             swing_snapshot = _build_mode_technical_snapshot(symbol, TradingMode.SWING)
-            position_snapshot = _build_mode_technical_snapshot(symbol, TradingMode.POSITION)
             latest_regime = _get_recent_market_regime(symbol)
             indicators[symbol]["market_regime"] = latest_regime
             indicators[symbol]["technical_snapshot"] = {
@@ -840,7 +839,7 @@ def job_routine_market_status():
                 "events": _detect_technical_events(
                     symbol=symbol,
                     swing=swing_snapshot,
-                    position=position_snapshot,
+                    position=swing_snapshot,  # POSITION 모드 제거됨 — swing으로 대체
                     funding=indicators[symbol].get("funding_rate"),
                     volatility=indicators[symbol].get("volatility"),
                     regime=latest_regime,

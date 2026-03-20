@@ -1460,23 +1460,16 @@ def node_generate_chart(state: AnalysisState) -> dict:
             logger.warning(f"Funding/OI data load for chart skipped/merged: {e}")
 
 
-    try:
-        fixed_timeframe = "4h" if mode == TradingMode.SWING else "1d"
-        chart_bytes = chart_generator.generate_chart(
-            df, market_data, symbol,
-            mode=mode,
-            timeframe=fixed_timeframe,
-            liquidation_df=liquidation_df,
-            cvd_df=cvd_df,
-            funding_df=funding_df,
-            df_4h=df_4h,
-            df_1d=df_1d,
-            df_1w=df_1w,
-            prefer_lane=False,
-        )
-    except Exception as e:
-        logger.error(f'Chart generation FAILED: {e}')
-        chart_bytes = None
+    fixed_timeframe = "4h" if mode == TradingMode.SWING else "1d"
+    chart_bytes = chart_generator.generate_chart_in_process(
+        df, market_data, symbol, mode, fixed_timeframe,
+        liquidation_df=liquidation_df,
+        cvd_df=cvd_df,
+        funding_df=funding_df,
+        df_4h=df_4h,
+        df_1d=df_1d,
+        df_1w=df_1w,
+    )
 
     # [OOM FIX] chart 생성 직후 GCS historical DataFrames 즉시 해제 (수백MB)
     try:
