@@ -58,10 +58,20 @@ class MathEngine:
                 df_history['timestamp'] = df_history.index
             df_history['timestamp'] = pd.to_datetime(df_history['timestamp'], utc=True)
         
-        # Combine
+        # 공통 OHLCV 컬럼만 유지 — 컬럼 불일치로 NaN 컬럼이 생기는 것 방지
+        ohlcv_cols = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        hist_cols = [c for c in ohlcv_cols if c in df_history.columns]
+        main_cols = [c for c in ohlcv_cols if c in df_main.columns]
+        shared_cols = [c for c in ohlcv_cols if c in hist_cols and c in main_cols]
+        df_history = df_history[shared_cols]
+        df_main = df_main[shared_cols]
+
         combined = pd.concat([df_history, df_main], ignore_index=True)
-        # Sort and deduplicate (keep latest data if overlap exists)
         combined = combined.drop_duplicates(subset=['timestamp'], keep='last').sort_values('timestamp')
+        # OHLCV None/NaN은 ffill로 처리 (bfill 미사용 — look-ahead bias 방지)
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in combined.columns:
+                combined[col] = pd.to_numeric(combined[col], errors='coerce').ffill()
         return combined.reset_index(drop=True)
 
     # ---------------------- Resampling ----------------------
@@ -514,10 +524,10 @@ class MathEngine:
         if isinstance(df.index, pd.DatetimeIndex) and df.index.tz is not None:
             df.index = df.index.tz_localize(None)
             
-        close = df['close'].astype('float64')
-        high = df['high'].astype('float64')
-        low = df['low'].astype('float64')
-        volume = df['volume'].astype('float64')
+        close = pd.to_numeric(df['close'], errors='coerce').ffill().astype('float64')
+        high = pd.to_numeric(df['high'], errors='coerce').ffill().astype('float64')
+        low = pd.to_numeric(df['low'], errors='coerce').ffill().astype('float64')
+        volume = pd.to_numeric(df['volume'], errors='coerce').fillna(0).astype('float64')
         r = {}
 
         try:
@@ -548,7 +558,7 @@ class MathEngine:
                     if len(macd_df) > 1:
                         r['macd_hist_prev'] = self._safe_val(macd_df[cols[2]], -2)
             except Exception as e:
-                logger.warning(f"MACD calculation error: {e}")
+                logger.warning(f"MACD calculation error: {e} | rows={len(close)} null={close.isna().sum()}")
 
             # ADX
             try:
