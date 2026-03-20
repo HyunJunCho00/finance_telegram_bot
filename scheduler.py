@@ -357,7 +357,18 @@ def _build_mode_technical_snapshot(symbol: str, mode: TradingMode) -> dict:
         if df is None or df.empty:
             return snapshot
 
-        analysis = math_engine.analyze_market(df, mode)
+        # GCS 4h/1d/1w 로드 — 구조 분석(Fib, trendline, S/R)에 충분한 히스토리 확보
+        # node_collect_data와 동일한 패턴. 1m 6일치만으로는 4h 36개로 부족
+        df_4h, df_1d, df_1w = None, None, None
+        try:
+            m_back = settings.SWING_HISTORY_MONTHS
+            df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
+            df_1d = gcs_parquet_store.load_ohlcv("1d", symbol, months_back=m_back)
+            df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
+        except Exception:
+            pass
+
+        analysis = math_engine.analyze_market(df, mode, df_4h=df_4h, df_1d=df_1d, df_1w=df_1w)
         current_price = float(df["close"].iloc[-1])
 
         primary_tf = "4h" if mode == TradingMode.SWING else "1d"
