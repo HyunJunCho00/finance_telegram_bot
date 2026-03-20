@@ -547,8 +547,10 @@ class MathEngine:
             if r.get('sma_50') and r.get('sma_200'):
                 r['sma50_above_sma200'] = r['sma_50'] > r['sma_200']
 
-            # MACD
+            # MACD — slow(26)+signal(9)-1=34개 미만이면 signal EMA 유효값 0 → None 연산 오류
             try:
+                if len(close) < 34:
+                    raise ValueError(f"insufficient rows for MACD: {len(close)} < 34")
                 macd_df = ta.macd(close, fast=12, slow=26, signal=9)
                 if macd_df is not None and not macd_df.empty:
                     cols = macd_df.columns.tolist()
