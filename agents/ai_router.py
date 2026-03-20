@@ -241,16 +241,16 @@ class AIClient:
 
         self._GROQ_REASONING_POOL = [
             "openai/gpt-oss-120b",
-            "qwen/qwen3-32b",
             "llama-3.3-70b-versatile",
+            "qwen/qwen3-32b",           # RPM 60으로 높지만 TPM 6k — reasoning 보조
             "meta-llama/llama-4-scout-17b-16e-instruct",
         ]
         self._GROQ_GENERAL_POOL = [
-            "qwen/qwen3-32b",
-            "meta-llama/llama-4-scout-17b-16e-instruct",
+            "meta-llama/llama-4-scout-17b-16e-instruct",  # TPM 30k — 긴 텍스트 relay 1순위
+            "qwen/qwen3-32b",                              # RPM 60 — 단기 버스트 대응
+            "llama-3.3-70b-versatile",                    # TPM 12k — 품질 fallback
             "openai/gpt-oss-20b",
-            "groq/compound",
-            "llama-3.1-8b-instant",
+            "llama-3.1-8b-instant",                       # RPD 14,400 — 마지막 보루
         ]
 
         self._circuit_breakers = {}

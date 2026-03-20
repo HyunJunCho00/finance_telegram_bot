@@ -188,9 +188,11 @@ class Settings(BaseSettings):
     MODEL_RISK_EVAL_FALLBACK: str = "qwen/qwen3-32b"
 
     # 6. RAG extraction (Groq) + News summarize (Cerebras lightweight)
-    MODEL_RAG_EXTRACTION: str = "qwen/qwen3-32b"
+    # llama-4-scout: TPM 30,000 (vs qwen3-32b TPM 6,000) — 긴 텍스트 RAG 추출에 적합
+    MODEL_RAG_EXTRACTION: str = "meta-llama/llama-4-scout-17b-16e-instruct"
     MODEL_NEWS_SUMMARIZE: str = "llama-3.1-8b-instant"
-    MODEL_NEWS_CLUSTER: str = "qwen/qwen3-32b"
+    # llama-3.3-70b: 품질 우선, TPM 12,000
+    MODEL_NEWS_CLUSTER: str = "llama-3.3-70b-versatile"
     MODEL_NEWS_FINAL: str = "openai/gpt-oss-120b"
     MODEL_NEWS_FINAL_FALLBACK: str = "qwen/qwen3-32b"
     MODEL_TRIGGER_VETO: str = "llama-3.1-8b-instant"
