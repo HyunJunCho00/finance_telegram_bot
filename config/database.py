@@ -107,11 +107,11 @@ class DatabaseClient:
                         quant_url = getattr(settings, "SUPABASE_URL_QUANT", "") or settings.SUPABASE_URL
                         quant_key = getattr(settings, "SUPABASE_KEY_QUANT", "") or settings.SUPABASE_KEY
                         self.client_quant = create_client(quant_url, quant_key, options=options)
-                        self.client = self.client_quant  # 하위 호환 alias 갱신
 
                         text_url = getattr(settings, "SUPABASE_URL_TEXT", "") or settings.SUPABASE_URL
                         text_key = getattr(settings, "SUPABASE_KEY_TEXT", "") or settings.SUPABASE_KEY
                         self.client_text = create_client(text_url, text_key, options=options)
+                        self.client = _TableRouter(self)  # 라우터 재생성 (quant 덮어쓰기 버그 수정)
 
                         return func(self, *args, **kwargs)
                     except Exception as retry_e:
