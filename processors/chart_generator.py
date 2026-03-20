@@ -2015,6 +2015,9 @@ from concurrent.futures import ProcessPoolExecutor as _ProcessPoolExecutor
 _mp_context = _mp.get_context("forkserver")
 _chart_proc_pool = _ProcessPoolExecutor(max_workers=2, mp_context=_mp_context)
 
+import atexit as _atexit
+_atexit.register(lambda: _chart_proc_pool.shutdown(wait=False, cancel_futures=True))
+
 
 def _chart_worker_fn(
     df_records,
