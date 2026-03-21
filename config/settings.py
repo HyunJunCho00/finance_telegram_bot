@@ -17,6 +17,17 @@ class TradingMode(str, Enum):
     SWING = "swing"
 
 
+class SpotMode(str, Enum):
+    """Spot-only trading mode. No leverage. No SHORT.
+    Runs independently from 쉽알남 (leverage SWING bot).
+
+    SWING    — mirrors 쉽알남 LONG signals on spot (time-bounded, same 4h thesis)
+    POSITION — independent structural thesis, no fixed duration, exit when invalidated
+    """
+    SWING = "spot_swing"
+    POSITION = "spot_position"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -289,6 +300,11 @@ class Settings(BaseSettings):
     # Weekly/daily structure loaded as context for big-picture awareness
     TRADING_MODE: str = "swing"
     PHILOSOPHY_PROFILE: str = "inbum_shipalnam"
+
+    # ===== Spot Trading Module (독립 현물 거래) =====
+    # 쉽알남 레버리지 봇과 완전히 분리. SHORT 불가, 레버리지 없음.
+    # spot_swing    : 쉽알남 LONG 신호 미러링 (시간 한정)
+    # spot_position : 독립 구조적 thesis 기반 홀딩 (기간 X, thesis 깨질 때 청산)
 
     # ===== Chart Image / VLM Cost Control =====
     # Smart image strategy:

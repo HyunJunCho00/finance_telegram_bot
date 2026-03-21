@@ -135,7 +135,40 @@ class ReportGenerator:
         return text
 
     @classmethod
+    def _veto_summary(cls, decision: Dict[str, Any]) -> str:
+        """VETO된 결정에서 사람이 읽을 수 있는 한 줄 요약을 추출."""
+        policy = cls._load_json_field(decision.get("policy_checks"), {})
+        reason = ""
+        if isinstance(policy, dict):
+            reason = str(policy.get("reason") or policy.get("message") or "").strip()
+
+        # VETO 메시지가 reasoning 안에 있는 경우 정제
+        if not reason:
+            reasoning = decision.get("reasoning", {})
+            raw = ""
+            if isinstance(reasoning, dict):
+                raw = str(reasoning.get("final_logic") or reasoning.get("counter_scenario") or "").strip()
+            else:
+                raw = str(reasoning or "").strip()
+            # [POLICY VETO] ... { JSON } 패턴에서 앞부분만 추출
+            if raw.startswith("[POLICY VETO]"):
+                raw = raw[len("[POLICY VETO]"):].strip()
+            # JSON 블록 이전 텍스트만 보존
+            json_start = raw.find("{")
+            if json_start > 0:
+                raw = raw[:json_start].strip()
+            reason = raw
+
+        return cls._compact_text(reason, 200) if reason else "Policy 조건 미충족으로 진입 보류됨."
+
+    @classmethod
     def _summary_from_decision(cls, decision: Dict[str, Any]) -> str:
+        # VETO / NO_TRADE 상태면 policy 이유를 깔끔하게 표시
+        policy = cls._load_json_field(decision.get("policy_checks"), {})
+        policy_status = str((policy or {}).get("status", "")).upper() if isinstance(policy, dict) else ""
+        if policy_status in ("VETO", "NO_TRADE"):
+            return cls._veto_summary(decision)
+
         reasoning = decision.get("reasoning", {})
         candidates: list[str] = []
 
@@ -150,10 +183,11 @@ class ReportGenerator:
                 candidates.append(text)
 
         for candidate in candidates:
-            compact = cls._compact_text(candidate, 320)
+            # 500자로 확대 — 기존 320자는 문장 중간에서 잘렸음
+            compact = cls._compact_text(candidate, 500)
             if compact:
                 return compact
-        return "요약 능한 핵심 논리 아직 정리되 않았습니다."
+        return "핵심 논리가 아직 정리되지 않았습니다."
 
     @staticmethod
     def _should_render_execution_receipt(decision: Dict[str, Any], receipt: Any) -> bool:
@@ -346,14 +380,16 @@ class ReportGenerator:
         mode_label = "SWING (스윙)" if mode == TradingMode.SWING else "POSITION (포션)"
         final_logic = self._summary_from_decision(decision)
 
+        # HOLD / VETO 시에는 원래 결정의 진입가가 남아있어도 표시하지 않음
+        is_actionable = direction in ("LONG", "SHORT")
         summary_lines = [
             f"{header_icon} <b>[ {mode_label} ] AI 분석 리포트 | {report['symbol']}</b>",
             f"🕒 <code>{report['timestamp'][:16].replace('T', ' ')} UTC</code>\n",
             f"🎯 <b>최종 결정: {color_theme}</b> (확신도: {confidence}%)",
             "<blockquote>",
-            f"🔵 진입: <code>{self._fmt_price(decision.get('entry_price'))}</code>",
-            f"🛑 손절: <code>{self._fmt_price(decision.get('stop_loss'))}</code>",
-            f"🏁 목표: <code>{self._fmt_price(decision.get('take_profit'))}</code>",
+            f"🔵 진입: <code>{self._fmt_price(decision.get('entry_price')) if is_actionable else '---'}</code>",
+            f"🛑 손절: <code>{self._fmt_price(decision.get('stop_loss')) if is_actionable else '---'}</code>",
+            f"🏁 목표: <code>{self._fmt_price(decision.get('take_profit')) if is_actionable else '---'}</code>",
             "</blockquote>\n",
             "📝 <b>Summary:</b>",
             f"<i>{final_logic}</i>\n",

@@ -702,6 +702,16 @@ Rules:
         if normalized["decision"] not in {"LONG", "SHORT", "HOLD", "CANCEL_AND_CLOSE"}:
             normalized["decision"] = "HOLD"
 
+        # Reconcile confidence vs win_probability_pct.
+        # LLM may output only one of the two; use whichever is non-zero so the
+        # display code doesn't silently fall through to the template default of 0.
+        conf = normalized.get("confidence") or 0
+        win_prob = normalized.get("win_probability_pct") or 0
+        if not conf and win_prob:
+            normalized["confidence"] = win_prob
+        elif not win_prob and conf:
+            normalized["win_probability_pct"] = conf
+
         normalized["monitoring_playbook"] = monitoring
         normalized["scenario_plan"] = merged_scenario_plan
         normalized["daily_dual_plan"] = {

@@ -2461,6 +2461,14 @@ class Orchestrator:
                 latency_ms=(time.perf_counter() - started) * 1000.0,
                 final_decision=result if isinstance(result, dict) else {},
             )
+            # Spot mirror hook: SpotMode.SWING이 활성화된 경우 LONG 결정을 현물에 미러링
+            if execute_trades:
+                try:
+                    from executors.spot_orchestrator import SPOT_MODE_ENABLED, SPOT_MODE, SpotMode, spot_orchestrator as _so
+                    if SPOT_MODE_ENABLED and SPOT_MODE == SpotMode.SWING:
+                        _so.maybe_mirror_swing_long(symbol, result if isinstance(result, dict) else {})
+                except Exception as _spot_err:
+                    logger.warning(f"Spot mirror hook error for {symbol}: {_spot_err}")
             return result
         finally:
             lock.release()

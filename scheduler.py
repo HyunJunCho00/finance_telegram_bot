@@ -1506,6 +1506,15 @@ def job_hourly_monitor():
     except Exception as e:
         logger.error(f"Hourly monitor job error: {e}")
 
+    # SpotMode.POSITION: 현물 포지션 thesis invalidation 체크
+    try:
+        from executors.spot_orchestrator import SPOT_MODE_ENABLED, SPOT_MODE, SpotMode as _SpotMode, spot_orchestrator as _so
+        if SPOT_MODE_ENABLED and SPOT_MODE == _SpotMode.POSITION:
+            for sym in settings.trading_symbols:
+                _so.check_position_invalidation(sym)
+    except Exception as e:
+        logger.error(f"Spot invalidation check error: {e}")
+
 
 def main():
     mode = settings.trading_mode
@@ -1772,7 +1781,33 @@ def main():
         max_instances=1
     )
 
+    # Spot Position daily analysis (SpotMode.POSITION only)
+    try:
+        from executors.spot_orchestrator import (
+            SPOT_MODE_ENABLED as _SPOT_ENABLED,
+            SPOT_MODE as _SPOT_MODE,
+            SPOT_POSITION_ANALYSIS_HOUR_UTC as _SPOT_HOUR,
+            SpotMode as _SpotMode,
+        )
+        if _SPOT_ENABLED and _SPOT_MODE == _SpotMode.POSITION:
+            def job_spot_position_daily():
+                """SpotMode.POSITION: 매일 구조적 thesis 재평가."""
+                try:
+                    from executors.spot_orchestrator import spot_orchestrator
+                    for sym in settings.trading_symbols:
+                        spot_orchestrator.run_position_analysis(sym)
+                except Exception as e:
+                    logger.error(f"Spot position daily analysis error: {e}")
 
+            scheduler_config.scheduler.add_job(
+                job_spot_position_daily,
+                CronTrigger(hour=_SPOT_HOUR, minute=30),
+                id='job_spot_position_daily',
+                max_instances=1,
+            )
+            logger.info(f"Spot position daily job registered at {_SPOT_HOUR:02d}:30 UTC")
+    except Exception as _spot_sched_err:
+        logger.warning(f"Spot scheduler setup skipped: {_spot_sched_err}")
 
     scheduler_config.scheduler.start()
     logger.info("Scheduler started.")
