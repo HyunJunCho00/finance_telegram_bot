@@ -24,8 +24,10 @@ venv/bin/pip install -r requirements.txt --quiet
 
 echo "[3/3] Restart services..."
 systemctl restart scheduler.service
+systemctl restart execution.service
 systemctl restart mcp_server.service
 
 echo ""
 echo "=== Update Complete ==="
-systemctl status scheduler.service --no-pager | tail -5
+systemctl status scheduler.service --no-pager | tail -3
+systemctl status execution.service --no-pager | tail -3

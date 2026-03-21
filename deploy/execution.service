@@ -1,0 +1,23 @@
+[Unit]
+Description=Crypto Trading — Execution Process (Lean)
+After=network.target scheduler.service
+# 분석 프로세스(scheduler.service)가 먼저 뜬 뒤 실행
+Wants=scheduler.service
+
+[Service]
+Type=simple
+User=crypto_trader
+WorkingDirectory=/opt/app
+Environment="PYTHONUNBUFFERED=1"
+Environment="USE_SECRET_MANAGER=true"
+Environment="PROJECT_ID=mcpknu"
+Environment="VERTEX_REGION=global"
+Environment="ENABLE_GCS_ARCHIVE=true"
+ExecStart=/opt/app/venv/bin/python execution_main.py
+Restart=always
+RestartSec=5
+# OOM 보호: 실행 프로세스는 절대 먼저 죽지 않도록 OOM score 낮춤
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

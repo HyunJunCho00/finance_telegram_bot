@@ -110,13 +110,14 @@ chown -R crypto_trader:crypto_trader "$APP_DIR"
 sed -i \
   -e "s|Environment=\"PROJECT_ID=.*\"|Environment=\"PROJECT_ID=PLACEHOLDER_PROJECT_ID\"|g" \
   -e "s|Environment=\"VERTEX_REGION=.*\"|Environment=\"VERTEX_REGION=PLACEHOLDER_VERTEX_REGION\"|g" \
-  deploy/scheduler.service deploy/mcp_server.service
+  deploy/scheduler.service deploy/execution.service deploy/mcp_server.service
 
 cp deploy/scheduler.service /etc/systemd/system/
+cp deploy/execution.service /etc/systemd/system/
 cp deploy/mcp_server.service /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable scheduler.service mcp_server.service
-systemctl start scheduler.service mcp_server.service
+systemctl enable scheduler.service execution.service mcp_server.service
+systemctl start scheduler.service execution.service mcp_server.service
 
 echo "=== Startup complete: $(date) ==="'
 

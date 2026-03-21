@@ -36,6 +36,12 @@ from datetime import datetime, timezone, timedelta
 _daily_precision_prepare_lock = threading.Lock()
 _daily_precision_prepare_bucket = ""
 
+# ── 프로세스 분리 모드 플래그 ────────────────────────────────────────────────
+# True  → execution_main.py를 별도 프로세스로 실행 중
+#          scheduler.py는 execution job(1min_execution, 8h_funding)을 등록하지 않음
+# False → 기존 단일 프로세스 방식 (기본값, 변경 불필요)
+EXECUTION_PROCESS_SEPARATE: bool = False
+
 
 def _daily_precision_schedule_hours_utc() -> list[int]:
     raw = str(getattr(settings, "DAILY_PRECISION_HOURS_UTC", "") or "").strip()
@@ -1599,13 +1605,15 @@ def main():
     )
     
     # 1-minute execution tick: ExecutionDesk and Paper Engine Liquidations
-    scheduler_config.scheduler.add_job(
-        job_1min_execution,
-        'interval',
-        minutes=1,
-        id='job_1min_execution',
-        max_instances=1
-    )
+    # execution_main.py 분리 실행 시 EXECUTION_PROCESS_SEPARATE=True 로 설정하면 skip
+    if not EXECUTION_PROCESS_SEPARATE:
+        scheduler_config.scheduler.add_job(
+            job_1min_execution,
+            'interval',
+            minutes=1,
+            id='job_1min_execution',
+            max_instances=1
+        )
 
     scheduler_config.scheduler.add_job(
         job_liquidation_cascade_monitor,
@@ -1633,7 +1641,7 @@ def main():
     )
 
     # Funding Fee Simulation - every 8 hours (00:00, 08:00, 16:00 UTC)
-    if settings.PAPER_TRADING_MODE:
+    if settings.PAPER_TRADING_MODE and not EXECUTION_PROCESS_SEPARATE:
         scheduler_config.scheduler.add_job(
             job_8hour_funding_fee,
             CronTrigger(hour='0,8,16', minute=0),
