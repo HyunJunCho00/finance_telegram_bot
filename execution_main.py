@@ -68,23 +68,70 @@ try:
         "funding_fee_applied_total",
         "펀딩피 적용 횟수",
     )
+    POSITION_UNREALIZED_PNL = Gauge(
+        "position_unrealized_pnl_usd",
+        "포지션 미실현 PnL (USD)",
+        ["symbol", "side", "exchange"],
+    )
+    POSITION_NOTIONAL = Gauge(
+        "position_notional_usd",
+        "포지션 노셔널 사이즈 (USD)",
+        ["symbol", "exchange"],
+    )
+    POSITION_SIDE = Gauge(
+        "position_side",
+        "포지션 방향 (1=LONG, -1=SHORT, 0=없음)",
+        ["symbol"],
+    )
     _PROM_AVAILABLE = True
 except ImportError:
     logger.warning("prometheus_client not installed — metrics disabled. pip install prometheus-client")
     _PROM_AVAILABLE = False
 
 
-def _update_position_gauge() -> None:
+def _update_position_gauge(prices: dict[str, float] | None = None) -> None:
     if not _PROM_AVAILABLE:
         return
     try:
         positions = paper_engine.get_open_positions()
+
+        # open_positions_total (exchange별)
         counts: dict[str, int] = {}
+        # position_side 초기화 (포지션 없는 심볼 0으로)
+        seen_symbols: set[str] = set()
+
         for p in positions:
             ex = str(p.get("exchange", "unknown")).lower()
             counts[ex] = counts.get(ex, 0) + 1
+
+            symbol = str(p.get("symbol", ""))
+            side = str(p.get("side", ""))
+            entry = float(p.get("entry_price", 0) or 0)
+            size = float(p.get("size", 0) or 0)
+
+            # position_side
+            side_val = 1 if side == "LONG" else (-1 if side == "SHORT" else 0)
+            POSITION_SIDE.labels(symbol=symbol).set(side_val)
+            seen_symbols.add(symbol)
+
+            # position_notional_usd (entry 기준)
+            notional = size * entry
+            POSITION_NOTIONAL.labels(symbol=symbol, exchange=ex).set(notional)
+
+            # position_unrealized_pnl_usd (현재가 있을 때만)
+            if prices and symbol in prices:
+                price = prices[symbol]
+                pnl = (price - entry) * size if side == "LONG" else (entry - price) * size
+                POSITION_UNREALIZED_PNL.labels(symbol=symbol, side=side, exchange=ex).set(pnl)
+
         for ex, cnt in counts.items():
             OPEN_POSITIONS.labels(exchange=ex).set(cnt)
+
+        # 포지션 없는 심볼은 side=0
+        for symbol in settings.trading_symbols:
+            if symbol not in seen_symbols:
+                POSITION_SIDE.labels(symbol=symbol).set(0)
+
     except Exception:
         pass
 
@@ -116,7 +163,7 @@ def job_1min_execution() -> None:
             paper_engine.check_liquidations(prices)
             paper_engine.check_tp_sl(prices)
 
-        _update_position_gauge()
+        _update_position_gauge(prices if settings.PAPER_TRADING_MODE else None)
     except Exception as e:
         logger.error(f"[execution_main] 1min execution error: {e}")
         if _PROM_AVAILABLE:
