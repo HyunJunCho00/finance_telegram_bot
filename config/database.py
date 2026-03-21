@@ -41,6 +41,67 @@ class _TableRouter:
         return self._db._client(table_name).table(table_name)
 
 
+class _CircuitBreaker:
+    """Per-client circuit breaker for Supabase quota/rate-limit errors.
+
+    States:
+      CLOSED  — normal operation, all calls pass through
+      OPEN    — too many consecutive quota failures; calls are blocked for
+                `cooldown_seconds` to stop the retry storm
+      HALF_OPEN — cooldown elapsed; next call is a probe to test recovery
+
+    Quota errors (429 / "quota exceeded" / "over_request_rate_limit") are
+    tracked separately from transient connection errors.  Connection errors
+    still trigger reconnection; quota errors open the circuit so the caller
+    backs off immediately rather than hammering a rate-limited endpoint.
+    """
+
+    QUOTA_KEYWORDS = (
+        "429", "quota", "over_request_rate_limit", "rate limit", "too many requests",
+        "rate_limit", "exceeded",
+    )
+
+    def __init__(self, failure_threshold: int = 3, cooldown_seconds: int = 60):
+        self._failure_threshold = failure_threshold
+        self._cooldown_seconds = cooldown_seconds
+        self._consecutive_failures = 0
+        self._opened_at: Optional[datetime] = None
+        self._state = "CLOSED"  # CLOSED | OPEN | HALF_OPEN
+
+    @staticmethod
+    def _is_quota_error(err_msg: str) -> bool:
+        return any(k in err_msg for k in _CircuitBreaker.QUOTA_KEYWORDS)
+
+    def record_success(self) -> None:
+        self._consecutive_failures = 0
+        self._state = "CLOSED"
+
+    def record_failure(self, err_msg: str) -> None:
+        if not self._is_quota_error(err_msg):
+            return  # Only quota errors open the circuit
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._failure_threshold:
+            if self._state != "OPEN":
+                logger.warning(
+                    f"[CircuitBreaker] OPEN after {self._consecutive_failures} quota errors — "
+                    f"blocking DB writes for {self._cooldown_seconds}s"
+                )
+            self._state = "OPEN"
+            self._opened_at = datetime.now(timezone.utc)
+
+    def is_open(self) -> bool:
+        if self._state == "CLOSED":
+            return False
+        if self._state == "OPEN":
+            elapsed = (datetime.now(timezone.utc) - self._opened_at).total_seconds()
+            if elapsed >= self._cooldown_seconds:
+                self._state = "HALF_OPEN"
+                logger.info("[CircuitBreaker] HALF_OPEN — probing Supabase recovery")
+                return False  # Allow one probe call through
+            return True
+        return False  # HALF_OPEN: let probe through
+
+
 class DatabaseClient:
     # ── QUANT Project 담당 테이블 (수치 데이터) ───────────────────────────
     QUANT_TABLES = {
@@ -75,19 +136,67 @@ class DatabaseClient:
         # db.client.table("xxx") 호출을 테이블명 기준으로 자동 라우팅
         self.client = _TableRouter(self)
 
+        # Per-project circuit breakers — stop retry storms on quota exhaustion
+        self._cb_quant = _CircuitBreaker(failure_threshold=3, cooldown_seconds=60)
+        self._cb_text = _CircuitBreaker(failure_threshold=3, cooldown_seconds=60)
+
+    def _circuit_breaker_for(self, table: str) -> _CircuitBreaker:
+        return self._cb_text if table in self.TEXT_TABLES else self._cb_quant
+
+    def get_circuit_breaker_status(self) -> dict:
+        """Return current circuit breaker state for both projects — useful for health checks."""
+        return {
+            "quant": {
+                "state": self._cb_quant._state,
+                "consecutive_failures": self._cb_quant._consecutive_failures,
+                "opened_at": self._cb_quant._opened_at.isoformat() if self._cb_quant._opened_at else None,
+            },
+            "text": {
+                "state": self._cb_text._state,
+                "consecutive_failures": self._cb_text._consecutive_failures,
+                "opened_at": self._cb_text._opened_at.isoformat() if self._cb_text._opened_at else None,
+            },
+        }
+
     def _client(self, table: str) -> Client:
         """테이블명으로 적절한 Supabase 클라이언트 반환."""
         return self.client_text if table in self.TEXT_TABLES else self.client_quant
 
     def reconnect_on_error(func):
-        """Transient error 시 두 클라이언트 모두 재연결 후 1회 재시도."""
+        """Transient connection error → reconnect + 1 retry.
+        Quota/rate-limit error → record in circuit breaker; open circuit blocks
+        further calls for 60 s to prevent retry storms.
+        """
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
+            # Infer which circuit breaker to consult from the first kwarg/arg
+            # that looks like a table name, or fall back to quant.
+            _cb: _CircuitBreaker = self._cb_quant
+            for arg in list(args) + list(kwargs.values()):
+                if isinstance(arg, str) and arg in self.TEXT_TABLES:
+                    _cb = self._cb_text
+                    break
+                if isinstance(arg, str) and arg in self.QUANT_TABLES:
+                    _cb = self._cb_quant
+                    break
+
+            if _cb.is_open():
+                logger.warning(f"[CircuitBreaker] OPEN — skipping {func.__name__} to avoid quota storm")
+                return None
+
             try:
-                return func(self, *args, **kwargs)
+                result = func(self, *args, **kwargs)
+                _cb.record_success()
+                return result
             except Exception as e:
                 err_msg = str(e).lower()
                 err_type = type(e).__name__.lower()
+
+                # Quota/rate-limit errors: open the circuit, do NOT reconnect
+                if _CircuitBreaker._is_quota_error(err_msg):
+                    _cb.record_failure(err_msg)
+                    logger.warning(f"[CircuitBreaker] Quota error in {func.__name__}: {err_msg[:120]}")
+                    raise
 
                 transient_keywords = [
                     "disconnected", "closed", "connection", "eof", "protocol",
@@ -98,7 +207,7 @@ class DatabaseClient:
                 ]
 
                 if any(x in err_msg for x in transient_keywords) or "protocol" in err_type or "connection" in err_type:
-                    logger.warning(f"Database error ({e.__class__.__name__}: {err_msg}) during {func.__name__}, reconnecting...")
+                    logger.warning(f"Database transient error in {func.__name__} ({e.__class__.__name__}), reconnecting...")
                     try:
                         import time
                         time.sleep(1.5)
@@ -111,9 +220,11 @@ class DatabaseClient:
                         text_url = getattr(settings, "SUPABASE_URL_TEXT", "") or settings.SUPABASE_URL
                         text_key = getattr(settings, "SUPABASE_KEY_TEXT", "") or settings.SUPABASE_KEY
                         self.client_text = create_client(text_url, text_key, options=options)
-                        self.client = _TableRouter(self)  # 라우터 재생성 (quant 덮어쓰기 버그 수정)
+                        self.client = _TableRouter(self)
 
-                        return func(self, *args, **kwargs)
+                        result = func(self, *args, **kwargs)
+                        _cb.record_success()
+                        return result
                     except Exception as retry_e:
                         logger.error(f"Database reconnection/retry failed: {retry_e}")
                         raise
