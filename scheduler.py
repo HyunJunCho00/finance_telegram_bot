@@ -59,7 +59,7 @@ _daily_precision_prepare_bucket = ""
 # True  → execution_main.py를 별도 프로세스로 실행 중
 #          scheduler.py는 execution job(1min_execution, 8h_funding)을 등록하지 않음
 # False → 기존 단일 프로세스 방식 (기본값, 변경 불필요)
-EXECUTION_PROCESS_SEPARATE: bool = False
+EXECUTION_PROCESS_SEPARATE: bool = True
 
 
 def _daily_precision_schedule_hours_utc() -> list[int]:
