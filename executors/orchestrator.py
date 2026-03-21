@@ -23,6 +23,31 @@ Cost optimization:
 
 from typing import Dict, Optional, TypedDict, Annotated
 import threading
+import time as _time
+
+# ── Prometheus 메트릭 ──────────────────────────────────────────────────────────
+try:
+    from prometheus_client import Counter, Histogram
+    JUDGE_DECISIONS = Counter(
+        "judge_decisions_total",
+        "Judge Agent 판단 결과",
+        ["symbol", "mode", "action"],
+    )
+    ORCHESTRATOR_DURATION = Histogram(
+        "orchestrator_run_duration_seconds",
+        "Orchestrator 전체 실행 시간",
+        ["symbol", "mode"],
+        buckets=[30, 60, 120, 300, 600, 900, 1800],
+    )
+    ORCHESTRATOR_RUNS = Counter(
+        "orchestrator_runs_total",
+        "Orchestrator 실행 결과",
+        ["symbol", "mode", "result"],  # result: success / error
+    )
+    _ORCH_PROM = True
+except Exception:
+    _ORCH_PROM = False
+
 from config.database import db
 from config.settings import settings, TradingMode
 from processors.math_engine import math_engine
@@ -1649,6 +1674,11 @@ def node_judge_agent(state: AnalysisState) -> dict:
     if isinstance(decision, dict):
         decision["daily_dual_plan"] = dual_plan if isinstance(dual_plan, dict) else {}
         decision["confidence"] = win_prob_pct
+
+    if _ORCH_PROM:
+        action = str(decision.get("decision", "HOLD")).upper() if isinstance(decision, dict) else "HOLD"
+        JUDGE_DECISIONS.labels(symbol=symbol, mode=mode.value, action=action).inc()
+
     return {
         "final_decision": decision,
         "daily_dual_plan": dual_plan if isinstance(dual_plan, dict) else {},

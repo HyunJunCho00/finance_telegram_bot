@@ -19,6 +19,27 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional
 
+# ── Prometheus 메트릭 ──────────────────────────────────────────────────────────
+try:
+    from prometheus_client import Counter
+    TG_MESSAGES_PROCESSED = Counter(
+        "tg_messages_processed_total",
+        "Telegram 배치 처리된 메시지 수",
+        ["category"],
+    )
+    TG_LIGHTRAG_INGESTED = Counter(
+        "tg_lightrag_ingested_total",
+        "LightRAG에 ingest된 Telegram 청크 수",
+        ["category"],
+    )
+    TG_NO_SIGNAL = Counter(
+        "tg_no_signal_total",
+        "BREAKING_FILTER: BTC/ETH 신호 없음으로 스킵된 횟수",
+    )
+    _TG_PROM = True
+except Exception:
+    _TG_PROM = False
+
 from config.settings import settings
 from config.database import db
 from agents.ai_router import ai_client
@@ -167,6 +188,10 @@ If relevant content exists, output a single dense paragraph starting with "NEWS 
             f"TelegramBatcher: {total} messages grouped - "
             + " | ".join(f"{cat}:{len(v)}" for cat, v in grouped.items())
         )
+        if _TG_PROM:
+            for cat, msgs in grouped.items():
+                if msgs:
+                    TG_MESSAGES_PROCESSED.labels(category=cat).inc(len(msgs))
 
         # Process each category in chunks
         CHUNK_SIZE = 150
@@ -206,11 +231,15 @@ If relevant content exists, output a single dense paragraph starting with "NEWS 
                             f"[BREAKING_FILTER] Chunk {chunk_idx + 1}: "
                             "No BTC/ETH signal found - skipping LightRAG ingest"
                         )
+                        if _TG_PROM:
+                            TG_NO_SIGNAL.inc()
                         continue
 
                     logger.info(
                         f"Ingesting [{cat}] chunk {chunk_idx + 1}/{len(chunks)} to LightRAG."
                     )
+                    if _TG_PROM:
+                        TG_LIGHTRAG_INGESTED.labels(category=cat).inc()
                     light_rag.ingest_message(
                         text=summary,
                         channel=f"BATCHED_{cat}",

@@ -38,12 +38,12 @@ metrics:
               labels:
                 service: execution
 
-        # scheduler.py Prometheus metrics (포트 9090, 나중에 추가 시)
-        # - job_name: scheduler
-        #   static_configs:
-        #     - targets: ["localhost:9090"]
-        #       labels:
-        #         service: scheduler
+        # scheduler.py Prometheus metrics
+        - job_name: scheduler
+          static_configs:
+            - targets: ["localhost:9090"]
+              labels:
+                service: scheduler
 
       remote_write:
         - url: PLACEHOLDER_METRICS_URL

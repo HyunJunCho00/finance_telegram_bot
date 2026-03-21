@@ -4,142 +4,76 @@
   "timezone": "browser",
   "refresh": "30s",
   "panels": [
-    {
-      "id": 1,
-      "title": "Bot 상태",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 0, "y": 0},
-      "targets": [{"expr": "up{job=\"execution\"}", "legendFormat": "execution"}],
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}}]
-        }
-      }
-    },
-    {
-      "id": 2,
-      "title": "BTC 포지션",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 4, "y": 0},
-      "targets": [{"expr": "position_side{symbol=\"BTCUSDT\"}", "legendFormat": "BTC"}],
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [{"type": "value", "options": {"1": {"text": "LONG", "color": "green"}, "-1": {"text": "SHORT", "color": "red"}, "0": {"text": "FLAT", "color": "gray"}}}]
-        }
-      }
-    },
-    {
-      "id": 3,
-      "title": "ETH 포지션",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 8, "y": 0},
-      "targets": [{"expr": "position_side{symbol=\"ETHUSDT\"}", "legendFormat": "ETH"}],
-      "fieldConfig": {
-        "defaults": {
-          "mappings": [{"type": "value", "options": {"1": {"text": "LONG", "color": "green"}, "-1": {"text": "SHORT", "color": "red"}, "0": {"text": "FLAT", "color": "gray"}}}]
-        }
-      }
-    },
-    {
-      "id": 4,
-      "title": "BTC 미실현 PnL",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 12, "y": 0},
-      "targets": [{"expr": "position_unrealized_pnl_usd{symbol=\"BTCUSDT\"}", "legendFormat": "BTC PnL"}],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "thresholds": {"steps": [{"color": "red", "value": -9999999}, {"color": "green", "value": 0}]}
-        }
-      }
-    },
-    {
-      "id": 5,
-      "title": "ETH 미실현 PnL",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 16, "y": 0},
-      "targets": [{"expr": "position_unrealized_pnl_usd{symbol=\"ETHUSDT\"}", "legendFormat": "ETH PnL"}],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD",
-          "thresholds": {"steps": [{"color": "red", "value": -9999999}, {"color": "green", "value": 0}]}
-        }
-      }
-    },
-    {
-      "id": 6,
-      "title": "Outbox 실패",
-      "type": "stat",
-      "gridPos": {"h": 4, "w": 4, "x": 20, "y": 0},
-      "targets": [{"expr": "outbox_published_total{status=\"failed\"}", "legendFormat": "failed"}],
-      "fieldConfig": {
-        "defaults": {
-          "thresholds": {"steps": [{"color": "green", "value": 0}, {"color": "red", "value": 1}]}
-        }
-      }
-    },
-    {
-      "id": 7,
-      "title": "미실현 PnL 추이",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
-      "targets": [
-        {"expr": "position_unrealized_pnl_usd{symbol=\"BTCUSDT\"}", "legendFormat": "BTC"},
-        {"expr": "position_unrealized_pnl_usd{symbol=\"ETHUSDT\"}", "legendFormat": "ETH"}
-      ],
-      "fieldConfig": {"defaults": {"unit": "currencyUSD"}}
-    },
-    {
-      "id": 8,
-      "title": "포지션 노셔널 (USD)",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
-      "targets": [
-        {"expr": "position_notional_usd{symbol=\"BTCUSDT\"}", "legendFormat": "BTC"},
-        {"expr": "position_notional_usd{symbol=\"ETHUSDT\"}", "legendFormat": "ETH"}
-      ],
-      "fieldConfig": {"defaults": {"unit": "currencyUSD"}}
-    },
-    {
-      "id": 9,
-      "title": "Tick 처리 시간 (p50/p95/p99)",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
-      "targets": [
-        {"expr": "histogram_quantile(0.50, rate(execution_tick_duration_seconds_bucket[5m]))", "legendFormat": "p50"},
-        {"expr": "histogram_quantile(0.95, rate(execution_tick_duration_seconds_bucket[5m]))", "legendFormat": "p95"},
-        {"expr": "histogram_quantile(0.99, rate(execution_tick_duration_seconds_bucket[5m]))", "legendFormat": "p99"}
-      ],
-      "fieldConfig": {"defaults": {"unit": "s"}}
-    },
-    {
-      "id": 10,
-      "title": "주문 처리 (건/분)",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
-      "targets": [
-        {"expr": "rate(order_results_total{result=\"success\"}[5m]) * 60", "legendFormat": "성공"},
-        {"expr": "rate(order_results_total{result=\"skip\"}[5m]) * 60", "legendFormat": "스킵"},
-        {"expr": "rate(order_results_total{result=\"error\"}[5m]) * 60", "legendFormat": "에러"}
-      ]
-    },
-    {
-      "id": 11,
-      "title": "메모리 사용량",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
-      "targets": [{"expr": "process_resident_memory_bytes{job=\"execution\"}", "legendFormat": "RSS"}],
-      "fieldConfig": {"defaults": {"unit": "bytes"}}
-    },
-    {
-      "id": 12,
-      "title": "CPU 사용률",
-      "type": "timeseries",
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
-      "targets": [{"expr": "rate(process_cpu_seconds_total{job=\"execution\"}[1m])", "legendFormat": "CPU"}],
-      "fieldConfig": {"defaults": {"unit": "percentunit"}}
-    }
+    {"id":1,"title":"Bot 상태 (execution)","type":"stat","gridPos":{"h":4,"w":3,"x":0,"y":0},
+      "targets":[{"expr":"up{job=\"execution\"}","legendFormat":"execution"}],
+      "fieldConfig":{"defaults":{"mappings":[{"type":"value","options":{"0":{"text":"DOWN","color":"red"},"1":{"text":"UP","color":"green"}}}]}}},
+    {"id":2,"title":"Bot 상태 (scheduler)","type":"stat","gridPos":{"h":4,"w":3,"x":3,"y":0},
+      "targets":[{"expr":"up{job=\"scheduler\"}","legendFormat":"scheduler"}],
+      "fieldConfig":{"defaults":{"mappings":[{"type":"value","options":{"0":{"text":"DOWN","color":"red"},"1":{"text":"UP","color":"green"}}}]}}},
+    {"id":3,"title":"BTC 포지션","type":"stat","gridPos":{"h":4,"w":3,"x":6,"y":0},
+      "targets":[{"expr":"position_side{symbol=\"BTCUSDT\"}"}],
+      "fieldConfig":{"defaults":{"mappings":[{"type":"value","options":{"1":{"text":"LONG","color":"green"},"-1":{"text":"SHORT","color":"red"},"0":{"text":"FLAT","color":"gray"}}}]}}},
+    {"id":4,"title":"ETH 포지션","type":"stat","gridPos":{"h":4,"w":3,"x":9,"y":0},
+      "targets":[{"expr":"position_side{symbol=\"ETHUSDT\"}"}],
+      "fieldConfig":{"defaults":{"mappings":[{"type":"value","options":{"1":{"text":"LONG","color":"green"},"-1":{"text":"SHORT","color":"red"},"0":{"text":"FLAT","color":"gray"}}}]}}},
+    {"id":5,"title":"BTC 미실현 PnL","type":"stat","gridPos":{"h":4,"w":3,"x":12,"y":0},
+      "targets":[{"expr":"position_unrealized_pnl_usd{symbol=\"BTCUSDT\"}"}],
+      "fieldConfig":{"defaults":{"unit":"currencyUSD","thresholds":{"steps":[{"color":"red","value":-9999999},{"color":"green","value":0}]}}}},
+    {"id":6,"title":"ETH 미실현 PnL","type":"stat","gridPos":{"h":4,"w":3,"x":15,"y":0},
+      "targets":[{"expr":"position_unrealized_pnl_usd{symbol=\"ETHUSDT\"}"}],
+      "fieldConfig":{"defaults":{"unit":"currencyUSD","thresholds":{"steps":[{"color":"red","value":-9999999},{"color":"green","value":0}]}}}},
+    {"id":7,"title":"Outbox 실패","type":"stat","gridPos":{"h":4,"w":3,"x":18,"y":0},
+      "targets":[{"expr":"outbox_published_total{status=\"failed\"}"}],
+      "fieldConfig":{"defaults":{"thresholds":{"steps":[{"color":"green","value":0},{"color":"red","value":1}]}}}},
+    {"id":8,"title":"Job 에러","type":"stat","gridPos":{"h":4,"w":3,"x":21,"y":0},
+      "targets":[{"expr":"sum(scheduler_job_results_total{result=\"error\"})","legendFormat":"에러 누적"}],
+      "fieldConfig":{"defaults":{"thresholds":{"steps":[{"color":"green","value":0},{"color":"red","value":1}]}}}},
+
+    {"id":10,"title":"Judge 판단 분포 (누적)","type":"piechart","gridPos":{"h":8,"w":8,"x":0,"y":4},
+      "targets":[
+        {"expr":"sum by (action) (judge_decisions_total)","legendFormat":"{{action}}"}
+      ]},
+    {"id":11,"title":"Judge 판단 추이 (건/시간)","type":"timeseries","gridPos":{"h":8,"w":16,"x":8,"y":4},
+      "targets":[
+        {"expr":"rate(judge_decisions_total{action=\"LONG\"}[1h]) * 3600","legendFormat":"LONG"},
+        {"expr":"rate(judge_decisions_total{action=\"SHORT\"}[1h]) * 3600","legendFormat":"SHORT"},
+        {"expr":"rate(judge_decisions_total{action=\"HOLD\"}[1h]) * 3600","legendFormat":"HOLD"}
+      ]},
+
+    {"id":12,"title":"Orchestrator 실행 시간","type":"timeseries","gridPos":{"h":8,"w":12,"x":0,"y":12},
+      "targets":[
+        {"expr":"histogram_quantile(0.50, rate(orchestrator_run_duration_seconds_bucket[1h]))","legendFormat":"p50"},
+        {"expr":"histogram_quantile(0.95, rate(orchestrator_run_duration_seconds_bucket[1h]))","legendFormat":"p95"}
+      ],"fieldConfig":{"defaults":{"unit":"s"}}},
+    {"id":13,"title":"Orchestrator 성공/실패","type":"timeseries","gridPos":{"h":8,"w":12,"x":12,"y":12},
+      "targets":[
+        {"expr":"rate(scheduler_job_results_total{job=\"daily_precision\",result=\"success\"}[1h]) * 3600","legendFormat":"daily precision 성공"},
+        {"expr":"rate(scheduler_job_results_total{job=\"daily_precision\",result=\"error\"}[1h]) * 3600","legendFormat":"daily precision 에러"},
+        {"expr":"rate(scheduler_job_results_total{job=\"hourly_monitor\",result=\"success\"}[1h]) * 3600","legendFormat":"hourly monitor 성공"},
+        {"expr":"rate(scheduler_job_results_total{job=\"hourly_monitor\",result=\"error\"}[1h]) * 3600","legendFormat":"hourly monitor 에러"}
+      ]},
+
+    {"id":14,"title":"Telegram → LightRAG ingest (건/시간)","type":"timeseries","gridPos":{"h":8,"w":12,"x":0,"y":20},
+      "targets":[
+        {"expr":"rate(tg_lightrag_ingested_total[1h]) * 3600","legendFormat":"{{category}}"},
+        {"expr":"rate(tg_no_signal_total[1h]) * 3600","legendFormat":"NO_SIGNAL (스킵)"}
+      ]},
+    {"id":15,"title":"Job 처리 시간 (p95)","type":"timeseries","gridPos":{"h":8,"w":12,"x":12,"y":20},
+      "targets":[
+        {"expr":"histogram_quantile(0.95, rate(scheduler_job_duration_seconds_bucket[1h]))","legendFormat":"{{job}}"}
+      ],"fieldConfig":{"defaults":{"unit":"s"}}},
+
+    {"id":16,"title":"미실현 PnL 추이","type":"timeseries","gridPos":{"h":8,"w":12,"x":0,"y":28},
+      "targets":[
+        {"expr":"position_unrealized_pnl_usd{symbol=\"BTCUSDT\"}","legendFormat":"BTC"},
+        {"expr":"position_unrealized_pnl_usd{symbol=\"ETHUSDT\"}","legendFormat":"ETH"}
+      ],"fieldConfig":{"defaults":{"unit":"currencyUSD"}}},
+    {"id":17,"title":"메모리 / CPU","type":"timeseries","gridPos":{"h":8,"w":12,"x":12,"y":28},
+      "targets":[
+        {"expr":"process_resident_memory_bytes{job=\"scheduler\"}","legendFormat":"scheduler RSS"},
+        {"expr":"process_resident_memory_bytes{job=\"execution\"}","legendFormat":"execution RSS"}
+      ],"fieldConfig":{"defaults":{"unit":"bytes"}}}
   ],
-  "schemaVersion": 38,
-  "version": 2
+  "schemaVersion":38,
+  "version":3
 }

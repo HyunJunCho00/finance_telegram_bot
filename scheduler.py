@@ -31,7 +31,26 @@ import threading
 import json
 import base64
 import re
+import time as _time
 from datetime import datetime, timezone, timedelta
+
+# ── Prometheus 메트릭 ──────────────────────────────────────────────────────────
+try:
+    from prometheus_client import Counter, Histogram, start_http_server as _prom_start
+    SCHED_JOB_DURATION = Histogram(
+        "scheduler_job_duration_seconds",
+        "스케줄러 Job 실행 시간",
+        ["job"],
+        buckets=[1, 5, 10, 30, 60, 120, 300, 600, 1800],
+    )
+    SCHED_JOB_RESULTS = Counter(
+        "scheduler_job_results_total",
+        "스케줄러 Job 실행 결과",
+        ["job", "result"],  # result: success / error
+    )
+    _SCHED_PROM = True
+except Exception:
+    _SCHED_PROM = False
 
 _daily_precision_prepare_lock = threading.Lock()
 _daily_precision_prepare_bucket = ""
@@ -1327,6 +1346,7 @@ def job_1hour_evaluation():
 
 def job_1hour_telegram():
     """Batch stored Telegram messages into LightRAG every 1 hour (Real-time listener handles collection)."""
+    _t0 = _time.perf_counter()
     try:
         if _should_defer_heavy_job("1-hour Telegram job"):
             return
@@ -1342,8 +1362,15 @@ def job_1hour_telegram():
             light_rag.run_triangulation_worker(limit=3)
         else:
             logger.info("Triangulation worker skipped (AI analysis disabled)")
+        if _SCHED_PROM:
+            SCHED_JOB_RESULTS.labels(job="telegram_batch", result="success").inc()
     except Exception as e:
         logger.error(f"1-hour Telegram job error: {e}")
+        if _SCHED_PROM:
+            SCHED_JOB_RESULTS.labels(job="telegram_batch", result="error").inc()
+    finally:
+        if _SCHED_PROM:
+            SCHED_JOB_DURATION.labels(job="telegram_batch").observe(_time.perf_counter() - _t0)
 
 def job_1hour_crypto_news():
     """Fetch Free Crypto News API and ingest to LightRAG every 1 hour."""
@@ -1455,6 +1482,7 @@ def job_daily_precision():
     """Daily UTC serial: BTC POSITION -> ETH POSITION.
     Runs high-quality analysis once per symbol and persists dual-lane playbooks.
     """
+    _t0 = _time.perf_counter()
     try:
         from config.local_state import state_manager
         if not state_manager.is_analysis_enabled():
@@ -1462,8 +1490,15 @@ def job_daily_precision():
             return
         job_daily_precision_prepare_shared()
         orchestrator.run_daily_playbook()
+        if _SCHED_PROM:
+            SCHED_JOB_RESULTS.labels(job="daily_precision", result="success").inc()
     except Exception as e:
         logger.error(f"Daily precision job error: {e}")
+        if _SCHED_PROM:
+            SCHED_JOB_RESULTS.labels(job="daily_precision", result="error").inc()
+    finally:
+        if _SCHED_PROM:
+            SCHED_JOB_DURATION.labels(job="daily_precision").observe(_time.perf_counter() - _t0)
 
 
 def job_daily_precision_symbol(symbol: str):
@@ -1503,14 +1538,22 @@ def job_hourly_monitor():
     Outputs NO_ACTION / WATCH / TRIGGER.
     TRIGGER  - run analysis + allow order execution (capped at 2/day/symbol).
     """
+    _t0 = _time.perf_counter()
     try:
         from config.local_state import state_manager
         if not state_manager.is_analysis_enabled():
             logger.info("Hourly monitor skipped (analysis disabled)")
             return
         orchestrator.run_hourly_monitor()
+        if _SCHED_PROM:
+            SCHED_JOB_RESULTS.labels(job="hourly_monitor", result="success").inc()
     except Exception as e:
         logger.error(f"Hourly monitor job error: {e}")
+        if _SCHED_PROM:
+            SCHED_JOB_RESULTS.labels(job="hourly_monitor", result="error").inc()
+    finally:
+        if _SCHED_PROM:
+            SCHED_JOB_DURATION.labels(job="hourly_monitor").observe(_time.perf_counter() - _t0)
 
     # SpotMode.POSITION: 현물 포지션 thesis invalidation 체크
     try:
@@ -1524,6 +1567,13 @@ def job_hourly_monitor():
 
 def main():
     mode = settings.trading_mode
+
+    if _SCHED_PROM:
+        try:
+            _prom_start(9090)
+            logger.info("Prometheus metrics server started on :9090")
+        except Exception as e:
+            logger.warning(f"Prometheus server failed to start: {e}")
 
     logger.info(f"Starting Trading System (mode={mode.value})")
     logger.info(
