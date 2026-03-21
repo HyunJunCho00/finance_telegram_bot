@@ -1,0 +1,52 @@
+
+# Grafana Agent config — Prometheus remote_write to Grafana Cloud
+# ---------------------------------------------------------------
+# 1. Grafana Cloud에서 발급:
+#    - GRAFANA_CLOUD_METRICS_URL  (e.g. https://prometheus-prod-XX.grafana.net/api/prom/push)
+#    - GRAFANA_CLOUD_USER         (숫자 ID)
+#    - GRAFANA_CLOUD_API_KEY      (API key, Editor 이상 권한)
+#
+# 2. VM에 설치:
+#    bash -c "$(curl -fsSL https://raw.githubusercontent.com/grafana/agent/main/packaging/grafana-agent/grafana_agent_install.sh)"
+#    또는:
+#    wget https://github.com/grafana/alloy/releases/latest/download/alloy-linux-amd64.zip
+#
+# 3. 이 파일을 /etc/grafana-agent.yaml 로 복사 후 환경변수 치환:
+#    sudo cp deploy/grafana_agent.yml /etc/grafana-agent.yaml
+#    sudo sed -i \
+#      -e "s|PLACEHOLDER_METRICS_URL|$GRAFANA_CLOUD_METRICS_URL|g" \
+#      -e "s|PLACEHOLDER_USER|$GRAFANA_CLOUD_USER|g" \
+#      -e "s|PLACEHOLDER_API_KEY|$GRAFANA_CLOUD_API_KEY|g" \
+#      /etc/grafana-agent.yaml
+#    sudo systemctl restart grafana-agent
+# ---------------------------------------------------------------
+
+metrics:
+  global:
+    scrape_interval: 15s
+    external_labels:
+      instance: crypto-trading-vm
+      env: production
+
+  configs:
+    - name: crypto_trading
+      scrape_configs:
+        # execution_main.py Prometheus metrics
+        - job_name: execution
+          static_configs:
+            - targets: ["localhost:9091"]
+              labels:
+                service: execution
+
+        # scheduler.py Prometheus metrics (포트 9090, 나중에 추가 시)
+        # - job_name: scheduler
+        #   static_configs:
+        #     - targets: ["localhost:9090"]
+        #       labels:
+        #         service: scheduler
+
+      remote_write:
+        - url: PLACEHOLDER_METRICS_URL
+          basic_auth:
+            username: PLACEHOLDER_USER
+            password: PLACEHOLDER_API_KEY

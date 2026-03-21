@@ -6,7 +6,7 @@ Wants=scheduler.service
 
 [Service]
 Type=simple
-User=crypto_trader
+User=qkdtoddl1
 WorkingDirectory=/opt/app
 Environment="PYTHONUNBUFFERED=1"
 Environment="USE_SECRET_MANAGER=true"
