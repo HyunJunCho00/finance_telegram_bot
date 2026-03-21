@@ -86,13 +86,12 @@ class PerformanceEvaluator:
             df = db.get_market_data_since(symbol, since=start_time, limit=2000)
             if df is None or df.empty:
                 return []
-            filtered = df[df["timestamp"] <= end_time].copy()
+            filtered = df[df["timestamp"] <= end_time].dropna(subset=["close"]).copy()
             if filtered.empty:
                 return []
             return [
-                {"timestamp": row["timestamp"].to_pydatetime(), "close": float(row["close"])}
-                for _, row in filtered.iterrows()
-                if row.get("close") is not None
+                {"timestamp": ts.to_pydatetime(), "close": float(c)}
+                for ts, c in zip(filtered["timestamp"], filtered["close"])
             ]
         except Exception as e:
             logger.error(f"Error fetching close series: {e}")

@@ -490,8 +490,17 @@ def node_context_gathering(state: AnalysisState) -> dict:
 
         # 8-12. Other DB Contexts
         try:
-            fb = db.get_feedback_history(limit=5)
-            if fb: db_updates["feedback_text"] = "\n\n[PAST MISTAKES]\n" + "\n".join([f"- {f.get('mistake_summary', 'N/A')[:150]}" for f in fb[:3]])
+            fb = db.get_feedback_history(limit=6)
+            if fb:
+                negatives = [f for f in fb if f.get("feedback_type") != "positive"][:3]
+                positives = [f for f in fb if f.get("feedback_type") == "positive"][:2]
+                parts = []
+                if negatives:
+                    parts.append("[PAST MISTAKES]\n" + "\n".join([f"- {f.get('lesson_learned', f.get('mistake_summary', ''))[:150]}" for f in negatives]))
+                if positives:
+                    parts.append("[PATTERNS THAT WORKED]\n" + "\n".join([f"- {f.get('lesson_learned', '')[:150]}" for f in positives]))
+                if parts:
+                    db_updates["feedback_text"] = "\n\n" + "\n\n".join(parts)
         except Exception: pass
         try:
             snap = db.get_latest_microstructure(symbol)

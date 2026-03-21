@@ -48,24 +48,54 @@ def rolling_percentile_rank(series: pd.Series, window: int = 240, min_periods: i
 
 
 def rolling_slope_and_r2(series: pd.Series, window: int = 5) -> tuple[pd.Series, pd.Series]:
-    y = _safe_numeric(series).to_numpy(dtype=float)
-    slopes = np.zeros_like(y, dtype=float)
-    r2s = np.zeros_like(y, dtype=float)
-    x = np.arange(window, dtype=float)
+    """Compute rolling OLS slope and R² without a Python-level loop.
 
-    for idx in range(window - 1, len(y)):
-        segment = y[idx - window + 1 : idx + 1]
-        if np.isnan(segment).any():
-            continue
-        x_centered = x - x.mean()
-        y_centered = segment - segment.mean()
-        denom = float(np.dot(x_centered, x_centered))
-        if denom <= 0:
-            continue
-        slope = float(np.dot(x_centered, y_centered) / denom)
-        corr = float(np.corrcoef(x, segment)[0, 1]) if np.std(segment) > 0 else 0.0
-        slopes[idx] = slope
-        r2s[idx] = corr * corr if np.isfinite(corr) else 0.0
+    Uses numpy stride tricks to build a (n-window+1, window) view of all
+    windows simultaneously, then computes all slopes and R² values in one
+    batch of vectorised matrix operations.  This is O(n·window) total work
+    but entirely in C-level numpy, avoiding per-row Python overhead.
+    """
+    y = _safe_numeric(series).to_numpy(dtype=float)
+    n = len(y)
+    slopes = np.zeros(n, dtype=float)
+    r2s = np.zeros(n, dtype=float)
+
+    if n < window:
+        return pd.Series(slopes, index=series.index), pd.Series(r2s, index=series.index)
+
+    # x is constant across all windows — precompute once
+    x = np.arange(window, dtype=float)
+    x_c = x - x.mean()           # centred x
+    x_ss = float(np.dot(x_c, x_c))  # Σ(x - x̄)²  (denominator for slope & corr)
+
+    # Build a read-only sliding-window view: shape (n-window+1, window)
+    shape = (n - window + 1, window)
+    strides = (y.strides[0], y.strides[0])
+    windows_2d = np.lib.stride_tricks.as_strided(y, shape=shape, strides=strides)
+
+    has_nan = np.isnan(windows_2d).any(axis=1)          # (n-window+1,) bool mask
+    y_means = windows_2d.mean(axis=1, keepdims=True)    # row means
+    y_c = windows_2d - y_means                          # centred y windows
+
+    # slope = Σ(x_c · y_c[i]) / x_ss  — one dot product per window, batched
+    cov_xy = y_c.dot(x_c)  # (n-window+1,)
+    if x_ss > 0:
+        slope_vals = cov_xy / x_ss
+    else:
+        slope_vals = np.zeros(len(cov_xy), dtype=float)
+
+    # r² = (cov_xy)² / (x_ss · y_ss)
+    y_ss = (y_c ** 2).sum(axis=1)  # Σ(y - ȳ)²  per window
+    with np.errstate(divide="ignore", invalid="ignore"):
+        corr_vals = cov_xy / np.sqrt(x_ss * y_ss)
+    corr_vals = np.where(np.isfinite(corr_vals), corr_vals, 0.0)
+    r2_vals = corr_vals ** 2
+
+    # Only write to output positions that had no NaN
+    valid = ~has_nan
+    out_idx = np.where(valid)[0] + (window - 1)
+    slopes[out_idx] = slope_vals[valid]
+    r2s[out_idx] = r2_vals[valid]
 
     return pd.Series(slopes, index=series.index), pd.Series(r2s, index=series.index)
 
@@ -145,6 +175,7 @@ def compute_feature_panel(
     df["spread_z"] = robust_zscore(spread, window=lookback_window)
     df["slippage_100k_z"] = robust_zscore(slippage, window=lookback_window)
     df["cvd_delta_3m_z"] = robust_zscore(cvd_delta.rolling(3, min_periods=1).sum(), window=lookback_window)
+    df["rv_5m_raw"] = rv_5m_raw
     df["rv_5m_z"] = robust_zscore(rv_5m_raw, window=lookback_window)
 
     df["vulnerability_score"] = (

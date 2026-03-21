@@ -46,6 +46,20 @@ def _binary_report(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.
     accuracy = (tp + tn) / max(len(y_true), 1)
     false_alarm_rate = fp / max(fp + tn, 1)
     brier = float(np.mean((y_prob - y_true) ** 2)) if len(y_true) else 0.0
+
+    # Average Precision summarises the precision-recall curve — more informative
+    # than accuracy or AUC-ROC when positive events are rare (<5% base rate).
+    avg_precision = 0.0
+    if len(y_true) > 0 and y_true.sum() > 0:
+        sorted_idx = np.argsort(-y_prob)
+        y_true_sorted = y_true[sorted_idx]
+        cum_tp = np.cumsum(y_true_sorted)
+        n_predicted = np.arange(1, len(y_true_sorted) + 1, dtype=float)
+        precisions = cum_tp / n_predicted
+        recalls = cum_tp / max(float(y_true.sum()), 1)
+        recall_diff = np.diff(recalls, prepend=0.0)
+        avg_precision = float(np.sum(precisions * recall_diff))
+
     return {
         "samples": int(len(y_true)),
         "base_rate": float(np.mean(y_true)) if len(y_true) else 0.0,
@@ -55,6 +69,7 @@ def _binary_report(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.
         "recall": float(recall),
         "false_alarm_rate": float(false_alarm_rate),
         "brier_score": brier,
+        "avg_precision": avg_precision,
     }
 
 
@@ -76,6 +91,12 @@ def train_gradient_boosting(
     x_train = _as_float32(train_df, feature_columns)
     y_train = train_df[label_column].astype(int).to_numpy()
 
+    # Liquidation cascades are rare events — compute scale_pos_weight from
+    # training data so the model doesn't collapse to always predicting negative.
+    n_neg = int((y_train == 0).sum())
+    n_pos = int((y_train == 1).sum())
+    auto_scale_pos_weight = n_neg / max(n_pos, 1)
+
     if backend == "lightgbm":
         train_set = backend_lib.Dataset(x_train, label=y_train, feature_name=feature_columns, free_raw_data=False)
         valid_sets = [train_set]
@@ -90,13 +111,14 @@ def train_gradient_boosting(
             callbacks.append(backend_lib.early_stopping(stopping_rounds=50, verbose=False))
         default_params = {
             "objective": "binary",
-            "metric": ["binary_logloss"],
+            "metric": ["binary_logloss", "average_precision"],
             "learning_rate": 0.05,
             "num_leaves": 31,
             "feature_fraction": 0.9,
             "bagging_fraction": 0.9,
             "bagging_freq": 1,
             "min_data_in_leaf": 40,
+            "scale_pos_weight": auto_scale_pos_weight,
             "verbosity": -1,
             "seed": 42,
         }
@@ -122,11 +144,12 @@ def train_gradient_boosting(
             evals.append((dvalid, "valid"))
         default_params = {
             "objective": "binary:logistic",
-            "eval_metric": "logloss",
+            "eval_metric": ["logloss", "aucpr"],
             "eta": 0.05,
             "max_depth": 5,
             "subsample": 0.9,
             "colsample_bytree": 0.9,
+            "scale_pos_weight": auto_scale_pos_weight,
             "seed": 42,
         }
         default_params.update(params)

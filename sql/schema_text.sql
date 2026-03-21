@@ -65,11 +65,15 @@ CREATE TABLE IF NOT EXISTS feedback_logs (
     predicted_direction VARCHAR(10),
     actual_direction VARCHAR(10),
     actual_change_pct DECIMAL(10, 4),
+    feedback_type VARCHAR(10) DEFAULT 'negative', -- 'positive' | 'negative'
     mistake_summary TEXT,
     lesson_learned TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 CREATE INDEX idx_feedback_logs_created_at ON feedback_logs(created_at DESC);
+CREATE INDEX idx_feedback_logs_type ON feedback_logs(feedback_type, created_at DESC);
+-- Migration for existing deployments:
+-- ALTER TABLE feedback_logs ADD COLUMN IF NOT EXISTS feedback_type VARCHAR(10) DEFAULT 'negative';
 
 CREATE TABLE IF NOT EXISTS trade_executions (
     id BIGSERIAL PRIMARY KEY,

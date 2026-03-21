@@ -572,12 +572,11 @@ class DatabaseClient:
     def insert_feedback(self, data: Dict) -> Dict:
         return self.client_text.table("feedback_logs").insert(data).execute()
 
-    def get_feedback_history(self, limit: int = 10) -> List[Dict]:
-        response = self.client_text.table("feedback_logs")\
-                        .select("*")\
-            .order("created_at", desc=True)\
-            .limit(limit)\
-            .execute()
+    def get_feedback_history(self, limit: int = 10, feedback_type: Optional[str] = None) -> List[Dict]:
+        query = self.client_text.table("feedback_logs").select("*")
+        if feedback_type in ("positive", "negative"):
+            query = query.eq("feedback_type", feedback_type)
+        response = query.order("created_at", desc=True).limit(limit).execute()
         return response.data if response.data else []
 
 # --------------------- Trade Executions ---------------------

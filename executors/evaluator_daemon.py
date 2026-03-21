@@ -93,13 +93,9 @@ class EvaluatorDaemon:
 
                 mistake_summary = ""
                 try:
-                    if "FAILURE" in outcome:
-                        post_mortem_result = write_post_mortem(report, current_price)
-                        if post_mortem_result and isinstance(post_mortem_result, dict):
-                            mistake_summary = post_mortem_result.get("mistake_summary", "")
-                    else:
-                        # Even if success, write post mortem if configured, else just skip
-                        pass
+                    post_mortem_result = write_post_mortem(report, current_price)
+                    if post_mortem_result and isinstance(post_mortem_result, dict):
+                        mistake_summary = post_mortem_result.get("mistake_summary", "")
                 except Exception as e:
                     logger.error(f"Failed to generate post-mortem: {e}")
 
