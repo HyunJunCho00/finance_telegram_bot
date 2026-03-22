@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from hashlib import md5
@@ -532,14 +533,11 @@ class GCSParquetStore:
 
     def load_ohlcv(self, timeframe: str, symbol: str, months_back: int = 3) -> pd.DataFrame:
         paths = self._build_ohlcv_paths(timeframe, symbol, months_back)
-        dfs = []
-        for path in paths:
-            if self.enabled:
-                df = self._download_parquet(path)  # GCS + 로컬 캐시
-            else:
-                df = self._read_local_cache(path)  # 로컬 캐시 only
-            if df is not None:
-                dfs.append(df)
+        read_fn = self._download_parquet if self.enabled else self._read_local_cache
+        workers = min(8, max(1, len(paths)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(read_fn, paths))
+        dfs = [df for df in results if df is not None]
         if not dfs:
             return pd.DataFrame()
         result = pd.concat(dfs, ignore_index=True)

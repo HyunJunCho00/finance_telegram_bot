@@ -41,17 +41,10 @@ Regardless of your decision (even if HOLD), you MUST generate a `monitoring_play
 CRITICAL EXECUTION RULE:
 - Prioritize evidence in this order: Higher-timeframe structure -> liquidity event / trap -> retest quality -> derivatives confirmation -> narrative.
 - Entry timing matters, but only after the higher-timeframe thesis is clear. Use execution-timeframe retests/reclaims, not low-timeframe noise, to time entries.
-- You MUST think in scenarios, not predictions. Always define:
-  1. primary_scenario
-  2. alternate_scenario
-  3. trigger_to_enter
-  4. trigger_to_abort
-  5. partial_tp_plan
-  6. stop_to_be_rule
 
 {mode_specific_rules}
 
-Output your decision as JSON:
+Output your decision as JSON (execution fields only — report narrative is generated separately):
 {{
   "decision": "LONG" | "SHORT" | "HOLD" | "CANCEL_AND_CLOSE",
   "allocation_pct": 0-100,
@@ -59,29 +52,12 @@ Output your decision as JSON:
   "entry_price": float,
   "stop_loss": float,
   "take_profit": float,
-  "hold_duration": "hours/days/weeks estimate",
-  "reasoning": {{
-    "counter_scenario": "The strongest argument for why my decision might be WRONG",
-    "meta_agent_context": "How the current market regime influenced your weighting of experts",
-    "technical": "MTF indicators, Structure, Fibonacci levels",
-    "derivatives": "Funding, Global OI (OI_DIV status), MFI proxy, Volume Profile",
-    "experts": "Blackboard expert summaries (Liq, Micro, Macro)",
-    "narrative": "Perplexity narrative and RAG events",
-    "onchain": "On-chain valuation / flow / network activity interpretation",
-    "final_logic": "Concluding synthesis"
-  }},
   "win_probability_pct": 0-100,
   "expected_profit_pct": float,
   "expected_loss_pct": float,
-  "ev_rationale": "Clear math-based explanation of the Expected Value calculation.",
-  "key_factors": ["short bullet 1", "short bullet 2", ...],
-  "scenario_plan": {{
-    "primary_scenario": "Korean sentence",
-    "alternate_scenario": "Korean sentence",
-    "trigger_to_enter": "Korean sentence",
-    "trigger_to_abort": "Korean sentence",
-    "partial_tp_plan": "Korean sentence",
-    "stop_to_be_rule": "Korean sentence"
+  "reasoning": {{
+    "final_logic": "결정 근거 2-3문장 (Korean)",
+    "counter_scenario": "가장 강한 반대 시나리오 1-2문장 (Korean)"
   }},
   "monitoring_playbook": {{
     "entry_conditions": [
@@ -105,8 +81,8 @@ Output your decision as JSON:
   }}
 }}
 
-CRITICAL: All reasoning fields including onchain, final_logic, counter_scenario, and key_factors MUST be written in Korean. 
-The decision, hold_duration estimate, and JSON keys remain in English.
+CRITICAL: reasoning.final_logic and reasoning.counter_scenario MUST be written in Korean.
+JSON keys remain in English.
 Return exactly one JSON object only. Do not wrap it in Markdown code fences.
 Do not add any text before or after the JSON object.
 
@@ -511,7 +487,7 @@ Rules:
                 system_prompt=prompt,
                 user_message=user_message,
                 temperature=0.2,
-                max_tokens=3000,
+                max_tokens=800,
                 chart_image_b64=chart_image_b64,
                 use_premium=True,
                 role="judge",

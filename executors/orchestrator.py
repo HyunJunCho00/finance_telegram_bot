@@ -2085,6 +2085,87 @@ def node_generate_report(state: AnalysisState) -> dict:
     return {"report": report}
 
 
+def node_report_writer(state: AnalysisState) -> dict:
+    """Generate human-readable report narrative using a fast model.
+
+    Runs AFTER execute_trade so the critical execution path (Judge→Risk→Execute)
+    is never blocked by report generation latency.
+    Produces: scenario_plan, key_factors, ev_rationale, reasoning sub-fields.
+    """
+    from agents.ai_router import ai_client as _ai
+
+    decision = state.get("final_decision") or {}
+    if not isinstance(decision, dict) or decision.get("decision") not in ("LONG", "SHORT", "HOLD", "CANCEL_AND_CLOSE"):
+        return {}
+
+    symbol = state.get("symbol", "BTCUSDT")
+    mode = state.get("mode", "swing").upper()
+    blackboard = state.get("blackboard") or {}
+    narrative = (state.get("unified_narrative") or "")[:600]
+    funding = (state.get("funding_context") or "")[:300]
+    onchain = (state.get("onchain_context") or "")[:300]
+    compact = (state.get("market_data_compact") or "")[:800]
+
+    expert_lines = []
+    for k, v in blackboard.items():
+        if isinstance(v, dict):
+            d = str(v.get("decision", "")).upper()
+            r = str(v.get("reasoning") or v.get("summary") or "")[:120]
+            if d or r:
+                expert_lines.append(f"[{k}] {d}: {r}")
+    experts_text = "\n".join(expert_lines[:6])
+
+    user_msg = (
+        f"Symbol: {symbol} | Mode: {mode}\n"
+        f"Decision: {decision.get('decision')} | Alloc: {decision.get('allocation_pct')}% | Lev: {decision.get('leverage')}x\n"
+        f"Entry: {decision.get('entry_price')} | SL: {decision.get('stop_loss')} | TP: {decision.get('take_profit')}\n"
+        f"WinProb: {decision.get('win_probability_pct')}% | EP: {decision.get('expected_profit_pct')}% | EL: {decision.get('expected_loss_pct')}%\n"
+        f"Final Logic: {(decision.get('reasoning') or {}).get('final_logic', '')}\n\n"
+        f"Market:\n{compact}\n\nExperts:\n{experts_text}\n\nNarrative:\n{narrative}\n\nFunding:\n{funding}\n\nOnchain:\n{onchain}\n\n"
+        "Output JSON with these fields (Korean values):\n"
+        '{"scenario_plan":{"primary_scenario":"...","alternate_scenario":"...","trigger_to_enter":"...","trigger_to_abort":"...","partial_tp_plan":"...","stop_to_be_rule":"..."},'
+        '"key_factors":["...","...","..."],'
+        '"ev_rationale":"...",'
+        '"reasoning_detail":{"technical":"...","derivatives":"...","narrative":"...","onchain":"...","experts":"..."}}'
+    )
+
+    try:
+        resp = _ai.generate_response(
+            system_prompt="You are a trading report writer. Given a trade decision and market context, generate the narrative report sections in Korean. Output JSON only.",
+            user_message=user_msg,
+            role="rag_extraction",
+            temperature=0.2,
+            max_tokens=1000,
+        )
+        if not resp:
+            return {}
+        import json as _json
+        raw = resp.strip()
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        report_fields = _json.loads(raw)
+
+        updated = dict(decision)
+        if "scenario_plan" in report_fields:
+            updated["scenario_plan"] = report_fields["scenario_plan"]
+        if "key_factors" in report_fields:
+            updated["key_factors"] = report_fields["key_factors"]
+        if "ev_rationale" in report_fields:
+            updated["ev_rationale"] = report_fields["ev_rationale"]
+        if "reasoning_detail" in report_fields:
+            reasoning = dict(updated.get("reasoning") or {})
+            reasoning.update(report_fields["reasoning_detail"])
+            updated["reasoning"] = reasoning
+
+        return {"final_decision": updated}
+
+    except Exception as e:
+        logger.warning(f"[report_writer] Failed (non-blocking): {e}")
+        return {}
+
+
 def node_data_synthesis(state: AnalysisState) -> dict:
     """Run Data-Synthesis pipeline to extract high-quality training examples."""
     report = state.get("report")
@@ -2286,7 +2367,8 @@ def build_analysis_graph():
     graph.add_edge("judge_agent", "risk_manager")
     graph.add_edge("risk_manager", "portfolio_leverage_guard")
     graph.add_edge("portfolio_leverage_guard", "execute_trade")
-    graph.add_edge("execute_trade", "generate_report")
+    graph.add_edge("execute_trade", "report_writer")
+    graph.add_edge("report_writer", "generate_report")
     graph.add_edge("generate_report", "data_synthesis")
     graph.add_edge("data_synthesis", END)
 

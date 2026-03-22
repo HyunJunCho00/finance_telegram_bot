@@ -892,8 +892,8 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         return False
 
     def _build_fallback_summary(self, indicators: dict) -> str:
-        """LLM fallback summary so hourly status never becomes empty."""
-        lines = ["<b>시장 상태 요약 (Fallback)</b>"]
+        """Deterministic market status summary — facts only, no LLM interpretation."""
+        lines = ["<b>시장 상태 요약</b>"]
 
         def _esc(v) -> str:
             return str(v or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -905,7 +905,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             symbol_rows.append((key, value))
 
         if not symbol_rows:
-            return "<b>시장 상태 요약 (Fallback)</b>\n- 수집된 지표가 없어 요약할 수 없습니다."
+            return "<b>시장 상태 요약</b>\n- 수집된 지표가 없어 요약할 수 없습니다."
 
         def _mode_views(row: dict):
             tech = row.get("technical_snapshot", {}) if isinstance(row.get("technical_snapshot"), dict) else {}
