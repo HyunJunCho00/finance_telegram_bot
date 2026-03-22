@@ -140,8 +140,11 @@ Confluence factors counted: HTF structure (1d/1w), active setup direction,
 - Market narrative from Perplexity provides the "WHY" behind moves
 - Position sizing: 10-25% of Kelly criterion (conservative)
 - Leverage: 1-3x maximum for swing trades
-- Stop Loss & Take Profit: Allow wider stops (e.g., 5-10%) to survive crypto volatility.
-  POLICY HARD FLOOR: You MUST maintain a MINIMUM 2.0:1 Reward/Risk ratio (POLICY_MIN_RR=2.0).
+- Stop Loss & Take Profit: Use `atr_anchor` in the brief as your baseline.
+  `atr_anchor.suggested_sl_pct` = 1.5×ATR14(4h) from entry — this is the minimum viable stop distance.
+  `atr_anchor.suggested_tp_pct` = 3.3×ATR14(4h) from entry — this achieves RR≈2.2.
+  You MAY adjust SL/TP to structural levels (support, resistance, Fibonacci), but:
+  POLICY HARD FLOOR: Final RR = (TP distance / SL distance) MUST be ≥ 2.0.
   If achieving 2.0:1 R/R is impossible without an unrealistically tight stop, choose HOLD.
   Manage absolute risk by reducing allocation_pct and leverage, NOT by tightening the stop.
 - Hold period: days to weeks"""
@@ -397,8 +400,9 @@ Rules:
         open_positions: str,
         episodic_memory: str,
         feedback_text: str,
+        atr_anchor: Optional[Dict] = None,
     ) -> Dict[str, Any]:
-        return {
+        brief: Dict[str, Any] = {
             "symbol": symbol,
             "mode": mode.value.upper(),
             "structure_snapshot": self._summarize_lines(market_data_compact, max_lines=18, max_chars=1800),
@@ -415,6 +419,9 @@ Rules:
             "episodic_memory": self._summarize_lines(episodic_memory, max_lines=5, max_chars=420),
             "feedback_constraints": self._summarize_lines(feedback_text, max_lines=4, max_chars=260),
         }
+        if atr_anchor:
+            brief["atr_anchor"] = atr_anchor
+        return brief
 
     def get_previous_decision(self, symbol: str = "BTCUSDT") -> Optional[Dict]:
         """[FIX CRITICAL-6] symbol parameter added  was NameError (symbol not in scope)."""
@@ -444,6 +451,7 @@ Rules:
         regime_context: Optional[Dict] = None,
         narrative_context: str = "",
         onchain_context: str = "",
+        atr_anchor: Optional[Dict] = None,
     ) -> Dict:
         active_orders = active_orders or []  # Guard against mutable default
         mode_str = mode.value.upper()
@@ -478,6 +486,7 @@ Rules:
             open_positions=open_positions,
             episodic_memory=episodic_memory,
             feedback_text=feedback_text,
+            atr_anchor=atr_anchor or {},
         )
 
         user_message = (

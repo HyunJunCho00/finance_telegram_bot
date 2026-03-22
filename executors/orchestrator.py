@@ -290,6 +290,7 @@ class AnalysisState(TypedDict):
     onchain_snapshot: dict
     onchain_context: str
     onchain_gate: dict
+    atr_anchor: dict  # ATR-based TP/SL distance hints for judge
 
     # Blackboard Pattern State
     budget: int
@@ -425,11 +426,36 @@ def node_collect_data(state: AnalysisState) -> dict:
         except Exception as e:
             logger.error(f"Failed to fetch paper positions: {e}")
 
+    # Extract 4h ATR14 and build TP/SL anchor for judge
+    try:
+        tf_4h_data = market_data.get("timeframes", {}).get("4h", {})
+        atr_14 = float(tf_4h_data.get("indicators", {}).get("atr") or 0)
+        current_price = float(market_data.get("current_price", 0))
+        if atr_14 > 0 and current_price > 0:
+            sl_pct = round(atr_14 / current_price * 150, 2)   # 1.5 × ATR14 as % of price
+            tp_pct = round(sl_pct * 2.2, 2)                    # RR = 2.2
+            atr_anchor = {
+                "atr_14_4h": round(atr_14, 2),
+                "suggested_sl_pct": sl_pct,
+                "suggested_tp_pct": tp_pct,
+                "min_rr": 2.0,
+                "note": (
+                    f"Baseline: SL={sl_pct:.2f}% from entry (1.5×ATR14), "
+                    f"TP={tp_pct:.2f}% from entry (3.3×ATR14) → RR≈2.2. "
+                    "Adjust to structural levels, but RR must stay ≥2.0."
+                ),
+            }
+        else:
+            atr_anchor = {}
+    except Exception:
+        atr_anchor = {}
+
     return {
         "df_size": len(df),
         "market_data_compact": compact,
         "active_orders": active_for_symbol,
         "open_positions": open_position_text,
+        "atr_anchor": atr_anchor,
         "errors": state.get("errors", [])
     }
 def node_context_gathering(state: AnalysisState) -> dict:
@@ -1576,6 +1602,7 @@ def node_judge_agent(state: AnalysisState) -> dict:
         regime_context=regime_ctx,
         narrative_context=narrative_context,
         onchain_context=state.get("onchain_context", ""),
+        atr_anchor=state.get("atr_anchor", {}),
     )
     
     # Deterministic EV/RR gating (no additional LLM call)
