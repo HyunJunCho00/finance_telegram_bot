@@ -72,8 +72,44 @@
       "targets":[
         {"expr":"process_resident_memory_bytes{job=\"scheduler\"}","legendFormat":"scheduler RSS"},
         {"expr":"process_resident_memory_bytes{job=\"execution\"}","legendFormat":"execution RSS"}
-      ],"fieldConfig":{"defaults":{"unit":"bytes"}}}
+      ],"fieldConfig":{"defaults":{"unit":"bytes"}}},
+
+    {"id":20,"title":"Judge 승률 추정 (%)","type":"timeseries","gridPos":{"h":8,"w":8,"x":0,"y":36},
+      "description":"Judge가 마지막 사이클에서 계산한 승률. 50% 이하가 반복되면 prompt 또는 시장 국면 점검.",
+      "targets":[
+        {"expr":"judge_win_probability_pct{symbol=\"BTCUSDT\"}","legendFormat":"BTC"},
+        {"expr":"judge_win_probability_pct{symbol=\"ETHUSDT\"}","legendFormat":"ETH"}
+      ],"fieldConfig":{"defaults":{"unit":"percent","min":0,"max":100,"thresholds":{"steps":[{"color":"red","value":0},{"color":"yellow","value":45},{"color":"green","value":55}]}}}},
+    {"id":21,"title":"Judge EV (기대값)","type":"timeseries","gridPos":{"h":8,"w":8,"x":8,"y":36},
+      "description":"양수=기대수익 > 기대손실. 0 근처 반복 시 리스크/리워드 세팅 검토.",
+      "targets":[
+        {"expr":"judge_ev{symbol=\"BTCUSDT\"}","legendFormat":"BTC EV"},
+        {"expr":"judge_ev{symbol=\"ETHUSDT\"}","legendFormat":"ETH EV"}
+      ],"fieldConfig":{"defaults":{"custom":{"lineWidth":2},"thresholds":{"steps":[{"color":"red","value":-999},{"color":"green","value":0}]}}}},
+    {"id":22,"title":"Judge 배분율 (%)","type":"timeseries","gridPos":{"h":8,"w":8,"x":16,"y":36},
+      "description":"최종 allocation_pct. HOLD=0. 너무 크면 Kelly 과도; 너무 작으면 PolicyEngine 과도 축소.",
+      "targets":[
+        {"expr":"judge_allocation_pct{symbol=\"BTCUSDT\"}","legendFormat":"BTC alloc"},
+        {"expr":"judge_allocation_pct{symbol=\"ETHUSDT\"}","legendFormat":"ETH alloc"}
+      ],"fieldConfig":{"defaults":{"unit":"percent","min":0}}},
+
+    {"id":23,"title":"Paper 슬리피지 분포 (bps)","type":"histogram","gridPos":{"h":8,"w":12,"x":0,"y":44},
+      "description":"Paper trade 체결 슬리피지. 실제 거래 비용 모델 검증용. 1bps = 0.01%.",
+      "targets":[
+        {"expr":"rate(trade_slippage_bps_bucket[1h])","legendFormat":"{{exchange}} {{side}}"}
+      ],"fieldConfig":{"defaults":{"unit":"short"}}},
+    {"id":24,"title":"Outbox 적체 시간 (초)","type":"timeseries","gridPos":{"h":8,"w":12,"x":12,"y":44},
+      "description":"가장 오래된 PENDING 이벤트 경과 시간. 300초 이상이면 dispatcher 지연 또는 반복 실패.",
+      "targets":[
+        {"expr":"outbox_oldest_pending_age_seconds","legendFormat":"oldest pending age"}
+      ],"fieldConfig":{"defaults":{"unit":"s","thresholds":{"steps":[{"color":"green","value":0},{"color":"yellow","value":120},{"color":"red","value":300}]}}}},
+
+    {"id":25,"title":"채널별 메시지 수신량 (건/시간)","type":"timeseries","gridPos":{"h":8,"w":24,"x":0,"y":52},
+      "description":"채널별 메시지 유입 속도. 특정 채널이 조용해지면 신호 편향 발생 가능.",
+      "targets":[
+        {"expr":"rate(tg_channel_messages_total[1h]) * 3600","legendFormat":"{{channel}}"}
+      ]}
   ],
   "schemaVersion":38,
-  "version":3
+  "version":4
 }

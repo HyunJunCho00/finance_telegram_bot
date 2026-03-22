@@ -52,6 +52,7 @@ old_backup
 
 # Local notes (not for version control)
 COMMANDS.md
+ACID_FINANCE_HARDENING.md
 
 # Tests and Temporary Scripts
 test/

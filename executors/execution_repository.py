@@ -343,6 +343,48 @@ class ExecutionRepository:
             )
             return {"success": True, "event_id": event_id, "deduped": deduped}
 
+    def register_live_trade_preflight(self, payload: Dict, idempotency_key: str) -> str:
+        """[P1 - ACID] Pre-register a live trade attempt BEFORE calling the exchange API.
+
+        Inserts directly with status='PROCESSING' + processing_started_at=now so the
+        normal publish_pending() loop does NOT pick it up as a regular PENDING event.
+
+        Lifecycle:
+          - Trade succeeds  → caller calls mark_outbox_event_published(event_id)  → SENT
+          - Trade fails     → caller calls mark_outbox_event_failed(event_id, err)  → PENDING (alerts on next dispatch)
+          - Process crashes → record stays in PROCESSING; after stale_after_seconds
+                              claim_pending_outbox_events re-claims it and handler logs orphan alert
+        """
+        with self.transaction() as conn:
+            existing = conn.execute(
+                "SELECT event_id FROM execution_outbox WHERE idempotency_key = ? LIMIT 1",
+                (idempotency_key,),
+            ).fetchone()
+            if existing:
+                return str(existing["event_id"])
+
+            event_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute(
+                """
+                INSERT INTO execution_outbox
+                (event_id, event_type, idempotency_key, payload_json,
+                 status, attempts, last_error, processing_started_at,
+                 created_at, updated_at, published_at)
+                VALUES (?, 'live_trade_preflight', ?, ?, 'PROCESSING', 1,
+                        NULL, ?, ?, ?, NULL)
+                """,
+                (
+                    event_id,
+                    idempotency_key,
+                    json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str),
+                    now,  # processing_started_at — prevents premature dispatch
+                    now,  # created_at
+                    now,  # updated_at
+                ),
+            )
+            return event_id
+
     def claim_pending_outbox_events(self, limit: int = 50, stale_after_seconds: int = 300) -> List[Dict]:
         with self.transaction() as conn:
             now = datetime.now(timezone.utc)
@@ -412,6 +454,31 @@ class ExecutionRepository:
                 (str(error), now, event_id),
             )
             return {"success": True, "event_id": event_id}
+
+    def get_oldest_pending_outbox_age_seconds(self) -> float:
+        """Return age in seconds of the oldest PENDING outbox event, 0.0 if none."""
+        with _WRITE_LOCK:
+            conn = sqlite3.connect(
+                local_state.DB_PATH,
+                check_same_thread=False,
+                isolation_level=None,
+                timeout=5.0,
+            )
+            conn.row_factory = sqlite3.Row
+            try:
+                row = conn.execute(
+                    "SELECT created_at FROM execution_outbox WHERE status = 'PENDING' "
+                    "ORDER BY created_at ASC LIMIT 1"
+                ).fetchone()
+                if not row:
+                    return 0.0
+                created = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                return max(0.0, (now - created).total_seconds())
+            except Exception:
+                return 0.0
+            finally:
+                conn.close()
 
     def update_intent_status(self, intent_id: str, new_status: str) -> Dict:
         with self.transaction() as conn:

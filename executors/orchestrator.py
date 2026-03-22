@@ -44,6 +44,21 @@ try:
         "Orchestrator 실행 결과",
         ["symbol", "mode", "result"],  # result: success / error
     )
+    JUDGE_WIN_PROB = __import__("prometheus_client").Gauge(
+        "judge_win_probability_pct",
+        "Judge 승률 추정 (%)",
+        ["symbol", "mode"],
+    )
+    JUDGE_EV = __import__("prometheus_client").Gauge(
+        "judge_ev",
+        "Judge 기대값 (EV)",
+        ["symbol", "mode"],
+    )
+    JUDGE_ALLOCATION = __import__("prometheus_client").Gauge(
+        "judge_allocation_pct",
+        "Judge 최종 배분율 (%)",
+        ["symbol", "mode"],
+    )
     _ORCH_PROM = True
 except Exception:
     _ORCH_PROM = False
@@ -1678,6 +1693,10 @@ def node_judge_agent(state: AnalysisState) -> dict:
     if _ORCH_PROM:
         action = str(decision.get("decision", "HOLD")).upper() if isinstance(decision, dict) else "HOLD"
         JUDGE_DECISIONS.labels(symbol=symbol, mode=mode.value, action=action).inc()
+        JUDGE_WIN_PROB.labels(symbol=symbol, mode=mode.value).set(win_prob_pct)
+        JUDGE_EV.labels(symbol=symbol, mode=mode.value).set(ev)
+        alloc = _to_float(decision.get("allocation_pct", 0), 0.0) if isinstance(decision, dict) else 0.0
+        JUDGE_ALLOCATION.labels(symbol=symbol, mode=mode.value).set(alloc)
 
     return {
         "final_decision": decision,

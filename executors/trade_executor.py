@@ -8,6 +8,19 @@ from loguru import logger
 from executors.execution_repository import DuplicateActiveIntentError, execution_repository
 from executors.outbox_dispatcher import outbox_dispatcher
 
+# ── Prometheus 메트릭 ──────────────────────────────────────────────────────────
+try:
+    from prometheus_client import Histogram as _PH
+    TRADE_SLIPPAGE_BPS = _PH(
+        "trade_slippage_bps",
+        "매매 슬리피지 (basis points, paper trade)",
+        ["exchange", "side"],
+        buckets=[0, 1, 2, 5, 10, 20, 50, 100, 200],
+    )
+    _TRADE_PROM = True
+except Exception:
+    _TRADE_PROM = False
+
 
 class TradeExecutor:
     def __init__(self):
@@ -322,6 +335,19 @@ class TradeExecutor:
                 else:
                     result = self._simulate_order(symbol, side, amount, leverage, exchange, style, tp_price, sl_price, tp2_price, tp1_exit_pct)
             else:
+                # [P1 - ACID] Pre-register intent in local SQLite BEFORE calling exchange.
+                # If process crashes after exchange API returns but before DB write completes,
+                # this PROCESSING record remains and surfaces the orphaned trade on next recovery.
+                preflight_id = self._preregister_live_trade(
+                    intent_id=intent_id,
+                    exchange=exchange,
+                    symbol=symbol,
+                    side=side,
+                    amount=amount,
+                    leverage=leverage,
+                    style=style,
+                )
+
                 if exchange == 'binance':
                     result = self._execute_binance(symbol, side, amount, leverage)
                 elif exchange == 'binance_spot':
@@ -335,6 +361,16 @@ class TradeExecutor:
                     result = self._execute_coinbase(symbol, side, amount)
                 else:
                     return {"error": "Invalid exchange"}
+
+                # [P1 - ACID] Resolve preflight: mark SENT on success, re-queue as PENDING on failure.
+                # PENDING failures will be re-claimed by claim_pending_outbox_events and alert handler.
+                if preflight_id:
+                    if result.get("success"):
+                        execution_repository.mark_outbox_event_published(preflight_id)
+                    else:
+                        execution_repository.mark_outbox_event_failed(
+                            preflight_id, result.get("error", "exchange_error")
+                        )
 
             if lineage:
                 result.update({
@@ -403,6 +439,10 @@ class TradeExecutor:
         if not sim_res.get('success'):
             return sim_res
 
+        if _TRADE_PROM:
+            slippage_bps = float(sim_res.get('slippage_applied_pct', 0)) * 100
+            TRADE_SLIPPAGE_BPS.labels(exchange=exchange, side=side.upper()).observe(slippage_bps)
+
         return {
             "success": True,
             "paper": True,
@@ -420,6 +460,57 @@ class TradeExecutor:
             "tp2_price": tp2_price,
         }
 
+    def _preregister_live_trade(
+        self,
+        *,
+        intent_id: Optional[str],
+        exchange: str,
+        symbol: str,
+        side: str,
+        amount: float,
+        leverage: float,
+        style: str,
+    ) -> Optional[str]:
+        """[P1 - ACID] Write a PROCESSING preflight record to local SQLite BEFORE
+        the exchange API call.  Callers MUST resolve via mark_outbox_event_published /
+        mark_outbox_event_failed.  Records that stay in PROCESSING past stale_after_seconds
+        are re-claimed by the dispatcher and trigger an orphaned-trade alert.
+        Returns the event_id, or None if pre-registration failed (non-blocking).
+        """
+        if not intent_id:
+            return None
+        try:
+            event_id = execution_repository.register_live_trade_preflight(
+                payload={
+                    "intent_id": str(intent_id),
+                    "exchange": exchange,
+                    "symbol": symbol,
+                    "side": side,
+                    "amount": amount,
+                    "leverage": leverage,
+                    "style": style,
+                    "preflight_at": datetime.now(timezone.utc).isoformat(),
+                },
+                idempotency_key=f"preflight:{intent_id}:{exchange}",
+            )
+            logger.debug(f"[P1] Preflight registered: {event_id[:8]} | {side} {symbol} on {exchange}")
+            return event_id
+        except Exception as e:
+            logger.warning(f"[P1] Pre-registration failed (non-blocking, trade will proceed): {e}")
+            return None
+
+    def _enqueue_fill_check(self, exchange_name: str, order_id: str, symbol: str) -> None:
+        """[P2 - Fill Reconciliation] Schedule async fill price verification via outbox."""
+        try:
+            execution_repository.enqueue_outbox_event(
+                "live_fill_check",
+                {"exchange": exchange_name, "order_id": order_id, "symbol": symbol},
+                idempotency_key=f"fill_check:{order_id}",
+            )
+            logger.debug(f"[P2] Fill check scheduled for order {order_id} on {exchange_name}")
+        except Exception as e:
+            logger.warning(f"[P2] Fill check enqueue failed (non-blocking): {e}")
+
     def _execute_binance(self, symbol: str, side: str, amount: float, leverage: int) -> Dict:
         try:
             self.binance.set_leverage(leverage, symbol)
@@ -431,6 +522,15 @@ class TradeExecutor:
                 amount=amount
             )
 
+            # [P2] Market orders return average fill price, not limit price.
+            # order['average'] is the VWAP fill; order['price'] may be None for market orders.
+            exchange_order_id = str(order.get('id') or '')
+            filled_price = order.get('average') or order.get('price')
+
+            # [P2] If fill price not yet available (async matching engine), schedule verification.
+            if not filled_price and exchange_order_id:
+                self._enqueue_fill_check("binance", exchange_order_id, symbol)
+
             return {
                 "success": True,
                 "paper": False,
@@ -439,8 +539,9 @@ class TradeExecutor:
                 "side": side,
                 "amount": amount,
                 "leverage": leverage,
-                "order_id": order.get('id'),
-                "filled_price": order.get('price'),
+                "order_id": exchange_order_id,
+                "filled_price": filled_price,
+                "fill_confirmed": bool(filled_price),
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
@@ -457,6 +558,12 @@ class TradeExecutor:
                 amount=amount
             )
 
+            exchange_order_id = str(order.get('id') or '')
+            filled_price = order.get('average') or order.get('price')
+
+            if not filled_price and exchange_order_id:
+                self._enqueue_fill_check("upbit", exchange_order_id, symbol)
+
             return {
                 "success": True,
                 "paper": False,
@@ -464,8 +571,9 @@ class TradeExecutor:
                 "symbol": symbol,
                 "side": side,
                 "amount": amount,
-                "order_id": order.get('id'),
-                "filled_price": order.get('price'),
+                "order_id": exchange_order_id,
+                "filled_price": filled_price,
+                "fill_confirmed": bool(filled_price),
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
@@ -484,6 +592,12 @@ class TradeExecutor:
                 amount=amount
             )
 
+            exchange_order_id = str(order.get('id') or '')
+            filled_price = order.get('average') or order.get('price')
+
+            if not filled_price and exchange_order_id:
+                self._enqueue_fill_check("binance_spot", exchange_order_id, symbol)
+
             return {
                 "success": True,
                 "paper": False,
@@ -491,8 +605,9 @@ class TradeExecutor:
                 "symbol": symbol,
                 "side": side,
                 "amount": amount,
-                "order_id": order.get('id'),
-                "filled_price": order.get('price'),
+                "order_id": exchange_order_id,
+                "filled_price": filled_price,
+                "fill_confirmed": bool(filled_price),
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
@@ -508,6 +623,13 @@ class TradeExecutor:
                 side=side.lower(),
                 amount=amount
             )
+
+            exchange_order_id = str(order.get('id') or '')
+            filled_price = order.get('average') or order.get('price')
+
+            if not filled_price and exchange_order_id:
+                self._enqueue_fill_check("coinbase", exchange_order_id, symbol)
+
             return {
                 "success": True,
                 "paper": False,
@@ -515,8 +637,9 @@ class TradeExecutor:
                 "symbol": symbol,
                 "side": side,
                 "amount": amount,
-                "order_id": order.get('id'),
-                "filled_price": order.get('price'),
+                "order_id": exchange_order_id,
+                "filled_price": filled_price,
+                "fill_confirmed": bool(filled_price),
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
         except Exception as e:

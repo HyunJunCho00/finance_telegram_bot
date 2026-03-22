@@ -1707,10 +1707,10 @@ def main():
         max_instances=1
     )
 
-    # Coin Metrics daily snapshot refresh
+    # Coin Metrics daily snapshot refresh - moved to 03:12 UTC to ensure data is updated
     scheduler_config.scheduler.add_job(
         job_daily_coinmetrics,
-        CronTrigger(hour=0, minute=12),
+        CronTrigger(hour=3, minute=12),
         id='job_daily_coinmetrics',
         max_instances=1
     )

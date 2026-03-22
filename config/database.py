@@ -706,6 +706,17 @@ class DatabaseClient:
             .execute()
         return response.data[0] if response.data else None
 
+    @reconnect_on_error
+    def update_trade_execution_fill_price(self, order_id: str, fill_price: float) -> Optional[Dict]:
+        """[P2 - Fill Reconciliation] Patch confirmed fill price after async exchange fill."""
+        if not order_id or not fill_price:
+            return None
+        response = self.client_text.table("trade_executions")\
+            .update({"filled_price": fill_price})\
+            .eq("order_id", order_id)\
+            .execute()
+        return response.data[0] if response.data else None
+
     def get_position_status(self, symbol: str) -> Optional[Dict]:
         response = self.client_text.table("trade_executions")\
                         .select("*")\
@@ -936,60 +947,57 @@ class DatabaseClient:
 # Data Cleanup (retention 만료 데이터 삭제)
 # =====================================================================
 
-    @reconnect_on_error
     def cleanup_old_data(self) -> Dict:
-        """Delete data older than configured retention days."""
-        results = {}
+        """[P3 - Cleanup Isolation] Delete data older than configured retention days.
 
-        # ── QUANT tables ──────────────────────────────────────────────
-        try:
-            cutoff = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_MARKET_DATA_DAYS)).isoformat()
-            for table in ("market_data", "funding_data", "liquidations"):
-                r = self.client_quant.table(table).delete().lt("timestamp", cutoff).execute()
-                results[f"{table}_deleted"] = len(r.data) if r.data else 0
+        Each table is wrapped in its own try/except so a single table failure does NOT
+        abort the remaining cleanups.  Partial failures are collected and returned so
+        the scheduler can alert without hiding successful deletions.
 
-            cutoff_cvd = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_CVD_DAYS)).isoformat()
-            r = self.client_quant.table("cvd_data").delete().lt("timestamp", cutoff_cvd).execute()
-            results["cvd_data_deleted"] = len(r.data) if r.data else 0
+        NOTE: trade_executions, feedback_logs are intentionally excluded — audit data.
+        """
+        results: Dict = {}
+        errors: List[Dict] = []
+        now = datetime.now(timezone.utc)
 
-            r = self.client_quant.table("microstructure_data").delete().lt("timestamp", cutoff).execute()
-            results["microstructure_deleted"] = len(r.data) if r.data else 0
+        # Helper: run one DELETE and record result or error
+        def _delete(client, table: str, col: str, cutoff: str, key: str) -> None:
+            try:
+                r = client.table(table).delete().lt(col, cutoff).execute()
+                results[key] = len(r.data) if r.data else 0
+            except Exception as e:
+                errors.append({"table": table, "error": str(e)})
+                logger.error(f"[P3] Cleanup failed for {table}: {e}")
 
-            cutoff_long = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_REPORTS_DAYS)).isoformat()
-            r = self.client_quant.table("macro_data").delete().lt("timestamp", cutoff_long).execute()
-            results["macro_deleted"] = len(r.data) if r.data else 0
+        cutoff_market = (now - timedelta(days=settings.RETENTION_MARKET_DATA_DAYS)).isoformat()
+        cutoff_cvd    = (now - timedelta(days=settings.RETENTION_CVD_DAYS)).isoformat()
+        cutoff_long   = (now - timedelta(days=settings.RETENTION_REPORTS_DAYS)).isoformat()
+        cutoff_tg     = (now - timedelta(days=settings.RETENTION_TELEGRAM_DAYS)).isoformat()
+        cutoff_onchain = (now - timedelta(days=settings.RETENTION_REPORTS_DAYS)).date().isoformat()
 
-            r = self.client_quant.table("deribit_data").delete().lt("timestamp", cutoff).execute()
-            results["deribit_deleted"] = len(r.data) if r.data else 0
+        # ── QUANT tables (each isolated) ──────────────────────────────
+        _delete(self.client_quant, "market_data",            "timestamp",    cutoff_market,  "market_data_deleted")
+        _delete(self.client_quant, "funding_data",           "timestamp",    cutoff_market,  "funding_data_deleted")
+        _delete(self.client_quant, "liquidations",           "timestamp",    cutoff_market,  "liquidations_deleted")
+        _delete(self.client_quant, "cvd_data",               "timestamp",    cutoff_cvd,     "cvd_data_deleted")
+        _delete(self.client_quant, "microstructure_data",    "timestamp",    cutoff_market,  "microstructure_deleted")
+        _delete(self.client_quant, "macro_data",             "timestamp",    cutoff_long,    "macro_deleted")
+        _delete(self.client_quant, "deribit_data",           "timestamp",    cutoff_market,  "deribit_deleted")
+        _delete(self.client_quant, "fear_greed_data",        "timestamp",    cutoff_long,    "fear_greed_deleted")
+        _delete(self.client_quant, "onchain_daily_snapshots","as_of_date",   cutoff_onchain, "onchain_deleted")
 
-            r = self.client_quant.table("fear_greed_data").delete().lt("timestamp", cutoff_long).execute()
-            results["fear_greed_deleted"] = len(r.data) if r.data else 0
+        # ── TEXT tables (each isolated) ───────────────────────────────
+        _delete(self.client_text, "telegram_messages",  "created_at",  cutoff_tg,    "telegram_deleted")
+        _delete(self.client_text, "narrative_data",     "timestamp",   cutoff_long,  "narrative_deleted")
+        _delete(self.client_text, "ai_reports",         "created_at",  cutoff_long,  "reports_deleted")
+        _delete(self.client_text, "dune_query_results", "collected_at",cutoff_long,  "dune_deleted")
 
-            cutoff_onchain = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_REPORTS_DAYS)).date().isoformat()
-            r = self.client_quant.table("onchain_daily_snapshots").delete().lt("as_of_date", cutoff_onchain).execute()
-            results["onchain_deleted"] = len(r.data) if r.data else 0
-        except Exception as e:
-            logger.error(f"QUANT cleanup error: {e}")
+        if errors:
+            results["cleanup_errors"] = errors
+            logger.warning(f"[P3] Cleanup completed with {len(errors)} table failure(s): {[e['table'] for e in errors]}")
+        else:
+            logger.info(f"[P3] Cleanup completed cleanly: {results}")
 
-        # ── TEXT tables ───────────────────────────────────────────────
-        try:
-            cutoff_telegram = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_TELEGRAM_DAYS)).isoformat()
-            r = self.client_text.table("telegram_messages").delete().lt("created_at", cutoff_telegram).execute()
-            results["telegram_deleted"] = len(r.data) if r.data else 0
-
-            cutoff_long = (datetime.now(timezone.utc) - timedelta(days=settings.RETENTION_REPORTS_DAYS)).isoformat()
-            r = self.client_text.table("narrative_data").delete().lt("timestamp", cutoff_long).execute()
-            results["narrative_deleted"] = len(r.data) if r.data else 0
-
-            r = self.client_text.table("ai_reports").delete().lt("created_at", cutoff_long).execute()
-            results["reports_deleted"] = len(r.data) if r.data else 0
-
-            r = self.client_text.table("dune_query_results").delete().lt("collected_at", cutoff_long).execute()
-            results["dune_deleted"] = len(r.data) if r.data else 0
-        except Exception as e:
-            logger.error(f"TEXT cleanup error: {e}")
-
-        logger.info(f"Data cleanup completed: {results}")
         return results
 
 

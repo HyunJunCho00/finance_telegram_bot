@@ -5,6 +5,7 @@ import json
 import threading
 from typing import Dict, List
 
+import ccxt
 from loguru import logger
 from telegram import Bot
 
@@ -81,7 +82,85 @@ class OutboxDispatcher:
             self._send_telegram_payload(payload)
             return
 
+        # [P1 - ACID] A preflight that reaches dispatch in PENDING/PROCESSING state means the
+        # process crashed after the exchange API call but before mark_outbox_event_published.
+        # The trade MAY have executed on the exchange without a DB record — alert immediately.
+        if event_type == "live_trade_preflight":
+            logger.critical(
+                f"[P1 ORPHAN ALERT] live_trade_preflight reached dispatcher in unresolved state! "
+                f"A live trade may have executed without a DB record. "
+                f"Manual reconciliation required. "
+                f"Details: symbol={payload.get('symbol')} exchange={payload.get('exchange')} "
+                f"side={payload.get('side')} amount={payload.get('amount')} "
+                f"intent_id={payload.get('intent_id')} preflight_at={payload.get('preflight_at')}"
+            )
+            # Mark as SENT so it stops being retried — human must reconcile manually.
+            return
+
+        # [P2 - Fill Reconciliation] Query exchange for actual fill price of async market orders.
+        if event_type == "live_fill_check":
+            self._check_and_update_fill(payload)
+            return
+
         raise ValueError(f"Unsupported outbox event type: {event_type}")
+
+    def _check_and_update_fill(self, payload: Dict) -> None:
+        """[P2 - Fill Reconciliation] Fetch confirmed fill price from exchange and update DB.
+
+        Market orders on Binance Futures may return price=None immediately; the actual
+        average fill price becomes available via fetch_order() after matching completes.
+        Raises on failure so the outbox dispatcher retries on next cycle.
+        """
+        exchange_name = str(payload.get("exchange", "binance"))
+        order_id = str(payload.get("order_id", ""))
+        symbol = str(payload.get("symbol", ""))
+
+        if not order_id or not symbol:
+            raise ValueError(f"live_fill_check missing required fields: {payload}")
+
+        # Normalize symbol for ccxt (BTCUSDT → BTC/USDT)
+        ccxt_symbol = symbol
+        if "USDT" in symbol and "/" not in symbol:
+            ccxt_symbol = symbol.replace("USDT", "/USDT")
+        elif "KRW" in symbol and "/" not in symbol:
+            ccxt_symbol = symbol.replace("KRW", "/KRW")
+
+        ex = self._build_ccxt_exchange(exchange_name)
+        order_detail = ex.fetch_order(order_id, ccxt_symbol)
+        fill_price = order_detail.get("average") or order_detail.get("price")
+
+        if not fill_price:
+            raise RuntimeError(
+                f"[P2] Order {order_id} on {exchange_name} still shows no fill price. "
+                f"Status: {order_detail.get('status')}. Will retry."
+            )
+
+        db.update_trade_execution_fill_price(order_id, float(fill_price))
+        logger.info(f"[P2] Fill reconciled: order_id={order_id} fill_price={fill_price} exchange={exchange_name}")
+
+    @staticmethod
+    def _build_ccxt_exchange(exchange_name: str):
+        """Build a one-off ccxt instance for fill_check. Avoids circular import with trade_executor."""
+        if exchange_name in ("binance", "binance_spot"):
+            return ccxt.binance({
+                "apiKey": settings.BINANCE_API_KEY,
+                "secret": settings.BINANCE_API_SECRET,
+                "enableRateLimit": True,
+                "options": {"defaultType": "future" if exchange_name == "binance" else "spot"},
+            })
+        if exchange_name == "upbit":
+            return ccxt.upbit({
+                "apiKey": settings.UPBIT_ACCESS_KEY,
+                "secret": settings.UPBIT_SECRET_KEY,
+                "enableRateLimit": True,
+            })
+        if exchange_name == "coinbase":
+            return ccxt.coinbase({
+                "apiKey": settings.COINBASE_API_KEY,
+                "secret": settings.COINBASE_API_SECRET,
+                "enableRateLimit": True,
+            })
+        raise ValueError(f"[P2] Unknown exchange for fill_check: {exchange_name}")
 
     def _send_telegram_message(self, payload: Dict) -> None:
         from config.local_state import state_manager

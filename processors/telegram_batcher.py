@@ -36,6 +36,11 @@ try:
         "tg_no_signal_total",
         "BREAKING_FILTER: BTC/ETH 신호 없음으로 스킵된 횟수",
     )
+    TG_CHANNEL_MESSAGES = Counter(
+        "tg_channel_messages_total",
+        "채널별 수집된 메시지 수",
+        ["channel"],
+    )
     _TG_PROM = True
 except Exception:
     _TG_PROM = False
@@ -178,10 +183,13 @@ If relevant content exists, output a single dense paragraph starting with "NEWS 
         # Group by category - drop empty text
         grouped: Dict[str, List[str]] = {cat: [] for cat in self.PROMPTS.keys()}
         for msg in messages:
-            cat = self.get_category(msg.get("channel", ""))
+            channel = str(msg.get("channel", "unknown"))
+            cat = self.get_category(channel)
             text = msg.get("text", "").strip()
             if text:
                 grouped[cat].append(text)
+                if _TG_PROM:
+                    TG_CHANNEL_MESSAGES.labels(channel=channel).inc()
 
         total = sum(len(v) for v in grouped.values())
         logger.info(

@@ -36,6 +36,7 @@ from config.settings import settings
 from executors.order_manager import execution_desk
 from executors.paper_exchange import paper_engine
 from executors.outbox_dispatcher import outbox_dispatcher
+from executors.execution_repository import execution_repository
 
 # ── Prometheus 메트릭 정의 ──────────────────────────────────────────────────
 try:
@@ -67,6 +68,10 @@ try:
     FUNDING_FEE_APPLIED = Counter(
         "funding_fee_applied_total",
         "펀딩피 적용 횟수",
+    )
+    OUTBOX_LAG_SECONDS = Gauge(
+        "outbox_oldest_pending_age_seconds",
+        "가장 오래된 PENDING outbox 이벤트 경과 시간 (초)",
     )
     POSITION_UNREALIZED_PNL = Gauge(
         "position_unrealized_pnl_usd",
@@ -208,6 +213,9 @@ def job_outbox_drain() -> None:
         if _PROM_AVAILABLE and isinstance(result, dict):
             OUTBOX_PUBLISHED.labels(status="published").inc(result.get("published", 0))
             OUTBOX_PUBLISHED.labels(status="failed").inc(result.get("failed", 0))
+        if _PROM_AVAILABLE:
+            lag = execution_repository.get_oldest_pending_outbox_age_seconds()
+            OUTBOX_LAG_SECONDS.set(lag)
     except Exception as e:
         logger.error(f"[execution_main] outbox drain error: {e}")
 

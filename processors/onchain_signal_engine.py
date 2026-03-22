@@ -252,6 +252,10 @@ class OnChainSignalEngine:
         )
         data_quality = self._determine_quality(as_of_date, available_metrics, 12)
 
+        if data_quality == "low":
+            long_mult = min(long_mult, 0.85)
+            short_mult = min(short_mult, 0.85)
+
         raw_metrics = {
             "spot_price_usd": effective_spot_price,
             "coinmetrics_price_usd": coinmetrics_price_usd,
@@ -386,6 +390,10 @@ class OnChainSignalEngine:
             gate["long_size_multiplier"] = min(gate["long_size_multiplier"], 0.8)
             gate["short_size_multiplier"] = min(gate["short_size_multiplier"], 0.8)
             gate["data_quality"] = "stale"
+        elif snapshot.get("data_quality") == "low":
+            gate["long_size_multiplier"] = min(gate["long_size_multiplier"], 0.85)
+            gate["short_size_multiplier"] = min(gate["short_size_multiplier"], 0.85)
+
         return gate
 
 
