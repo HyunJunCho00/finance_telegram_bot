@@ -45,7 +45,7 @@ class MCPTools:
     def _load_chart_context(self, symbol: str, mode: TradingMode) -> Optional[Dict]:
         settings = get_settings()
 
-        df = self._load_1m_gcs_first(symbol, months_back=settings.SWING_HISTORY_MONTHS / 12)
+        df = self._load_1m_gcs_first(symbol, months_back=1)
         if df.empty:
             return None
 
@@ -131,7 +131,7 @@ class MCPTools:
         """Get mode-specific market analysis. Raw data only."""
         try:
             settings = get_settings()
-            df = self._load_1m_gcs_first(symbol, months_back=settings.SWING_HISTORY_MONTHS / 12)
+            df = self._load_1m_gcs_first(symbol, months_back=1)
             if df.empty:
                 return {"error": "No market data available"}
 

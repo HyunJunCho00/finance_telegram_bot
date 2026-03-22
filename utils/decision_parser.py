@@ -266,6 +266,9 @@ def _extract_reasoning_summary(text: str) -> str:
     compact = re.sub(r"\s+", " ", without_fence).strip()
     if not compact:
         return ""
+    # Skip if the text looks like raw JSON — avoid leaking judge output into summary
+    if compact.lstrip().startswith("{"):
+        return ""
     if len(compact) > 280:
         return compact[:277] + "..."
     return compact

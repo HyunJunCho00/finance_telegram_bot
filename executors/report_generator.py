@@ -155,7 +155,7 @@ class ReportGenerator:
                 raw = raw[len("[POLICY VETO]"):].strip()
             # JSON 블록 이전 텍스트만 보존
             json_start = raw.find("{")
-            if json_start > 0:
+            if json_start >= 0:
                 raw = raw[:json_start].strip()
             reason = raw
 

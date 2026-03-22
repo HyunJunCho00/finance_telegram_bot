@@ -487,7 +487,7 @@ Rules:
                 system_prompt=prompt,
                 user_message=user_message,
                 temperature=0.2,
-                max_tokens=800,
+                max_tokens=2000,
                 chart_image_b64=chart_image_b64,
                 use_premium=True,
                 role="judge",
