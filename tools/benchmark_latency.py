@@ -352,6 +352,63 @@ def benchmark_ai_router_serialization(runs: int) -> dict:
     )
 
 
+def benchmark_ai_router_cross_backend(runs: int) -> dict:
+    """Two concurrent calls to DIFFERENT backends (judge=gemini, meta_regime=cerebras).
+    Before fix: global lock serializes them → ~300ms.
+    After fix:  per-backend locks allow true parallel → ~150ms.
+    """
+    client = ai_router_module.ai_client
+    original_gap = client._MIN_GAP
+    client._MIN_GAP = 0.0
+
+    def fake_execute(**kwargs):
+        time.sleep(0.15)
+        return "ok"
+
+    def run_cross_pair():
+        start_event = threading.Event()
+        outputs: list[str] = []
+
+        def call_judge():
+            start_event.wait(timeout=1.0)
+            value = client.generate_response(
+                system_prompt="sys", user_message="msg",
+                role="judge", max_tokens=10, temperature=0.0,
+            )
+            outputs.append(value)
+
+        def call_meta():
+            start_event.wait(timeout=1.0)
+            value = client.generate_response(
+                system_prompt="sys", user_message="msg",
+                role="meta_regime", max_tokens=10, temperature=0.0,
+            )
+            outputs.append(value)
+
+        with patch.object(client, "_execute_routed_call", side_effect=fake_execute):
+            t1 = threading.Thread(target=call_judge)
+            t2 = threading.Thread(target=call_meta)
+            t1.start()
+            t2.start()
+            start_event.set()
+            t1.join(timeout=2.0)
+            t2.join(timeout=2.0)
+        if len(outputs) != 2 or any(v != "ok" for v in outputs):
+            raise RuntimeError("AI router cross-backend benchmark threads did not complete cleanly")
+
+    try:
+        latencies = benchmark(run_cross_pair, runs=runs, warmup=1)
+    finally:
+        client._MIN_GAP = original_gap
+
+    return summarize(
+        "ai_router_cross_backend_pair",
+        latencies,
+        kind="synthetic_structural",
+        notes="judge(gemini) + meta_regime(cerebras) concurrent. Before: global lock serializes (~300ms). After: per-backend locks allow parallel (~150ms).",
+    )
+
+
 def benchmark_math_analysis_local(runs: int) -> dict:
     df = make_synthetic_market_df()
 
@@ -418,6 +475,7 @@ def run_suite(runs: int, include_live: bool, symbol: str) -> dict:
         benchmark_report_path_current(runs=max(5, min(runs, 20))),
         benchmark_hot_path_fresh_snapshot(runs=max(5, min(runs, 20))),
         benchmark_ai_router_serialization(runs=max(5, min(runs, 20))),
+        benchmark_ai_router_cross_backend(runs=max(5, min(runs, 20))),
     ]
 
     live_errors: list[str] = []

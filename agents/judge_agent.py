@@ -98,8 +98,11 @@ The `confluence_gate` entry in your expert_verdicts shows a structural confluenc
 - gate_passed=False (score < 3): You MUST output "HOLD" regardless of other signals.
   State "근거 중첩 부족 (N/3)" in final_logic and explain what is missing.
   A lone narrative signal or a single timeframe breakout is NOT enough to enter.
-Confluence factors counted: HTF structure (1d/1w), active setup direction,
-  near confluence zone, Fibonacci confluence, funding extreme, volume breakout.
+Confluence factors counted:
+  - HTF MSB (1d/1w): price already broke structure — immediate factor
+  - HTF CHoCH retested (1d/1w): first reversal swing + 4h retest confirmed — factor only after retest
+  - 4h Fractal Alignment: 4h CHoCH/MSB in same direction as HTF bias (쉽알남 프랙탈)
+  - Active setup direction, near confluence zone, Fibonacci confluence, funding extreme, volume breakout.
 
 - Top-down analysis: 1d determines bias, 4h defines the setup and confirms the entry
 - Fibonacci 38.2%/50%/61.8% are key retracement entry zones

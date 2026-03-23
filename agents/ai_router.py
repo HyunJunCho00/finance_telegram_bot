@@ -235,8 +235,12 @@ class AIClient:
         self.default_model_id = "gemini-3-flash-preview"
         self.premium_model_id = settings.MODEL_JUDGE
 
-        self._global_api_lock = threading.Lock()
-        self._last_call_timestamp = 0.0
+        # Per-backend locks: gemini/cerebras/groq/cf 각각 독립적으로 rate-limit
+        # 기존 _global_api_lock은 모든 백엔드를 직렬화해서 judge+meta_regime 동시 호출 시
+        # 실제 소요 시간이 2배가 됐음 → 백엔드별 락으로 분리해 크로스 백엔드 병렬화 허용
+        _backends = ["gemini", "cerebras", "groq", "cf"]
+        self._backend_locks: dict[str, threading.Lock] = {b: threading.Lock() for b in _backends}
+        self._last_call_by_backend: dict[str, float] = {b: 0.0 for b in _backends}
         self._MIN_GAP = 0.5
 
         self._GROQ_REASONING_POOL = [
@@ -431,9 +435,14 @@ class AIClient:
         use_premium: bool = False,
         role: str = "general",
     ) -> str:
-        with self._global_api_lock:
+        # 백엔드 결정 → 해당 백엔드 락만 획득 (크로스 백엔드 병렬 허용)
+        backend_key, _, _ = self._get_route(role)
+        provider = backend_key.split("_")[0]  # "gemini_judge" → "gemini"
+        lock = self._backend_locks.get(provider, self._backend_locks["gemini"])
+
+        with lock:
             now = time.time()
-            elapsed = now - self._last_call_timestamp
+            elapsed = now - self._last_call_by_backend.get(provider, 0.0)
             if elapsed < self._MIN_GAP:
                 time.sleep(self._MIN_GAP - elapsed)
 
@@ -446,7 +455,7 @@ class AIClient:
                 use_premium=use_premium,
                 role=role,
             )
-            self._last_call_timestamp = time.time()
+            self._last_call_by_backend[provider] = time.time()
             return self._strip_thinking_tags(result)
 
     @staticmethod

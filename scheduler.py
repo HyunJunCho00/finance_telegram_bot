@@ -28,6 +28,7 @@ from executors.cascade_warning_engine import cascade_warning_engine
 from loguru import logger
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import base64
 import re
@@ -673,29 +674,20 @@ def _detect_technical_events(symbol: str, swing: dict, position: dict, funding: 
 
 
 def job_1min_tick():
-    # 1. Price Collection (Critical)
-    try:
-        collector.run()
-    except Exception as e:
-        logger.error(f"Price collection error: {e}")
-
-    # 2. Funding Rate (8h signal, 1m cadence)
-    try:
-        funding_collector.run()
-    except Exception as e:
-        logger.error(f"Funding collection error: {e}")
-
-    # 3. Microstructure (Ephemeral)
-    try:
-        microstructure_collector.run()
-    except Exception as e:
-        logger.error(f"Microstructure collection error: {e}")
-
-    # 4. Volatility Monitor
-    try:
-        volatility_monitor.run()
-    except Exception as e:
-        logger.error(f"Volatility monitor error: {e}")
+    tasks = {
+        "price":          collector.run,
+        "funding":        funding_collector.run,
+        "microstructure": microstructure_collector.run,
+        "volatility":     volatility_monitor.run,
+    }
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(fn): name for name, fn in tasks.items()}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"{name} collection error: {e}")
 
 def job_1min_execution():
     """V5: Process Orders, V7: Check Margin Calls + TP/SL"""

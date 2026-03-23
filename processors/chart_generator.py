@@ -2010,9 +2010,12 @@ chart_generator = ChartGenerator()
 import multiprocessing as _mp
 from concurrent.futures import ProcessPoolExecutor as _ProcessPoolExecutor
 
-# forkserver: 부모 프로세스 스레드를 상속하지 않는 안전한 시작 방식
+# forkserver: 부모 프로세스 스레드를 상속하지 않는 안전한 시작 방식 (Linux/macOS)
+# Windows는 forkserver 미지원 → spawn으로 폴백
 # max_workers=2: BTC/ETH 동시 차트 생성 커버, 메모리 과다 방지
-_mp_context = _mp.get_context("forkserver")
+import sys as _sys
+_mp_start_method = "forkserver" if _sys.platform != "win32" else "spawn"
+_mp_context = _mp.get_context(_mp_start_method)
 _chart_proc_pool = _ProcessPoolExecutor(max_workers=2, mp_context=_mp_context)
 
 import atexit as _atexit

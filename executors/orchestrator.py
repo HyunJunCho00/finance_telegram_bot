@@ -108,9 +108,9 @@ _cvd_cache: dict = {}       # {symbol:mode: DataFrame}
 _liq_cache: dict = {}       # {symbol:mode: DataFrame}
 _funding_cache: dict = {}   # {symbol:mode: DataFrame}
 
-# VLM result cache: keyed by chart content hash, TTL 4 hours
-# Avoids re-running expensive Gemini Pro VLM call when chart hasn't changed
-_vlm_result_cache: dict = {}   # {chart_hash: (result_dict, timestamp)}
+# VLM result cache: keyed by (symbol, mode, time_bucket) — 4h bucket
+# chart_hash changes every 1m candle → near-zero hit rate; time bucket fixes this
+_vlm_result_cache: dict = {}   # {vlm_key: result_dict}
 _VLM_CACHE_TTL_S = 4 * 3600
 
 
@@ -957,28 +957,67 @@ def _compute_confluence_score(
     if not isinstance(current_price, (int, float)) or current_price <= 0:
         return {"score": 0, "direction": "NEUTRAL", "factors": [], "gate_passed": False, "long_score": 0, "short_score": 0}
 
-    # 1. HTF Structure: 1d/1w CHoCH or MSB direction
+    # 2. Active Setup Bias — read early; needed by factors 1 and 1b
+    scenario_engine = market_data.get("scenario_engine", {}) or {}
+    active_setup = scenario_engine.get("active_setup", {}) or {}
+    side = str(active_setup.get("side", "")).upper()
+    htf_bias = str(scenario_engine.get("higher_timeframe_bias", "neutral")).lower()
+
+    # Retest quality from scenario_engine (evaluated on execution TF 4h)
+    _retest_label = (active_setup.get("retest_quality") or {}).get("label", "unknown")
+    retest_confirmed = _retest_label in ("clean", "acceptable")
+
+    # 1. HTF Structure: 1d/1w
+    # MSB (가격이 이미 레벨 돌파) → 리테스트 불필요, 즉시 factor
+    # CHoCH (첫 역추세 스윙, 아직 레벨 미돌파) → 4h 리테스트 확인 후에만 factor
     market_struct = market_data.get("market_structure", {}) or {}
     for tf in ("1d", "1w"):
         info = market_struct.get(tf)
         if not isinstance(info, dict):
             continue
-        for struct_key in ("choch", "msb"):
-            s = info.get(struct_key)
-            if not isinstance(s, dict):
-                continue
-            stype = str(s.get("type", "")).lower()
+        # MSB first — stronger signal
+        msb = info.get("msb")
+        if isinstance(msb, dict):
+            stype = str(msb.get("type", "")).lower()
             if any(kw in stype for kw in ("bull", "high", "up")):
-                long_factors.append(f"htf_{tf}_structure")
-                break
+                long_factors.append(f"htf_{tf}_msb")
+                continue
             elif any(kw in stype for kw in ("bear", "low", "down")):
-                short_factors.append(f"htf_{tf}_structure")
-                break
+                short_factors.append(f"htf_{tf}_msb")
+                continue
+        # CHoCH — only valid after retest confirmed (쉽알남: CHoCH 후 리테스트 대기)
+        choch = info.get("choch")
+        if isinstance(choch, dict) and retest_confirmed:
+            stype = str(choch.get("type", "")).lower()
+            if any(kw in stype for kw in ("bull", "high", "up")):
+                long_factors.append(f"htf_{tf}_choch_retested")
+            elif any(kw in stype for kw in ("bear", "low", "down")):
+                short_factors.append(f"htf_{tf}_choch_retested")
 
+    # 1b. 4h Fractal Alignment — 쉽알남 프랙탈 원칙
+    # 실행 TF(4h) 구조가 HTF 바이어스와 같은 방향으로 전환됐을 때만 진입 근거
+    exec_struct_4h = market_struct.get("4h")
+    if isinstance(exec_struct_4h, dict):
+        # MSB > CHoCH 우선순위
+        _4h_added = False
+        msb_4h = exec_struct_4h.get("msb")
+        if isinstance(msb_4h, dict):
+            stype = str(msb_4h.get("type", "")).lower()
+            if any(kw in stype for kw in ("bull", "high", "up")) and htf_bias == "bullish":
+                long_factors.append("exec_4h_fractal_alignment")
+                _4h_added = True
+            elif any(kw in stype for kw in ("bear", "low", "down")) and htf_bias == "bearish":
+                short_factors.append("exec_4h_fractal_alignment")
+                _4h_added = True
+        if not _4h_added:
+            choch_4h = exec_struct_4h.get("choch")
+            if isinstance(choch_4h, dict):
+                stype = str(choch_4h.get("type", "")).lower()
+                if any(kw in stype for kw in ("bull", "high", "up")) and htf_bias == "bullish":
+                    long_factors.append("exec_4h_fractal_alignment")
+                elif any(kw in stype for kw in ("bear", "low", "down")) and htf_bias == "bearish":
+                    short_factors.append("exec_4h_fractal_alignment")
     # 2. Active Setup Bias (scenario_engine confirmed directional setup)
-    scenario_engine = market_data.get("scenario_engine", {}) or {}
-    active_setup = scenario_engine.get("active_setup", {}) or {}
-    side = str(active_setup.get("side", "")).upper()
     if side == "LONG":
         long_factors.append("active_setup")
     elif side == "SHORT":
@@ -1398,14 +1437,14 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
             "confidence": 0, "rationale": "No chart available"
         }}}
 
-    # VLM result cache: skip expensive Gemini Pro call if chart hasn't changed
-    _chart_hash = hashlib.sha256(chart.encode()).hexdigest()[:20]
-    _cached = _vlm_result_cache.get(_chart_hash)
+    # VLM result cache: keyed by (symbol, mode, 4h time bucket) — not chart hash
+    # chart changes every 1m candle so hash-based key never hits; bucket key gives ~80% hit rate
+    _time_bucket = int(time.time() / _VLM_CACHE_TTL_S)
+    _vlm_key = f"{symbol}:{mode.value}:{_time_bucket}"
+    _cached = _vlm_result_cache.get(_vlm_key)
     if _cached is not None:
-        _cached_result, _cached_ts = _cached
-        if time.time() - _cached_ts < _VLM_CACHE_TTL_S:
-            logger.info(f"VLM cache hit for {symbol}/{mode.value} (hash={_chart_hash})")
-            return {"blackboard": {"vlm_geometry": _cached_result}, "chart_image_b64": None, "chart_bytes": None}
+        logger.info(f"VLM cache hit for {symbol}/{mode.value} (bucket={_time_bucket})")
+        return {"blackboard": {"vlm_geometry": _cached}, "chart_image_b64": None, "chart_bytes": None}
 
     # Extract current price from cached market_data for prompt context
     market_data = _market_data_cache.get(cache_key, {})
@@ -1423,7 +1462,7 @@ def node_vlm_geometric_expert(state: AnalysisState) -> dict:
     )
     # Store in cache (only if analysis succeeded — don't cache default/error results)
     if result.get("anomaly") not in ("none", None) or result.get("confidence", 0) > 0:
-        _vlm_result_cache[_chart_hash] = (result, time.time())
+        _vlm_result_cache[_vlm_key] = result
 
     # [OOM FIX] VLM 분석 완료 후 이미지 데이터를 State에서 즉시 해제
     return {

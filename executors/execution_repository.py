@@ -8,7 +8,10 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
-import config.local_state as local_state
+from pathlib import Path as _Path
+
+# DB_PATH resolved locally to avoid circular import with config.local_state
+_DB_PATH: str = str(_Path(__file__).resolve().parents[1] / "data" / "local_state.db")
 
 FEE_PCT = 0.0005  # 0.05% Binance Futures Market Fee
 
@@ -30,7 +33,7 @@ class ExecutionRepository:
     def transaction(self):
         with _WRITE_LOCK:
             conn = sqlite3.connect(
-                local_state.DB_PATH,
+                _DB_PATH,
                 check_same_thread=False,
                 isolation_level=None,
                 timeout=30.0,
@@ -459,7 +462,7 @@ class ExecutionRepository:
         """Return age in seconds of the oldest PENDING outbox event, 0.0 if none."""
         with _WRITE_LOCK:
             conn = sqlite3.connect(
-                local_state.DB_PATH,
+                _DB_PATH,
                 check_same_thread=False,
                 isolation_level=None,
                 timeout=5.0,
