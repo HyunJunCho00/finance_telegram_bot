@@ -819,7 +819,7 @@ class MathEngine:
                 gap_pct = (gap_high - gap_low) / gap_low * 100
                 if gap_pct >= min_gap_pct:
                     # Check if unfilled (current price hasn't fully entered the gap)
-                    filled = current_price <= gap_high and current_price >= gap_low
+                    filled = bool(current_price <= gap_high and current_price >= gap_low)
                     fvgs.append({
                         'type': 'bullish',
                         'gap_low': round(gap_low, 2),
@@ -835,7 +835,7 @@ class MathEngine:
                 gap_low = highs[i + 2]
                 gap_pct = (gap_high - gap_low) / gap_low * 100
                 if gap_pct >= min_gap_pct:
-                    filled = current_price >= gap_low and current_price <= gap_high
+                    filled = bool(current_price >= gap_low and current_price <= gap_high)
                     fvgs.append({
                         'type': 'bearish',
                         'gap_low': round(gap_low, 2),
