@@ -149,7 +149,8 @@ Identify what worked and provide:
 
         cursor_key = "evaluation:last_24h_report_created_at"
         last_cursor = state_manager.get_system_config(cursor_key, "")
-        batch = performance_evaluator.run_evaluation_batch(after_created_at=last_cursor, limit=30)
+        # limit=10: Gemini Pro RPD 250/day 제한으로 self_correction 호출 최소화
+        batch = performance_evaluator.run_evaluation_batch(after_created_at=last_cursor, limit=10)
         if not batch:
             return
 

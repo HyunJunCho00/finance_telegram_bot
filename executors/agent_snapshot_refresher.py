@@ -281,11 +281,13 @@ def refresh_snapshot_bundle(
         f"(perplexity={'on' if allow_perplexity else 'off'}, meta={'on' if include_meta else 'off'}, vlm={'on' if include_vlm else 'off'})"
     )
     refresh_context_bundle(symbol, mode, allow_perplexity=allow_perplexity, include_meta=include_meta)
+    # chart_bundle은 context_bundle이 이미 meta_agent를 실행해 저장했으므로
+    # include_meta=False로 고정하여 node_meta_agent 이중 호출 방지 (Gemini Pro RPD 절감)
     refresh_chart_bundle(
         symbol,
         mode,
         allow_perplexity=allow_perplexity,
-        include_meta=include_meta,
+        include_meta=False,
         include_vlm=include_vlm,
     )
     logger.info(f"Snapshot bundle ready for {symbol}/{mode.value}")

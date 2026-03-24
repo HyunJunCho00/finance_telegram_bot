@@ -347,6 +347,7 @@ class DatabaseClient:
             data, on_conflict="timestamp,symbol"
         ).execute()
 
+    @reconnect_on_error
     def get_funding_history(self, symbol: str, limit: int = 100, since: Optional[datetime] = None, columns: Optional[str] = None) -> pd.DataFrame:
         rows = self._fetch_paginated("funding_data", limit, "timestamp", since=since, columns=columns, symbol=symbol)
         if rows:
@@ -363,6 +364,7 @@ class DatabaseClient:
             data_list, on_conflict="timestamp,symbol,exchange"
         ).execute()
 
+    @reconnect_on_error
     def get_latest_microstructure(self, symbol: str) -> Optional[Dict]:
         response = self.client_quant.table("microstructure_data")\
                         .select("*")\
@@ -399,6 +401,7 @@ class DatabaseClient:
             data, on_conflict="timestamp,source"
         ).execute()
 
+    @reconnect_on_error
     def get_latest_macro_data(self) -> Optional[Dict]:
         response = self.client_quant.table("macro_data")\
                         .select("*")\
@@ -544,6 +547,7 @@ class DatabaseClient:
             .execute()
         return response.data[0] if response.data else None
 
+    @reconnect_on_error
     def get_archive_manifests(
         self,
         statuses: Optional[List[str]] = None,

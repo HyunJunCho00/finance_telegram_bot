@@ -345,7 +345,9 @@ class AIClient:
         return text[:max_chars] + f"\n\n[TRUNCATED {len(text) - max_chars} chars]"
 
     def _is_critical_role(self, role: str) -> bool:
-        return role in ["judge", "risk_eval", "meta_regime", "self_correction"]
+        # meta_regime은 critical에서 제외: regime 분류 실패 시 Groq까지만 fallback하고
+        # RANGE_BOUND 기본값으로 degrade. Gemini Pro RPD 낭비 방지.
+        return role in ["judge", "risk_eval", "self_correction"]
 
     def _role_importance_tier(self, role: str) -> str:
         role = (role or "").lower()
@@ -716,6 +718,12 @@ class AIClient:
             return result
 
         if is_critical:
+            if not self._is_model_available(settings.MODEL_JUDGE):
+                logger.warning(
+                    f"All Groq models exhausted for critical role [{role}], "
+                    f"but Gemini Pro ({settings.MODEL_JUDGE}) is also exhausted. Returning empty."
+                )
+                return ""
             logger.warning(f"All Groq models exhausted for critical role [{role}]. Trying Gemini fallback...")
             return self._generate_gemini(
                 self._gemini_judge,
