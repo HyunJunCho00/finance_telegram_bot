@@ -2472,6 +2472,16 @@ class Orchestrator:
             if self._daily_precision_active_count == 0:
                 self._daily_precision_started_at = None
 
+    def force_release_analysis_lock(self, symbol: str, mode: TradingMode) -> None:
+        """타임아웃 등으로 백그라운드 스레드가 lock을 계속 점유할 때 강제 해제.
+        기존 Lock 객체를 _analysis_locks에서 제거해 다음 실행이 새 Lock을 얻도록 한다.
+        (백그라운드 스레드가 eventually 기존 lock.release()를 호출해도 무해함)
+        """
+        lock_key = f"daily_precision:{str(symbol).upper()}:{mode.value}"
+        removed = self._analysis_locks.pop(lock_key, None)
+        if removed is not None:
+            logger.warning(f"force_release_analysis_lock: removed stuck lock for {lock_key}")
+
     @staticmethod
     def _daily_precision_summary_key() -> str:
         return "daily_precision_last_summary"

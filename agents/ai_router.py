@@ -949,6 +949,9 @@ class AIClient:
                 )
 
         # Generate using the cached system instruction
+        # Thinking 모델(Pro)은 응답이 수 분 걸릴 수 있으므로 300s 하드 타임아웃 적용
+        # → hang이 발생해도 분석 스레드가 무기한 점유되지 않도록 방지
+        _CACHE_GEN_TIMEOUT = 300  # seconds
         try:
             parts = []
             if chart_image_b64:
@@ -969,11 +972,27 @@ class AIClient:
                     thinking_level=thinking_level
                 )
 
-            response = client.models.generate_content(
-                model=model_id,
-                contents=[types.Content(role="user", parts=parts)],
-                config=types.GenerateContentConfig(**config_kwargs),
-            )
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=1) as _pool:
+                _future = _pool.submit(
+                    client.models.generate_content,
+                    model=model_id,
+                    contents=[types.Content(role="user", parts=parts)],
+                    config=types.GenerateContentConfig(**config_kwargs),
+                )
+                try:
+                    response = _future.result(timeout=_CACHE_GEN_TIMEOUT)
+                except _cf.TimeoutError:
+                    logger.warning(
+                        f"Gemini cached generation TIMEOUT ({_CACHE_GEN_TIMEOUT}s) for {model_id}; "
+                        "falling back to standard call"
+                    )
+                    with self._gemini_cache_lock:
+                        self._gemini_system_caches.pop(cache_key, None)
+                    return self._generate_gemini(
+                        client, model_id, system_prompt, user_message,
+                        max_tokens, temperature, chart_image_b64,
+                    )
             return response.text or ""
         except Exception as exc:
             logger.warning(f"Gemini cached generation failed ({exc}); retrying without cache")

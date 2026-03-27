@@ -1522,8 +1522,11 @@ def job_daily_precision_symbol(symbol: str):
                     f"Daily precision TIMEOUT for {normalized_symbol} after {_HARD_TIMEOUT_S // 60}min — "
                     f"force-resetting precision lock"
                 )
-                # 카운터 강제 해제 (백그라운드 스레드는 계속 실행되지만 잠금은 즉시 해제)
+                # _daily_precision_active_count 카운터 리셋
                 orchestrator._exit_daily_precision_run()
+                # _analysis_locks의 실제 Lock 객체도 제거 (백그라운드 스레드가 계속 점유 중이므로
+                # pop으로 새 Lock을 쓰도록 해야 다음 실행이 SKIPPED_LOCK에 걸리지 않음)
+                orchestrator.force_release_analysis_lock(normalized_symbol, TradingMode.SWING)
     except Exception as e:
         logger.error(f"Daily precision job error for {symbol}: {e}")
 
