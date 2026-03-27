@@ -1162,6 +1162,12 @@ CRITICAL RULES:
         # [FIX HIGH-11] Load from disk to avoid 1000+ LLM calls on restart
         self._ingested_ids: Set[str] = self._load_ingested_ids()
 
+        # Query result cache — avoids redundant LLM intent/entity calls + vector search
+        # when the same query is issued within the narrative_agent TTL window (30 min)
+        self._query_cache: Dict[str, tuple] = {}  # {hash: (result_dict, timestamp)}
+        self._query_cache_lock = threading.Lock()
+        self._QUERY_CACHE_TTL = 1800  # 30 minutes
+
     def _load_ingested_ids(self) -> Set[str]:
         """Load ingested message IDs from disk. Falls back to GCS if local file missing (VM reset recovery)."""
         # 1) Try local disk first (fast)
@@ -1799,6 +1805,19 @@ CRITICAL RULES:
 
     def query(self, query_text: str, top_k: int = 10, **kwargs) -> Dict:
         """Query the Logical Truth Engine (Intent-Based)."""
+        import hashlib
+        import time as _time
+
+        cache_key = hashlib.md5(f"{query_text}:{top_k}".encode()).hexdigest()
+        now = _time.time()
+        with self._query_cache_lock:
+            if cache_key in self._query_cache:
+                cached_result, cached_ts = self._query_cache[cache_key]
+                if now - cached_ts < self._QUERY_CACHE_TTL:
+                    logger.debug(f"LightRAG query cache hit (age={int(now-cached_ts)}s): {query_text[:50]}")
+                    import copy
+                    return copy.deepcopy(cached_result)
+
         ai = self._get_ai_client()
         intent = "hybrid"
         
@@ -1874,6 +1893,11 @@ CRITICAL RULES:
                 result["semantic_results"] = self.vector_store.search(
                     query_embedding, top_k=top_k
                 )
+
+        # Store in cache for next 30 minutes
+        import time as _time
+        with self._query_cache_lock:
+            self._query_cache[cache_key] = (result, _time.time())
 
         return result
 

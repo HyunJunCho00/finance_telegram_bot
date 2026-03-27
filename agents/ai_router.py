@@ -259,6 +259,12 @@ class AIClient:
 
         self._circuit_breakers = {}
 
+        # Gemini context cache registry — keyed by md5(model_id + system_prompt)
+        # Value: (cache_name: str, created_ts: float)
+        # Avoids re-tokenising the Judge's ~1200-token static system prompt on every call
+        self._gemini_system_caches: Dict[str, Tuple[str, float]] = {}
+        self._gemini_cache_lock = threading.Lock()
+
     @property
     def claude_client(self):
         return None
@@ -542,9 +548,15 @@ class AIClient:
     ) -> str:
         client_obj = self._select_gemini_client(backend)
         if client_obj and self._is_model_available(model_id):
-            result = self._generate_gemini(
-                client_obj, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64
-            )
+            # judge / self_correction: use context caching for the static system prompt
+            if role in ("judge", "self_correction"):
+                result = self._generate_gemini_with_cache(
+                    client_obj, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64
+                )
+            else:
+                result = self._generate_gemini(
+                    client_obj, model_id, system_prompt, msg, max_tokens, temperature, chart_image_b64
+                )
             if result:
                 return result
 
@@ -883,6 +895,94 @@ class AIClient:
                 self._mark_model_exhausted(model_id, 3600)
             logger.error(f"{name} error ({model_id}): {e}")
             return ""
+
+    def _generate_gemini_with_cache(
+        self,
+        client,
+        model_id: str,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int,
+        temperature: float,
+        chart_image_b64: Optional[str] = None,
+    ) -> str:
+        """Gemini generation with context caching for the system prompt.
+
+        Caches the static system instruction (Judge BASE_PROMPT + rules + DEBATE_APPENDIX)
+        for 2 hours so it is not re-tokenised on every analysis cycle.
+        Falls back silently to a standard call if the model/quota does not support caching.
+        """
+        import hashlib
+
+        cache_key = hashlib.md5(f"{model_id}:{system_prompt}".encode()).hexdigest()
+        cache_ttl = 7200  # 2 hours in seconds
+        now = time.time()
+
+        # Look up existing valid cache
+        cache_name: Optional[str] = None
+        with self._gemini_cache_lock:
+            entry = self._gemini_system_caches.get(cache_key)
+            if entry:
+                stored_name, stored_ts = entry
+                if now - stored_ts < cache_ttl:
+                    cache_name = stored_name
+
+        # Create a new cache if we don't have one
+        if cache_name is None:
+            try:
+                cache = client.caches.create(
+                    model=model_id,
+                    config=types.CreateCachedContentConfig(
+                        system_instruction=system_prompt,
+                        ttl=f"{cache_ttl}s",
+                    ),
+                )
+                cache_name = cache.name
+                with self._gemini_cache_lock:
+                    self._gemini_system_caches[cache_key] = (cache_name, now)
+                logger.info(f"Gemini context cache created for {model_id}: {cache_name[:24]}…")
+            except Exception as exc:
+                logger.debug(f"Gemini context caching unavailable ({exc}); using standard call")
+                return self._generate_gemini(
+                    client, model_id, system_prompt, user_message,
+                    max_tokens, temperature, chart_image_b64,
+                )
+
+        # Generate using the cached system instruction
+        try:
+            parts = []
+            if chart_image_b64:
+                image_bytes = base64.b64decode(chart_image_b64)
+                mime = mimetypes.guess_type("chart.png")[0] or "image/png"
+                parts.append(types.Part.from_bytes(data=image_bytes, mime_type=mime))
+            parts.append(types.Part.from_text(text=user_message))
+
+            config_kwargs: Dict = {
+                "cached_content": cache_name,
+                "max_output_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            lowercased_id = model_id.lower()
+            if "gemini-3" in lowercased_id or "gemini-2.5" in lowercased_id:
+                thinking_level = "HIGH" if "pro" in lowercased_id else "LOW"
+                config_kwargs["thinking_config"] = types.ThinkingConfig(
+                    thinking_level=thinking_level
+                )
+
+            response = client.models.generate_content(
+                model=model_id,
+                contents=[types.Content(role="user", parts=parts)],
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
+            return response.text or ""
+        except Exception as exc:
+            logger.warning(f"Gemini cached generation failed ({exc}); retrying without cache")
+            with self._gemini_cache_lock:
+                self._gemini_system_caches.pop(cache_key, None)
+            return self._generate_gemini(
+                client, model_id, system_prompt, user_message,
+                max_tokens, temperature, chart_image_b64,
+            )
 
     def _generate_claude(
         self,

@@ -1413,6 +1413,9 @@ def job_daily_safe_cleanup():
         result = gcs_archive_exporter.run_safe_cleanup(limit=1000)
         logger.info(f"Safe cleanup result: {result}")
 
+        from executors.agent_state_store import agent_state_store as _ass
+        _ass.purge_expired()
+
         graph_days = settings.RETENTION_GRAPH_DAYS
         if graph_days > 0:
             light_rag.cleanup_old(days=graph_days)
