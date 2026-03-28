@@ -171,8 +171,8 @@ Your authority is strictly narrower than the daily strategy judge.
   5. REPLAN: the daily thesis itself appears stale/broken and needs emergency re-planning
 
 LEVERAGE HARD CAPS (non-negotiable, mode-specific):
-  - SWING mode: leverage 13x maximum
-  - POSITION mode: leverage 1.01.5x maximum (liquidation must be nearly impossible)
+  - SWING mode: leverage 1-3x maximum
+  - POSITION mode: leverage 1.0-1.5x maximum (liquidation must be nearly impossible)
   Do NOT output leverage > 1.5 when mode is POSITION, even if the playbook context suggests otherwise.
 
 Return strict JSON only:
@@ -434,7 +434,7 @@ Rules:
     ) -> Dict:
         active_orders = active_orders or []  # Guard against mutable default
         mode_str = mode.value.upper()
-        mode_rules = self.SWING_RULES
+        mode_rules = self.SWING_RULES if mode == TradingMode.SWING else self.POSITION_RULES
         # Wait, format() evaluates all curly braces. self.DEBATE_APPENDIX contains raw JSON templates!
         # Instead of formatting the whole concatenated string, format the components individually.
         base_formatted = self.BASE_PROMPT.format(mode_upper=mode_str, mode_specific_rules=mode_rules)

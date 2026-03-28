@@ -1736,7 +1736,7 @@ def node_judge_agent(state: AnalysisState) -> dict:
                 f"[HOLD OVERRIDE] EV={ev:.2f}, WinProb={win_prob_pct:.1f}%, RR={rr:.2f} >= gates. "
                 + decision["reasoning"].get("final_logic", "")
             )
-            decision["key_factors"].append("수학적 우위(EV/리스크/RR) 불충분으로 소규모 진입 거")
+            decision["key_factors"].append("수학적 우위(EV/리스크/RR) 충분으로 소규모 진입 승인")
 
     # Scale allocation by Meta risk budget
     risk_budget = _to_float(regime_ctx.get("risk_budget_pct", 100), 100.0)
