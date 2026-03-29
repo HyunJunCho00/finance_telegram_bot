@@ -1966,24 +1966,48 @@ class ChartGenerator:
                 return None
             return d.to_dict("records")
 
-        fut = _chart_proc_pool.submit(
-            _chart_worker_fn,
-            _recs(df),
-            analysis,
-            symbol,
-            mode.value,
-            timeframe,
-            _recs(liquidation_df),
-            _recs(cvd_df),
-            _recs(funding_df),
-            _recs(df_4h),
-            _recs(df_1d),
-            _recs(df_1w),
-            self.width,
-            self.height,
-            self.dpi,
-        )
         try:
+            global _chart_proc_pool
+            from concurrent.futures.process import BrokenProcessPool as _BrokenPool
+            try:
+                fut = _chart_proc_pool.submit(
+                    _chart_worker_fn,
+                    _recs(df),
+                    analysis,
+                    symbol,
+                    mode.value,
+                    timeframe,
+                    _recs(liquidation_df),
+                    _recs(cvd_df),
+                    _recs(funding_df),
+                    _recs(df_4h),
+                    _recs(df_1d),
+                    _recs(df_1w),
+                    self.width,
+                    self.height,
+                    self.dpi,
+                )
+            except _BrokenPool:
+                logger.warning("ProcessPool broken — recreating pool and retrying")
+                _chart_proc_pool.shutdown(wait=False, cancel_futures=True)
+                _chart_proc_pool = _ProcessPoolExecutor(max_workers=2, mp_context=_mp_context)
+                fut = _chart_proc_pool.submit(
+                    _chart_worker_fn,
+                    _recs(df),
+                    analysis,
+                    symbol,
+                    mode.value,
+                    timeframe,
+                    _recs(liquidation_df),
+                    _recs(cvd_df),
+                    _recs(funding_df),
+                    _recs(df_4h),
+                    _recs(df_1d),
+                    _recs(df_1w),
+                    self.width,
+                    self.height,
+                    self.dpi,
+                )
             return fut.result(timeout=timeout)
         except _FutureTimeout:
             logger.warning(f"ProcessPool chart timed out after {timeout}s — falling back to inline")
