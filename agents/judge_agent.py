@@ -103,6 +103,7 @@ Confluence factors counted:
   - HTF CHoCH retested (1d/1w): first reversal swing + 4h retest confirmed — factor only after retest
   - 4h Fractal Alignment: 4h CHoCH/MSB in same direction as HTF bias (쉽알남 프랙탈)
   - Active setup direction, near confluence zone, Fibonacci confluence, funding extreme, volume breakout.
+  - Liquidity sweep confirmed (쉽알남 Trap): price swept a swing level and closed back inside — counts as 2 factors (direction + entry trigger). Combined with active_setup(1) this alone opens the gate.
 
 - Top-down analysis: 1d determines bias, 4h defines the setup and confirms the entry
 - Fibonacci 38.2%/50%/61.8% are key retracement entry zones

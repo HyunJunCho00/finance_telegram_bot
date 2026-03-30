@@ -1077,6 +1077,20 @@ def _compute_confluence_score(
         else:
             long_factors.append("volume_breakout")
 
+    # 7. Confirmed Liquidity Sweep (쉽알남 Trap 패턴) — 2점짜리 팩터
+    # Sweep은 방향(bias_after_sweep) + 진입 트리거를 동시에 제공하므로 2점으로 카운트.
+    # active_setup.side 없이 sweep만 단독으로 터진 경우(완전 무방향) → 2점이지만
+    # active_setup(1) + sweep(2) = 3점 → gate 오픈이 실제 목표 시나리오.
+    trap_context = active_setup.get("trap_context", {}) or {}
+    if trap_context.get("confirmed"):
+        bias_after = str(trap_context.get("bias_after_sweep", "")).upper()
+        if bias_after == "LONG":
+            long_factors.append("liquidity_sweep_confirmed")
+            long_factors.append("liquidity_sweep_confirmed_2")   # 2점 가중치
+        elif bias_after == "SHORT":
+            short_factors.append("liquidity_sweep_confirmed")
+            short_factors.append("liquidity_sweep_confirmed_2")  # 2점 가중치
+
     # Deduplicate while preserving order
     long_factors = list(dict.fromkeys(long_factors))
     short_factors = list(dict.fromkeys(short_factors))
