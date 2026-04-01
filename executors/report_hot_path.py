@@ -136,6 +136,7 @@ def _build_snapshot_for_judge(bundle: Dict) -> Dict:
         "onchain_context": onchain_payload.get("onchain_context", ""),
         "onchain_gate": onchain_payload.get("onchain_gate", {}),
         "blackboard": {
+            "confluence_score": chart_payload.get("confluence_score", {}),
             "chart_rules": chart_payload.get("chart_rules", {}),
             "vlm_geometry": chart_payload.get("vlm_geometry", {}),
         },

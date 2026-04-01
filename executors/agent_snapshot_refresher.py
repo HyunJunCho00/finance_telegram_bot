@@ -240,6 +240,7 @@ def refresh_chart_bundle(
         "chart_image_b64": state.get("chart_image_b64"),
         "chart_rules": blackboard.get("chart_rules", {}),
         "vlm_geometry": blackboard.get("vlm_geometry", {}),
+        "confluence_score": blackboard.get("confluence_score", {}),
         "vlm_context_text": state.get("vlm_context_text", ""),
         "market_data": orchestrator_module._market_data_cache.get(
             orchestrator_module._cache_key(symbol, mode),
