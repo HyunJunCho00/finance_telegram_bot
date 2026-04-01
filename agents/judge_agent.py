@@ -498,7 +498,23 @@ Rules:
             )
 
             decision = self._parse_decision(response)
-            logger.info(f"Judge decision: {decision.get('decision', 'UNKNOWN')} (mode={mode.value})")
+            reasoning = decision.get("reasoning", {})
+            final_logic_preview = ""
+            if isinstance(reasoning, dict):
+                final_logic_preview = str(reasoning.get("final_logic", "") or "")[:120]
+            conf = decision.get("confidence", 0)
+            win_prob = decision.get("win_probability_pct", 0)
+            logger.info(
+                f"Judge decision: {decision.get('decision', 'UNKNOWN')} "
+                f"conf={conf} win_prob={win_prob} (mode={mode.value}) "
+                f"final_logic_preview={repr(final_logic_preview)}"
+            )
+            if not final_logic_preview and not conf and not win_prob:
+                logger.warning(
+                    f"Judge returned empty/zero decision for {symbol}/{mode.value}. "
+                    f"Raw response length={len(response or '')} chars. "
+                    f"response_preview={repr((response or '')[:200])}"
+                )
             return decision
 
         except Exception as e:

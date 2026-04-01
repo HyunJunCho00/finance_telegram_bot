@@ -147,9 +147,14 @@ class ReportGenerator:
             reasoning = decision.get("reasoning", {})
             raw = ""
             if isinstance(reasoning, dict):
-                raw = str(reasoning.get("final_logic") or reasoning.get("counter_scenario") or "").strip()
+                fl = str(reasoning.get("final_logic") or "").strip()
+                cs = str(reasoning.get("counter_scenario") or "").strip()
+                # "N/A" is a template placeholder — treat as missing
+                raw = (fl if fl and fl != "N/A" else "") or (cs if cs and cs != "N/A" else "")
             else:
                 raw = str(reasoning or "").strip()
+                if raw == "N/A":
+                    raw = ""
             # [POLICY VETO] ... { JSON } 패턴에서 앞부분만 추출
             if raw.startswith("[POLICY VETO]"):
                 raw = raw[len("[POLICY VETO]"):].strip()
@@ -318,20 +323,19 @@ class ReportGenerator:
         onchain_context: str = "",
         onchain_snapshot: Optional[Dict] = None,
     ) -> Dict:
-        report = {
-            "symbol": symbol,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "market_data": json.dumps(market_data, default=str),
-            "bull_opinion": bull_opinion,
-            "bear_opinion": bear_opinion,
-            "risk_assessment": risk_assessment,
-            "final_decision": json.dumps(final_decision),
-            "onchain_context": onchain_context,
-            "onchain_snapshot": onchain_snapshot or {},
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-
         try:
+            report = {
+                "symbol": symbol,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "market_data": json.dumps(market_data, default=str),
+                "bull_opinion": bull_opinion,
+                "bear_opinion": bear_opinion,
+                "risk_assessment": risk_assessment,
+                "final_decision": json.dumps(final_decision, default=str),
+                "onchain_context": onchain_context,
+                "onchain_snapshot": onchain_snapshot or {},
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
             report_id = db.insert_ai_report(report)
             logger.info(f"Report generated for {symbol} ({mode.value}) with ID: {report_id}")
             report["report_id"] = report_id
