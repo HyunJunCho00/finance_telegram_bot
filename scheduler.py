@@ -1440,6 +1440,13 @@ def job_daily_safe_cleanup():
     except Exception as e:
         logger.warning(f"market_status_events cleanup failed: {e}")
 
+    # Retention-based cleanup (GCS archive 없이도 항상 실행)
+    try:
+        result = db.cleanup_old_data()
+        logger.info(f"Retention cleanup result: {result}")
+    except Exception as e:
+        logger.warning(f"Retention cleanup failed: {e}")
+
 
 
 
