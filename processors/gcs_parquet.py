@@ -533,7 +533,7 @@ class GCSParquetStore:
 
     def load_ohlcv(self, timeframe: str, symbol: str, months_back: int = 3) -> pd.DataFrame:
         paths = self._build_ohlcv_paths(timeframe, symbol, months_back)
-        read_fn = self._download_parquet if self.enabled else self._read_local_cache
+        read_fn = self._download_parquet
         workers = min(8, max(1, len(paths)))
         with ThreadPoolExecutor(max_workers=workers) as ex:
             results = list(ex.map(read_fn, paths))
@@ -559,10 +559,7 @@ class GCSParquetStore:
                 month = (now - timedelta(days=30 * m)).strftime("%Y-%m")
                 paths.append(f"{prefix}/{symbol}/{month}.parquet")
         for path in paths:
-            if self.enabled:
-                df = self._download_parquet(path)
-            else:
-                df = self._read_local_cache(path)
+            df = self._download_parquet(path)
             if df is not None:
                 dfs.append(df)
         if not dfs:
