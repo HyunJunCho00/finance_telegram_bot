@@ -94,8 +94,8 @@ class TradeExecutor:
             if direction not in ["LONG", "SHORT"]:
                 return {"success": False, "note": "No valid trade direction"}
 
-            allocation_pct = float(final_decision.get("allocation_pct", 0) or 0)
-            leverage = float(final_decision.get("leverage", 1) or 1)
+            allocation_pct = min(max(float(final_decision.get("allocation_pct", 0) or 0), 0.0), 100.0)
+            leverage = min(max(float(final_decision.get("leverage", 1) or 1), 1.0), 3.0)
             target_exchange = str(final_decision.get("target_exchange", "BINANCE")).lower()
             exec_style = str(final_decision.get("recommended_execution_style", "MOMENTUM_SNIPER"))
             tp_price = float(final_decision.get("tp1_price", final_decision.get("take_profit", 0)) or 0)

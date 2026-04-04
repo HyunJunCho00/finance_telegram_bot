@@ -162,6 +162,13 @@ def init_db():
     cursor.execute(
         "INSERT OR IGNORE INTO system_config (key, value) VALUES ('trading_mode', 'swing')"
     )
+    # Confluence gate threshold (auto-tuned)
+    cursor.execute(
+        "INSERT OR IGNORE INTO system_config (key, value) VALUES ('confluence_gate_threshold', '3.0')"
+    )
+    cursor.execute(
+        "INSERT OR IGNORE INTO system_config (key, value) VALUES ('confluence_gate_tuner_log', '[]')"
+    )
 
     # [NEW] Initial Paper Balance (Seed data)
     now = datetime.now(timezone.utc).isoformat()
@@ -277,6 +284,45 @@ class LocalStateManager:
             raise ValueError(f"Invalid trading mode: {mode}")
         execution_repository.set_system_config("trading_mode", mode)
         logger.info(f"System Config: Trading Mode set to {mode.upper()}")
+
+    def get_confluence_gate_threshold(self) -> float:
+        """Return current confluence gate threshold (default 3.0)."""
+        val = self.get_system_config("confluence_gate_threshold", "3.0")
+        try:
+            return max(1.0, min(5.0, float(val)))
+        except (ValueError, TypeError):
+            return 3.0
+
+    def set_confluence_gate_threshold(self, threshold: float, reason: str = "manual"):
+        """Persist a new confluence gate threshold and log the change."""
+        import json as _json
+        threshold = round(max(1.0, min(5.0, float(threshold))), 1)
+        execution_repository.set_system_config("confluence_gate_threshold", str(threshold))
+
+        # Append to tuner log (keep last 20 entries)
+        raw = self.get_system_config("confluence_gate_tuner_log", "[]")
+        try:
+            log = _json.loads(raw)
+        except Exception:
+            log = []
+        log.append({
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "threshold": threshold,
+            "reason": reason,
+        })
+        execution_repository.set_system_config(
+            "confluence_gate_tuner_log",
+            _json.dumps(log[-20:]),
+        )
+        logger.info(f"Confluence gate threshold → {threshold} ({reason})")
+
+    def get_confluence_gate_tuner_log(self) -> list:
+        import json as _json
+        raw = self.get_system_config("confluence_gate_tuner_log", "[]")
+        try:
+            return _json.loads(raw)
+        except Exception:
+            return []
 
 
     def add_intent(

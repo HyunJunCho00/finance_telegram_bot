@@ -242,8 +242,8 @@ def main() -> None:
     # Prometheus HTTP 서버 (별도 스레드)
     if _PROM_AVAILABLE:
         try:
-            _prom_start(9091)
-            logger.info("Prometheus metrics server started on :9091")
+            _prom_start(9091, addr="127.0.0.1")
+            logger.info("Prometheus metrics server started on 127.0.0.1:9091")
         except Exception as e:
             logger.warning(f"Prometheus server failed to start: {e}")
 

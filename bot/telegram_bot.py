@@ -264,6 +264,18 @@ class TradingBot:
         self.bot_token = settings.TELEGRAM_BOT_TOKEN
         self.chat_id = settings.TELEGRAM_CHAT_ID
 
+    def _is_authorized(self, update: Update) -> bool:
+        """Reject commands from any chat that isn't the configured owner chat."""
+        if not self.chat_id:
+            return True  # No restriction configured — allow (backwards-compatible)
+        sender_id = str(getattr(update.effective_chat, "id", "") or "")
+        return sender_id == str(self.chat_id)
+
+    async def _reject_unauthorized(self, update: Update) -> None:
+        sender_id = getattr(update.effective_chat, "id", "unknown")
+        logger.warning(f"Unauthorized command attempt from chat_id={sender_id}")
+        await update.message.reply_text("Unauthorized.")
+
     async def _send_chat_text(self, chat_id: str, text: str):
         """Send a chunked message to the given chat, preserving Telegram-safe formatting."""
         await self.send_message(chat_id, text)
@@ -348,6 +360,9 @@ class TradingBot:
         return chunks or [text[:limit]]
 
     async def cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         await update.message.reply_text(
             f"Crypto Trading Bot Active\n"
             f"Mode: DUAL (SWING + POSITION)\n"
@@ -367,6 +382,9 @@ class TradingBot:
         )
 
     async def cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         await update.message.reply_text(
             "📚 <b>Available Commands</b>\n\n"
             "/status - Real-time positions & PnL\n"
@@ -555,6 +573,9 @@ class TradingBot:
         return "\n".join(lines)
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         try:
             is_paper = settings.PAPER_TRADING_MODE
 
@@ -663,6 +684,9 @@ class TradingBot:
             await update.message.reply_text(f"Error: {e}")
 
     async def cmd_analyze(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         args = context.args
         valid_bases = settings.trading_symbols_base
         if not args or args[0].upper() not in valid_bases:
@@ -701,6 +725,9 @@ class TradingBot:
             await update.message.reply_text(f"Error: {e}")
 
     async def cmd_evaluate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         args = context.args or []
         if not args:
             await update.message.reply_text(f"Usage: /evaluate {'|'.join(settings.trading_symbols_base)} [hours]")
@@ -727,6 +754,9 @@ class TradingBot:
             await update.message.reply_text(f"Error: {e}")
 
     async def cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         await update.message.reply_text(
             "Mode switching is disabled.\n"
             "Policy is fixed:\n"
@@ -736,6 +766,9 @@ class TradingBot:
         )
 
     async def cmd_daily_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         try:
             summary = await asyncio.to_thread(self._load_daily_precision_summary)
             await update.message.reply_text(
@@ -747,6 +780,9 @@ class TradingBot:
             await update.message.reply_text(f"Error: {e}")
 
     async def cmd_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         try:
             from executors.report_generator import report_generator
 
@@ -763,6 +799,9 @@ class TradingBot:
             await update.message.reply_text(f"Error: {e}")
 
     async def cmd_onchain(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         args = context.args or []
         symbols = settings.trading_symbols
 
@@ -799,6 +838,9 @@ class TradingBot:
             await update.message.reply_text(f"Error: {e}")
 
     async def cmd_report_on(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         from config.local_state import state_manager
         state_manager.set_analysis_enabled(True)
         chat_id = getattr(update.effective_chat, "id", None)
@@ -811,6 +853,9 @@ class TradingBot:
         )
 
     async def cmd_report_off(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         from config.local_state import state_manager
         state_manager.set_analysis_enabled(False)
         await update.message.reply_text(
@@ -819,8 +864,80 @@ class TradingBot:
             parse_mode='HTML',
         )
 
+    async def cmd_gate(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Confluence Gate 현황 조회 및 수동 조정.
+        /gate          → 현재 threshold + 최근 통계
+        /gate 2.5      → threshold 수동 설정 (1.0 ~ 5.0)
+        /gate tune     → 즉시 auto-tune 실행
+        """
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
+
+        from config.local_state import state_manager
+        from executors.gate_tuner import analyze as _gate_analyze, run as _gate_run
+
+        args = context.args or []
+
+        # ── 수동 설정 ──────────────────────────────────────────────
+        if args and args[0].replace(".", "").isdigit():
+            try:
+                new_val = float(args[0])
+                state_manager.set_confluence_gate_threshold(new_val, reason="manual override via /gate")
+                await update.message.reply_text(
+                    f"✅ Confluence Gate threshold → <b>{state_manager.get_confluence_gate_threshold()}</b>",
+                    parse_mode="HTML",
+                )
+            except ValueError:
+                await update.message.reply_text("숫자를 입력하세요. 예: /gate 2.5")
+            return
+
+        # ── 즉시 tune ─────────────────────────────────────────────
+        if args and args[0].lower() == "tune":
+            results = []
+            for sym in settings.trading_symbols:
+                r = await asyncio.to_thread(_gate_run, sym)
+                results.append(f"<b>{sym}</b>: {r.get('reason', '-')}")
+            await update.message.reply_text(
+                "🔧 <b>Gate Auto-Tune 실행</b>\n" + "\n".join(results),
+                parse_mode="HTML",
+            )
+            return
+
+        # ── 현황 조회 ──────────────────────────────────────────────
+        current = state_manager.get_confluence_gate_threshold()
+        log = state_manager.get_confluence_gate_tuner_log()
+
+        lines = [
+            f"⚙️ <b>Confluence Gate</b>",
+            f"현재 threshold: <b>{current}</b> / 범위 1.0~5.0",
+            "",
+        ]
+        for sym in settings.trading_symbols:
+            stats = await asyncio.to_thread(_gate_analyze, sym)
+            wr = f"{stats['win_rate']:.0%}" if stats['win_rate'] is not None else "N/A"
+            hr = f"{stats['hold_rate']:.0%}" if stats['hold_rate'] is not None else "N/A"
+            lines.append(
+                f"<b>{sym}</b> (최근 14일) | "
+                f"진입 {stats['entries']}회 | "
+                f"W{stats['wins']}/L{stats['losses']} | "
+                f"승률 {wr} | HOLD {hr}"
+            )
+
+        if log:
+            lines += ["", "<b>조정 이력 (최근 3건)</b>"]
+            for entry in log[-3:]:
+                ts = entry.get("ts", "")[:16].replace("T", " ")
+                lines.append(f"• {ts} → {entry.get('threshold')} ({entry.get('reason', '')})")
+
+        lines += ["", "명령어: /gate 2.5 (설정) | /gate tune (자동조정)"]
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
     async def cmd_chart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Direct command to get a chart image: /chart [symbol] [swing|position]"""
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         args = context.args
         if not args:
             await update.message.reply_text("Usage: /chart BTC|ETH [swing|position]")
@@ -956,6 +1073,9 @@ class TradingBot:
         """자연어 메시를 Gemini Flash function calling으로 처리.
         분석 리포트(Judge)는 Claude를 유하고, 화형 채팅 비용 Gemini Flash 사용.
         """
+        if not self._is_authorized(update):
+            await self._reject_unauthorized(update)
+            return
         user_text = update.message.text
         if not user_text or user_text.startswith('/'):
             return
@@ -1237,6 +1357,7 @@ class TradingBot:
         app.add_handler(CommandHandler("report_on", self.cmd_report_on))
         app.add_handler(CommandHandler("report_off", self.cmd_report_off))
         app.add_handler(CommandHandler("chart", self.cmd_chart))
+        app.add_handler(CommandHandler("gate", self.cmd_gate))
         app.add_handler(CallbackQueryHandler(self.handle_callback))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
 

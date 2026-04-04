@@ -8,7 +8,7 @@ User=crypto_trader
 WorkingDirectory=/opt/app
 Environment="PYTHONUNBUFFERED=1"
 Environment="USE_SECRET_MANAGER=true"
-Environment="PROJECT_ID=mcpknu"
+Environment="PROJECT_ID="
 Environment="VERTEX_REGION=global"
 ExecStart=/opt/app/venv/bin/python -m mcp_server.server
 Restart=always

@@ -92,6 +92,14 @@ from executors.stats_thresholds import adaptive_std_floor, symbol_liq_min_std_us
 from utils.cooldown import is_on_cooldown, set_cooldown
 from loguru import logger
 import gc
+
+
+def _get_gate_threshold() -> float:
+    """Read current confluence gate threshold from persistent state (default 3.0)."""
+    try:
+        return state_manager.get_confluence_gate_threshold()
+    except Exception:
+        return 3.0
 import hashlib
 import numpy as np
 import pandas as pd
@@ -285,6 +293,9 @@ class AnalysisState(TypedDict):
     macro_context: str
     deribit_context: str
     fear_greed_context: str
+    etf_flow_context: str
+    stablecoin_context: str
+    coinglass_context: str
     active_orders: list
     open_positions: str
     onchain_snapshot: dict
@@ -584,6 +595,21 @@ def node_context_gathering(state: AnalysisState) -> dict:
         try:
             fg = db.get_latest_fear_greed()
             if fg: db_updates["fear_greed_context"] = f"[FEAR&GREED] {fg.get('value')}/100"
+        except Exception: pass
+        try:
+            etf = db.get_latest_narrative_data(symbol, source="etf_flow_farside")
+            if etf and etf.get("summary"):
+                db_updates["etf_flow_context"] = etf["summary"]
+        except Exception: pass
+        try:
+            sc = db.get_latest_narrative_data(symbol, source="stablecoin_defillama")
+            if sc and sc.get("summary"):
+                db_updates["stablecoin_context"] = sc["summary"]
+        except Exception: pass
+        try:
+            cg = db.get_latest_narrative_data(symbol, source="coinglass_positioning")
+            if cg and cg.get("summary"):
+                db_updates["coinglass_context"] = cg["summary"]
         except Exception: pass
 
         return db_updates
@@ -1115,7 +1141,7 @@ def _compute_confluence_score(
         "score": score,
         "direction": direction,
         "factors": active_factors,
-        "gate_passed": score >= 3,
+        "gate_passed": score >= _get_gate_threshold(),
         "long_score": long_score,
         "short_score": short_score,
     }
@@ -2243,6 +2269,9 @@ def _build_full_context(state: AnalysisState) -> str:
         state.get("deribit_context", ""),      # DVOL / PCR / IV term / 25d skew
         state.get("fear_greed_context", ""),   # F&G daily sentiment
         state.get("onchain_context", ""),      # Coin Metrics daily regime overlay
+        state.get("etf_flow_context", ""),     # Farside ETF daily net flows
+        state.get("stablecoin_context", ""),   # USDT/USDC supply (market liquidity)
+        state.get("coinglass_context", ""),    # LSR + OI (institutional positioning)
         state.get("rag_context", ""),
         f"Telegram News:\n{state.get('telegram_news', '')}",
         state.get("feedback_text", ""),
@@ -2690,6 +2719,13 @@ class Orchestrator:
                         _so.maybe_mirror_swing_long(symbol, result if isinstance(result, dict) else {})
                 except Exception as _spot_err:
                     logger.warning(f"Spot mirror hook error for {symbol}: {_spot_err}")
+            # ── Gate Auto-Tuner: 분석 사이클 완료 후 threshold 재평가 ──────────
+            try:
+                from executors.gate_tuner import run as _tune_gate
+                _tune_gate(symbol)
+            except Exception as _gt_err:
+                logger.debug(f"GateTuner skipped: {_gt_err}")
+
             return result
         finally:
             lock.release()
@@ -2854,6 +2890,9 @@ class Orchestrator:
             "macro_context": "",
             "deribit_context": "",
             "fear_greed_context": "",
+            "etf_flow_context": "",
+            "stablecoin_context": "",
+            "coinglass_context": "",
             "active_orders": [],
             "open_positions": "",
             "onchain_snapshot": {},

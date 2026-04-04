@@ -202,7 +202,8 @@ def _salvage_partial_decision(text: str) -> Optional[Dict]:
         upper_text,
     )
     if not decision_match:
-        decision_match = re.search(r"\b(LONG|SHORT|HOLD|CANCEL_AND_CLOSE)\b", upper_text)
+        # Require JSON key context to avoid matching decision words in reasoning text
+        decision_match = re.search(r'"decision"\s*:\s*"(LONG|SHORT|HOLD|CANCEL_AND_CLOSE)"', upper_text)
     if decision_match:
         payload["decision"] = decision_match.group(1).upper()
 

@@ -67,12 +67,29 @@ if ! gcloud iam service-accounts describe "$SA_EMAIL" \
 fi
 
 echo "Granting IAM roles to service account..."
-for role in roles/aiplatform.user roles/secretmanager.secretAccessor \
-            roles/storage.objectAdmin roles/logging.logWriter; do
+# Project-level roles (no resource-level alternative available)
+for role in roles/aiplatform.user roles/secretmanager.secretAccessor roles/logging.logWriter; do
   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
     --member="serviceAccount:${SA_EMAIL}" \
     --role="$role" >/dev/null
 done
+
+# storage.objectAdmin scoped to the specific GCS bucket (not project-wide)
+GCS_BUCKET="${GCS_ARCHIVE_BUCKET:-}"
+if [[ -z "$GCS_BUCKET" ]]; then
+  GCS_BUCKET="$(gcloud secrets versions access latest --secret=GCS_ARCHIVE_BUCKET \
+    --project="$PROJECT_ID" 2>/dev/null || true)"
+fi
+if [[ -n "$GCS_BUCKET" ]]; then
+  echo "Granting storage.objectAdmin on gs://${GCS_BUCKET} only..."
+  gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
+    --member="serviceAccount:${SA_EMAIL}" \
+    --role="roles/storage.objectAdmin" >/dev/null
+else
+  echo "WARNING: GCS_ARCHIVE_BUCKET not found — skipping bucket-level storage IAM binding."
+  echo "         Run manually after deploy: gcloud storage buckets add-iam-policy-binding gs://<bucket> \\"
+  echo "           --member=serviceAccount:${SA_EMAIL} --role=roles/storage.objectAdmin"
+fi
 
 # ─── Startup script ───────────────────────────────────────────────────────
 STARTUP_SCRIPT='#!/bin/bash
@@ -162,6 +179,41 @@ if [[ -z "$ZONE_USED" ]]; then
   echo "ERROR: All zone/machine combinations exhausted. Try again later or add more candidates."
   exit 1
 fi
+
+# ─── Firewall: restrict SSH to Cloud IAP only, block direct internet SSH ──────
+# Step 1: DENY direct SSH from the internet for crypto-trading tagged VMs
+#   Priority 900 < default-allow-ssh priority 65534, so this takes precedence.
+DENY_RULE="deny-ssh-internet-crypto-trading"
+if ! gcloud compute firewall-rules describe "$DENY_RULE" --project="$PROJECT_ID" &>/dev/null; then
+  echo "Creating DENY rule: block direct internet SSH for crypto-trading VMs..."
+  gcloud compute firewall-rules create "$DENY_RULE" \
+    --project="$PROJECT_ID" \
+    --network=default \
+    --action=DENY \
+    --rules=tcp:22 \
+    --source-ranges="0.0.0.0/0" \
+    --target-tags="crypto-trading" \
+    --priority=900 \
+    --description="Block direct SSH from internet for crypto-trading VMs" >/dev/null
+fi
+
+# Step 2: ALLOW SSH only from Cloud IAP IP range (priority 800, wins over DENY at 900)
+ALLOW_RULE="allow-ssh-iap-crypto-trading"
+if ! gcloud compute firewall-rules describe "$ALLOW_RULE" --project="$PROJECT_ID" &>/dev/null; then
+  echo "Creating ALLOW rule: SSH from Cloud IAP only..."
+  gcloud compute firewall-rules create "$ALLOW_RULE" \
+    --project="$PROJECT_ID" \
+    --network=default \
+    --action=ALLOW \
+    --rules=tcp:22 \
+    --source-ranges="35.235.240.0/20" \
+    --target-tags="crypto-trading" \
+    --priority=800 \
+    --description="Allow SSH from Cloud IAP tunnel only" >/dev/null
+fi
+
+echo "SSH is now IAP-only. Connect with:"
+echo "  gcloud compute ssh $INSTANCE_NAME --zone=$ZONE_USED --tunnel-through-iap"
 
 echo ""
 echo "Instance created!"

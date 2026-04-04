@@ -10,6 +10,9 @@ from collectors.deribit_collector import deribit_collector
 from collectors.fear_greed_collector import fear_greed_collector
 from collectors.crypto_news_collector import collector as news_collector
 from collectors.coinmetrics_collector import coinmetrics_collector
+from collectors.etf_flow_collector import etf_flow_collector
+from collectors.stablecoin_collector import stablecoin_collector
+from collectors.coinglass_collector import coinglass_collector
 from executors.orchestrator import orchestrator
 from evaluators.feedback_generator import feedback_generator
 from evaluators.evaluation_rollup import evaluation_rollup_service
@@ -786,6 +789,34 @@ def job_daily_coinmetrics():
         coinmetrics_collector.run()
     except Exception as e:
         logger.error(f"Coin Metrics daily job error: {e}")
+
+
+def job_daily_etf_flow():
+    """Scrape Farside Investors for daily BTC/ETH ETF net flow data."""
+    try:
+        etf_flow_collector.run()
+    except Exception as e:
+        logger.error(f"ETF flow collection job error: {e}")
+
+
+def job_daily_stablecoin():
+    """Fetch USDT/USDC circulating supply from DefiLlama (free)."""
+    try:
+        stablecoin_collector.run()
+    except Exception as e:
+        logger.error(f"Stablecoin collection job error: {e}")
+
+
+def job_4hour_coinglass():
+    """Fetch CoinGlass LSR + OI (requires COINGLASS_API_KEY)."""
+    try:
+        if not getattr(settings, "COINGLASS_ENABLED", True):
+            return
+        if not getattr(settings, "COINGLASS_API_KEY", ""):
+            return
+        coinglass_collector.run()
+    except Exception as e:
+        logger.error(f"CoinGlass collection job error: {e}")
 
 
 def job_routine_market_status():
@@ -1575,8 +1606,8 @@ def main():
 
     if _SCHED_PROM:
         try:
-            _prom_start(9090)
-            logger.info("Prometheus metrics server started on :9090")
+            _prom_start(9090, addr="127.0.0.1")
+            logger.info("Prometheus metrics server started on 127.0.0.1:9090")
         except Exception as e:
             logger.warning(f"Prometheus server failed to start: {e}")
 
@@ -1717,6 +1748,30 @@ def main():
         job_daily_coinmetrics,
         CronTrigger(hour=3, minute=12),
         id='job_daily_coinmetrics',
+        max_instances=1
+    )
+
+    # Farside ETF flow - daily at 06:00 UTC (Farside updates after US market close)
+    scheduler_config.scheduler.add_job(
+        job_daily_etf_flow,
+        CronTrigger(hour=6, minute=0),
+        id='job_daily_etf_flow',
+        max_instances=1
+    )
+
+    # Stablecoin supply - daily at 06:15 UTC
+    scheduler_config.scheduler.add_job(
+        job_daily_stablecoin,
+        CronTrigger(hour=6, minute=15),
+        id='job_daily_stablecoin',
+        max_instances=1
+    )
+
+    # CoinGlass LSR + OI - every 4h (aligned with analysis cycle)
+    scheduler_config.scheduler.add_job(
+        job_4hour_coinglass,
+        CronTrigger(hour='0,4,8,12,16,20', minute=30),
+        id='job_4hour_coinglass',
         max_instances=1
     )
 

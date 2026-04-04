@@ -6,11 +6,11 @@ Wants=scheduler.service
 
 [Service]
 Type=simple
-User=qkdtoddl1
+User=crypto_trader
 WorkingDirectory=/opt/app
 Environment="PYTHONUNBUFFERED=1"
 Environment="USE_SECRET_MANAGER=true"
-Environment="PROJECT_ID=mcpknu"
+Environment="PROJECT_ID="
 Environment="VERTEX_REGION=global"
 Environment="ENABLE_GCS_ARCHIVE=true"
 ExecStart=/opt/app/venv/bin/python execution_main.py

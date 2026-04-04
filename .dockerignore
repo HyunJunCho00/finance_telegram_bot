@@ -1,0 +1,49 @@
+# Secrets
+.env
+.env.local
+*.session
+*.session-journal
+credentials.json
+service-account-key.json
+
+# Runtime data
+data/
+logs/
+*.log
+*.sqlite
+*.db
+charts/
+tmp/
+
+# Dev environment
+venv/
+ENV/
+env/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# CI / tooling
+.pytest_cache/
+.coverage
+htmlcov/
+.claude/
+
+# Personal notes
+notes_*.md
+INTERVIEW_PREP.md
+COMMANDS.md
+ACID_FINANCE_HARDENING.md

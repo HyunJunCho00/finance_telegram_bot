@@ -82,6 +82,21 @@ upsert_secret() {
       --project "$PROJECT_ID" \
       --data-file=- >/dev/null
     echo "Updated secret version: $key"
+
+    # Disable all previously ENABLED versions (keep only the latest)
+    local old_versions
+    old_versions="$(gcloud secrets versions list "$key" \
+      --project "$PROJECT_ID" \
+      --filter="state=ENABLED" \
+      --format="value(name)" \
+      --sort-by="~createTime" 2>/dev/null | tail -n +2)"
+    if [[ -n "$old_versions" ]]; then
+      while IFS= read -r ver; do
+        gcloud secrets versions disable "$ver" --secret="$key" \
+          --project "$PROJECT_ID" >/dev/null 2>&1 && \
+          echo "  Disabled old version: $ver"
+      done <<< "$old_versions"
+    fi
   else
     printf "%s" "$value" | gcloud secrets create "$key" \
       --project "$PROJECT_ID" \

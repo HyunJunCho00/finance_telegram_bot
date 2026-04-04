@@ -137,6 +137,16 @@ def _download_session_from_secret_manager(local_path: str) -> bool:
     except:
         return False
 
+_GCS_SESSION_HMAC_OBJECT = _GCS_SESSION_OBJECT + ".hmac"
+
+
+def _session_hmac(data: bytes) -> str:
+    import hmac as _hmac
+    import hashlib
+    key = (settings.TELEGRAM_API_HASH or "").encode()
+    return _hmac.new(key, data, hashlib.sha256).hexdigest()
+
+
 def _download_session_from_gcs(local_path: str) -> bool:
     bucket_name = settings.GCS_ARCHIVE_BUCKET
     if not bucket_name: return False
@@ -144,14 +154,29 @@ def _download_session_from_gcs(local_path: str) -> bool:
         import zlib
         from google.cloud import storage
         client = storage.Client(project=settings.PROJECT_ID or None)
-        blob = client.bucket(bucket_name).blob(_GCS_SESSION_OBJECT)
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(_GCS_SESSION_OBJECT)
         if not blob.exists(): return False
-        session_bytes = zlib.decompress(blob.download_as_bytes())
+        compressed = blob.download_as_bytes()
+
+        # Verify HMAC integrity before writing to disk
+        hmac_blob = bucket.blob(_GCS_SESSION_HMAC_OBJECT)
+        if hmac_blob.exists():
+            expected_hmac = hmac_blob.download_as_text().strip()
+            import hmac as _hmac
+            if not _hmac.compare_digest(expected_hmac, _session_hmac(compressed)):
+                logger.error("Session file HMAC mismatch — possible tampering, aborting download")
+                return False
+        else:
+            logger.warning("No HMAC file found for session — skipping integrity check (first run)")
+
+        session_bytes = zlib.decompress(compressed)
         with open(local_path, 'wb') as f:
             f.write(session_bytes)
         logger.info("Session downloaded from GCS")
         return True
-    except:
+    except Exception as e:
+        logger.warning(f"GCS session download failed: {e}")
         return False
 
 def upload_session_to_cloud():
@@ -170,6 +195,9 @@ def upload_session_to_cloud():
             client = storage.Client(project=settings.PROJECT_ID or None)
             blob = client.bucket(bucket_name).blob(_GCS_SESSION_OBJECT)
             blob.upload_from_string(compressed, content_type="application/octet-stream")
+            # Store HMAC alongside so downloads can verify integrity
+            hmac_blob = client.bucket(bucket_name).blob(_GCS_SESSION_HMAC_OBJECT)
+            hmac_blob.upload_from_string(_session_hmac(compressed), content_type="text/plain")
             logger.info("Session backed up to GCS")
         except Exception as e:
             logger.warning(f"GCS backup failed: {e}")
@@ -426,12 +454,18 @@ class TelegramListener:
             return
 
         sources = list(set([m['source'] for m in filtered_batch]))
-        full_text = "\n---\n".join([f"[{m['source']}]: {m['text']}" for m in filtered_batch])
+        # Wrap each message as a JSON object to prevent prompt injection via raw text
+        import json as _json
+        messages_json = _json.dumps(
+            [{"source": m["source"], "text": m["text"][:1000]} for m in filtered_batch],
+            ensure_ascii=False,
+        )
+        full_text = messages_json
         try:
             extraction = await asyncio.to_thread(
                 ai_client.generate_response,
                 system_prompt=ALPHA_EXTRACTION_PROMPT.format(sources=", ".join(sources), signal_type="REAL-TIME_ALPHA"),
-                user_message=f"Current market alerts:\n\n{full_text}",
+                user_message=f"Current market alerts (JSON array):\n\n{full_text}",
                 role="rag_extraction", temperature=0.1
             )
             if extraction and len(extraction) > 20:
@@ -460,7 +494,8 @@ class TelegramListener:
             if result and "TREND:" in result:
                 lines = [ln.strip() for ln in result.splitlines() if ln.strip().startswith(("LABELS:", "TREND:", "MISMATCH:"))]
                 return " | ".join(lines) if len(lines) >= 2 else ""
-        except: pass
+        except Exception as e:
+            logger.warning(f"Chart VLM analysis failed for [{channel_name}]: {type(e).__name__}: {e}")
         return ""
 
 telegram_listener = TelegramListener()
