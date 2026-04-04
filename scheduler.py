@@ -808,15 +808,11 @@ def job_daily_stablecoin():
 
 
 def job_4hour_coinglass():
-    """Fetch CoinGlass LSR + OI (requires COINGLASS_API_KEY)."""
+    """Fetch Binance Futures LSR + OI (public API, no key required)."""
     try:
-        if not getattr(settings, "COINGLASS_ENABLED", True):
-            return
-        if not getattr(settings, "COINGLASS_API_KEY", ""):
-            return
         coinglass_collector.run()
     except Exception as e:
-        logger.error(f"CoinGlass collection job error: {e}")
+        logger.error(f"Binance positioning collection job error: {e}")
 
 
 def job_routine_market_status():

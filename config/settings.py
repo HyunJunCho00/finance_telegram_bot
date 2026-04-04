@@ -118,11 +118,6 @@ class Settings(BaseSettings):
     # No API key required - free public REST API
     DERIBIT_ENABLED: bool = True
 
-    # CoinGlass API (institutional positioning: LSR, OI)
-    # Free tier: 100 req/day — sign up at https://www.coinglass.com/pricing
-    COINGLASS_API_KEY: str = ""
-    COINGLASS_ENABLED: bool = True
-
     # Dune API (on-chain/DEX macro signals)
     DUNE_API_KEY: str = ""
     DUNE_ENABLED: bool = True
