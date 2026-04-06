@@ -1103,19 +1103,72 @@ def _compute_confluence_score(
         else:
             long_factors.append("volume_breakout")
 
-    # 7. Confirmed Liquidity Sweep (쉽알남 Trap 패턴) — 2점짜리 팩터
-    # Sweep은 방향(bias_after_sweep) + 진입 트리거를 동시에 제공하므로 2점으로 카운트.
-    # active_setup.side 없이 sweep만 단독으로 터진 경우(완전 무방향) → 2점이지만
-    # active_setup(1) + sweep(2) = 3점 → gate 오픈이 실제 목표 시나리오.
+    # 7. Trap 패턴 — 우선순위: channel_trap > amd > liquidity_sweep
+    # 쉽알남 Trap 원칙: 방향(bias) + 진입 트리거 동시 제공 → 2점 가중치
     trap_context = active_setup.get("trap_context", {}) or {}
     if trap_context.get("confirmed"):
-        bias_after = str(trap_context.get("bias_after_sweep", "")).upper()
+        # channel_trap / amd_structure 는 bias_after_trap / bias_after_amd
+        # liquidity_sweep 은 bias_after_sweep
+        bias_after = str(
+            trap_context.get("bias_after_trap")
+            or trap_context.get("bias_after_amd")
+            or trap_context.get("bias_after_sweep")
+            or ""
+        ).upper()
+        trap_kind = str(trap_context.get("status") or trap_context.get("phase") or "trap")
+
         if bias_after == "LONG":
-            long_factors.append("liquidity_sweep_confirmed")
-            long_factors.append("liquidity_sweep_confirmed_2")   # 2점 가중치
+            long_factors.append(f"{trap_kind}_confirmed")
+            long_factors.append(f"{trap_kind}_confirmed_2")    # 2점 가중치
         elif bias_after == "SHORT":
-            short_factors.append("liquidity_sweep_confirmed")
-            short_factors.append("liquidity_sweep_confirmed_2")  # 2점 가중치
+            short_factors.append(f"{trap_kind}_confirmed")
+            short_factors.append(f"{trap_kind}_confirmed_2")   # 2점 가중치
+
+    # 8. AMD 구조 단독 (distributing 상태지만 trap_context에 미반영된 경우 보완)
+    liquidity_map = scenario_engine.get("liquidity_map", {}) or {}
+    amd = liquidity_map.get("amd_structure", {}) or {}
+    if amd.get("confirmed") and amd.get("phase") == "distributing":
+        bias_amd = str(amd.get("bias_after_amd", "")).upper()
+        factor_key = "amd_distributing"
+        if bias_amd == "LONG" and factor_key not in long_factors:
+            long_factors.append(factor_key)
+        elif bias_amd == "SHORT" and factor_key not in short_factors:
+            short_factors.append(factor_key)
+
+    # 9. Channel Trap 단독 (trap_context에 미반영된 경우 보완)
+    ch_trap = liquidity_map.get("channel_trap", {}) or {}
+    if ch_trap.get("confirmed"):
+        bias_ct = str(ch_trap.get("bias_after_trap", "")).upper()
+        factor_key = "channel_trap_confirmed"
+        if bias_ct == "LONG" and factor_key not in long_factors:
+            long_factors.append(factor_key)
+        elif bias_ct == "SHORT" and factor_key not in short_factors:
+            short_factors.append(factor_key)
+
+    # 10. High-importance OB/FVG (쉽알남: 중요 구간의 OB/FVG만 유효)
+    ict_scored = scenario_engine.get("ict_scored_levels", {}) or {}
+    for tf_obs in (ict_scored.get("order_blocks", {}) or {}).values():
+        for ob in (tf_obs or []):
+            if int(ob.get("importance_score", 0)) >= 70 and not ob.get("fully_mitigated"):
+                ob_low  = float(ob.get("bottom", 0))
+                ob_high = float(ob.get("top", 0))
+                if ob_low < current_price < ob_high:   # price is inside the OB
+                    ob_type = str(ob.get("type", "")).upper()
+                    if ob_type == "BULLISH":
+                        long_factors.append("high_importance_ob")
+                    elif ob_type == "BEARISH":
+                        short_factors.append("high_importance_ob")
+    for tf_fvgs in (ict_scored.get("fvg", {}) or {}).values():
+        for gap in (tf_fvgs or []):
+            if int(gap.get("importance_score", 0)) >= 70 and not gap.get("fully_filled"):
+                gl = float(gap.get("gap_low", 0))
+                gh = float(gap.get("gap_high", 0))
+                if gl < current_price < gh:
+                    gtype = str(gap.get("type", "")).lower()
+                    if gtype == "bullish":
+                        long_factors.append("high_importance_fvg")
+                    elif gtype == "bearish":
+                        short_factors.append("high_importance_fvg")
 
     # Deduplicate while preserving order
     long_factors = list(dict.fromkeys(long_factors))

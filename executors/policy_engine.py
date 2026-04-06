@@ -180,6 +180,23 @@ class PolicyEngine:
             if fvg_match:
                 break
 
+        # Order Block confluence check (unmitigated OB zone contains entry price)
+        ob_match = False
+        for _, obs in (market_data.get("order_blocks", {}) or {}).items():
+            for ob in obs or []:
+                if ob.get("fully_mitigated"):
+                    continue
+                ob_low  = self._safe_float(ob.get("bottom"))
+                ob_high = self._safe_float(ob.get("top"))
+                if ob_low is None or ob_high is None:
+                    continue
+                if (ob_low - tolerance) <= entry_price <= (ob_high + tolerance):
+                    ob_match = True
+                    matched_sources.add("order_block")
+                    break
+            if ob_match:
+                break
+
         return {
             "passed": len(matched_sources) >= 2,
             "matched_sources": sorted(matched_sources),
@@ -207,6 +224,12 @@ class PolicyEngine:
                     gap_low = self._safe_float(gap.get("gap_low"))
                     if gap_low is not None and gap_low < entry_price:
                         candidates.append(("bullish_fvg", gap_low))
+            # Bullish OB bottom as stop anchor (stop goes below OB zone)
+            for ob in (market_data.get("order_blocks", {}) or {}).get(primary_tf, []) or []:
+                if str(ob.get("type")) == "BULLISH" and not ob.get("fully_mitigated"):
+                    ob_bottom = self._safe_float(ob.get("bottom"))
+                    if ob_bottom is not None and ob_bottom < entry_price:
+                        candidates.append(("bullish_ob", ob_bottom))
             if candidates:
                 basis, base_price = max(candidates, key=lambda item: item[1])
                 stop_price = max(0.0, base_price - atr_buffer)
@@ -228,6 +251,12 @@ class PolicyEngine:
                     gap_high = self._safe_float(gap.get("gap_high"))
                     if gap_high is not None and gap_high > entry_price:
                         candidates.append(("bearish_fvg", gap_high))
+            # Bearish OB top as stop anchor (stop goes above OB zone)
+            for ob in (market_data.get("order_blocks", {}) or {}).get(primary_tf, []) or []:
+                if str(ob.get("type")) == "BEARISH" and not ob.get("fully_mitigated"):
+                    ob_top = self._safe_float(ob.get("top"))
+                    if ob_top is not None and ob_top > entry_price:
+                        candidates.append(("bearish_ob", ob_top))
             if candidates:
                 basis, base_price = min(candidates, key=lambda item: item[1])
                 stop_price = base_price + atr_buffer

@@ -335,47 +335,134 @@ class MathEngine:
     # --------------------- Order Blocks ---------------------
 
     def calculate_macro_order_blocks(self, df: pd.DataFrame, count: int = 3) -> List[Dict]:
-        """Identify Institutional Order Blocks (OB).
-        Bullish OB: The last bearish candle before a strong bullish break of structure.
-        Bearish OB: The last bullish candle before a strong bearish break of structure.
+        """Identify ICT Order Blocks (OB).
+
+        ICT definition:
+        - Bullish OB : the last BEARISH candle immediately before the impulse move
+                       that caused a bullish MSB (close above a swing high).
+        - Bearish OB : the last BULLISH candle immediately before the impulse move
+                       that caused a bearish MSB (close below a swing low).
+
+        The OB zone spans the full wick of that candle (high→low).
+        Body zone (open/close) is also provided for tighter entries.
+
+        Mitigation:
+        - Bullish OB is mitigated when a subsequent candle's LOW trades into the zone.
+        - Bearish OB is mitigated when a subsequent candle's HIGH trades into the zone.
+        - fully_mitigated = price closed beyond the far edge of the OB zone.
         """
         try:
-            if len(df) < 20: return []
-            
-            obs = []
-            # Simplified OB detection: Look for 'Engulfing' style breakouts from local pivots
-            # Bullish Breakout: Close crosses above a recent pivot high
-            _, max_pivots = self.find_pivot_points(df, order=5)
-            
-            for i in range(2, len(df) - 1):
-                # Potential Bullish OB: Candle i-1 was Red, Candle i is Green and strong
-                if df.iloc[i]['close'] > df.iloc[i]['open'] and df.iloc[i-1]['close'] < df.iloc[i-1]['open']:
-                    # Strong breakout condition: current close > previous high AND move is > 1.5%
-                    move_size = (df.iloc[i]['close'] - df.iloc[i]['open']) / df.iloc[i]['open']
-                    if move_size > 0.015:
-                        obs.append({
-                            'type': 'BULLISH',
-                            'top': float(df.iloc[i-1]['high']),
-                            'bottom': float(df.iloc[i-1]['low']),
-                            'timestamp': df.index[i-1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[i-1]['timestamp'],
-                            'strength': move_size
-                        })
-                
-                # Potential Bearish OB
-                if df.iloc[i]['close'] < df.iloc[i]['open'] and df.iloc[i-1]['close'] > df.iloc[i-1]['open']:
-                    move_size = (df.iloc[i]['open'] - df.iloc[i]['close']) / df.iloc[i]['open']
-                    if move_size > 0.015:
-                        obs.append({
-                            'type': 'BEARISH',
-                            'top': float(df.iloc[i-1]['high']),
-                            'bottom': float(df.iloc[i-1]['low']),
-                            'timestamp': df.index[i-1] if isinstance(df.index, pd.DatetimeIndex) else df.iloc[i-1]['timestamp'],
-                            'strength': move_size
-                        })
-            
-            # Filter for most recent and strongest
-            obs = sorted(obs, key=lambda x: x['timestamp'], reverse=True)
-            return obs[:count*2] # Return a few of each
+            if len(df) < 20:
+                return []
+
+            working = df.tail(min(len(df), 400)).reset_index(drop=True)
+            highs  = working['high'].astype(float).values
+            lows   = working['low'].astype(float).values
+            closes = working['close'].astype(float).values
+            opens  = working['open'].astype(float).values
+            n      = len(working)
+
+            order = max(3, min(10, n // 15))
+            min_idx = argrelextrema(lows,  np.less,    order=order)[0]
+            max_idx = argrelextrema(highs, np.greater, order=order)[0]
+
+            obs: List[Dict] = []
+
+            # ── Bullish OBs: MSB = close above a swing high ─────────────────
+            for pivot_i in max_idx:
+                swing_high = float(highs[pivot_i])
+                # Search for the first candle AFTER the pivot that closes above it
+                search_end = min(pivot_i + order * 4, n)
+                for j in range(pivot_i + 1, search_end):
+                    if closes[j] > swing_high:
+                        # j is the impulse candle. Walk back to find the last bearish candle.
+                        for k in range(j - 1, max(j - 25, -1), -1):
+                            if closes[k] < opens[k]:          # bearish (red) candle
+                                ob_high   = float(highs[k])
+                                ob_low    = float(lows[k])
+                                body_top  = float(opens[k])   # open > close for bearish
+                                body_bot  = float(closes[k])
+                                # Mitigation check against all subsequent candles
+                                mitigated      = False
+                                fully_mitigated = False
+                                for m in range(k + 1, n):
+                                    if lows[m] <= ob_high:         # wick entered zone
+                                        mitigated = True
+                                        if lows[m] <= ob_low:      # wick fully through zone
+                                            fully_mitigated = True
+                                        break
+                                obs.append({
+                                    'type':            'BULLISH',
+                                    'top':             round(ob_high, 2),
+                                    'bottom':          round(ob_low, 2),
+                                    'body_top':        round(body_top, 2),
+                                    'body_bottom':     round(body_bot, 2),
+                                    'msb_level':       round(swing_high, 2),
+                                    'candle_idx':      int(k),
+                                    'candles_ago':     n - 1 - k,
+                                    'mitigated':       mitigated,
+                                    'fully_mitigated': fully_mitigated,
+                                    'strength':        round((closes[j] - swing_high) / swing_high, 4),
+                                    'timestamp':       working.iloc[k].get('timestamp') if 'timestamp' in working.columns else None,
+                                })
+                                break
+                        break   # one OB per pivot
+
+            # ── Bearish OBs: MSB = close below a swing low ──────────────────
+            for pivot_i in min_idx:
+                swing_low = float(lows[pivot_i])
+                search_end = min(pivot_i + order * 4, n)
+                for j in range(pivot_i + 1, search_end):
+                    if closes[j] < swing_low:
+                        for k in range(j - 1, max(j - 25, -1), -1):
+                            if closes[k] > opens[k]:          # bullish (green) candle
+                                ob_high   = float(highs[k])
+                                ob_low    = float(lows[k])
+                                body_top  = float(closes[k])  # close > open for bullish
+                                body_bot  = float(opens[k])
+                                mitigated      = False
+                                fully_mitigated = False
+                                for m in range(k + 1, n):
+                                    if highs[m] >= ob_low:        # wick entered zone
+                                        mitigated = True
+                                        if highs[m] >= ob_high:   # wick fully through zone
+                                            fully_mitigated = True
+                                        break
+                                obs.append({
+                                    'type':            'BEARISH',
+                                    'top':             round(ob_high, 2),
+                                    'bottom':          round(ob_low, 2),
+                                    'body_top':        round(body_top, 2),
+                                    'body_bottom':     round(body_bot, 2),
+                                    'msb_level':       round(swing_low, 2),
+                                    'candle_idx':      int(k),
+                                    'candles_ago':     n - 1 - k,
+                                    'mitigated':       mitigated,
+                                    'fully_mitigated': fully_mitigated,
+                                    'strength':        round((swing_low - closes[j]) / swing_low, 4),
+                                    'timestamp':       working.iloc[k].get('timestamp') if 'timestamp' in working.columns else None,
+                                })
+                                break
+                        break
+
+            # Prefer unmitigated, sort by recency, deduplicate overlapping zones
+            unmitigated = [ob for ob in obs if not ob['fully_mitigated']]
+            pool = unmitigated if unmitigated else obs
+            pool.sort(key=lambda x: x['candle_idx'], reverse=True)
+
+            deduped: List[Dict] = []
+            for ob in pool:
+                overlap = any(
+                    ob['type'] == ex['type']
+                    and ob['bottom'] < ex['top']
+                    and ob['top'] > ex['bottom']
+                    for ex in deduped
+                )
+                if not overlap:
+                    deduped.append(ob)
+
+            return deduped[: count * 2]
+
         except Exception as e:
             logger.error(f"Order Block calculation error: {e}")
             return []
@@ -799,55 +886,89 @@ class MathEngine:
 
     def calculate_fvg(self, df: pd.DataFrame, max_gaps: int = 5, mode: TradingMode = TradingMode.SWING) -> List[Dict]:
         """Detect Fair Value Gaps (3-candle imbalance zones).
-        FVG = gap between candle 1's wick and candle 3's wick.
-        Unfilled FVGs act as magnets for price return."""
+        FVG = gap between candle[i].high and candle[i+2].low  (bullish)
+                        candle[i].low  and candle[i+2].high (bearish)
+
+        Mitigation logic (ICT standard):
+        - Bullish FVG is mitigated when any subsequent LOW trades INTO the gap zone
+          (price doesn't need to close inside — a wick touch is sufficient).
+        - Bearish FVG is mitigated when any subsequent HIGH trades INTO the gap zone.
+        - fully_filled = the gap zone was completely covered by a wick/close.
+        """
         if len(df) < 3:
             return []
 
-        fvgs = []
         highs = df['high'].astype(float).values
         lows = df['low'].astype(float).values
-        current_price = float(df.iloc[-1]['close'])
-        
-        min_gap_pct = 0.0
+        closes = df['close'].astype(float).values
+        current_price = float(closes[-1])
+        n = len(df)
+        total_candles = n
 
-        for i in range(len(df) - 2):
-            # Bullish FVG: candle3.low > candle1.high (gap up)
+        fvgs = []
+        for i in range(n - 2):
+            # ── Bullish FVG: candle[i+2].low > candle[i].high ──────────────
             if lows[i + 2] > highs[i]:
-                gap_low = highs[i]
-                gap_high = lows[i + 2]
+                gap_low = float(highs[i])
+                gap_high = float(lows[i + 2])
                 gap_pct = (gap_high - gap_low) / gap_low * 100
-                if gap_pct >= min_gap_pct:
-                    # Check if unfilled (current price hasn't fully entered the gap)
-                    filled = bool(current_price <= gap_high and current_price >= gap_low)
-                    fvgs.append({
-                        'type': 'bullish',
-                        'gap_low': round(gap_low, 2),
-                        'gap_high': round(gap_high, 2),
-                        'gap_size_pct': round(gap_pct, 4),
-                        'filled': filled,
-                        'candle_idx': i + 1,
-                    })
+                if gap_pct < 0.05:          # ignore micro-gaps < 0.05 %
+                    continue
+                # Mitigation: any candle AFTER the FVG whose low trades into the zone
+                mitigated = False
+                fully_filled = False
+                for m in range(i + 3, n):
+                    if lows[m] <= gap_high:       # wick entered the gap
+                        mitigated = True
+                        if lows[m] <= gap_low:    # wick fully crossed the gap
+                            fully_filled = True
+                        break
+                candles_ago = total_candles - 1 - (i + 1)
+                fvgs.append({
+                    'type': 'bullish',
+                    'gap_low': round(gap_low, 2),
+                    'gap_high': round(gap_high, 2),
+                    'gap_mid': round((gap_low + gap_high) / 2, 2),
+                    'gap_size_pct': round(gap_pct, 4),
+                    'mitigated': mitigated,
+                    'fully_filled': fully_filled,
+                    'candles_ago': candles_ago,
+                    'candle_idx': i + 1,
+                })
 
-            # Bearish FVG: candle3.high < candle1.low (gap down)
+            # ── Bearish FVG: candle[i+2].high < candle[i].low ──────────────
             if highs[i + 2] < lows[i]:
-                gap_high = lows[i]
-                gap_low = highs[i + 2]
+                gap_high = float(lows[i])
+                gap_low = float(highs[i + 2])
                 gap_pct = (gap_high - gap_low) / gap_low * 100
-                if gap_pct >= min_gap_pct:
-                    filled = bool(current_price >= gap_low and current_price <= gap_high)
-                    fvgs.append({
-                        'type': 'bearish',
-                        'gap_low': round(gap_low, 2),
-                        'gap_high': round(gap_high, 2),
-                        'gap_size_pct': round(gap_pct, 4),
-                        'filled': filled,
-                        'candle_idx': i + 1,
-                    })
+                if gap_pct < 0.05:
+                    continue
+                mitigated = False
+                fully_filled = False
+                for m in range(i + 3, n):
+                    if highs[m] >= gap_low:       # wick entered the gap
+                        mitigated = True
+                        if highs[m] >= gap_high:  # wick fully crossed the gap
+                            fully_filled = True
+                        break
+                candles_ago = total_candles - 1 - (i + 1)
+                fvgs.append({
+                    'type': 'bearish',
+                    'gap_low': round(gap_low, 2),
+                    'gap_high': round(gap_high, 2),
+                    'gap_mid': round((gap_low + gap_high) / 2, 2),
+                    'gap_size_pct': round(gap_pct, 4),
+                    'mitigated': mitigated,
+                    'fully_filled': fully_filled,
+                    'candles_ago': candles_ago,
+                    'candle_idx': i + 1,
+                })
 
-        # Return most recent unfilled gaps first
-        unfilled = [g for g in fvgs if not g['filled']]
-        return unfilled[-max_gaps:] if unfilled else fvgs[-max_gaps:]
+        # Prefer unmitigated, most recent first
+        unmitigated = [g for g in fvgs if not g['mitigated']]
+        pool = unmitigated if unmitigated else fvgs
+        pool.sort(key=lambda x: x['candle_idx'], reverse=True)
+        return pool[:max_gaps]
 
     # ----------- Swing High/Low (Liquidity Levels) -----------
 
@@ -926,35 +1047,68 @@ class MathEngine:
             prev_swing_high      = round(float(high[max_idx[-2]]), 2)
             prev_swing_low       = round(float(low[min_idx[-2]]),  2)
 
-            # CHoCH: first counter-trend swing
+            # ── CHoCH: first counter-trend swing ─────────────────────────────
+            # CHoCH is the FIRST sign of reversal — price makes its first
+            # lower-low (in uptrend) or higher-high (in downtrend).
+            # We record the candle index so OB logic can reference it.
             choch = None
-            if structure == 'uptrend' and recent_lows[-1] < recent_lows[-2]:
+            choch_candle_idx = None
+            if structure == 'uptrend' and len(min_idx) >= 2 and recent_lows[-1] < recent_lows[-2]:
+                choch_candle_idx = int(min_idx[-1])
                 choch = {
-                    'type': 'bearish_choch',
-                    'price': round(recent_lows[-1], 2),
-                    'note': 'First LL in uptrend  early reversal warning',
+                    'type':       'bearish_choch',
+                    'price':      round(recent_lows[-1], 2),
+                    'candle_idx': choch_candle_idx,
+                    'candles_ago': len(working_df) - 1 - choch_candle_idx,
+                    'note':       'First LL in uptrend -> early reversal warning',
                 }
-            elif structure == 'downtrend' and recent_highs[-1] > recent_highs[-2]:
+            elif structure == 'downtrend' and len(max_idx) >= 2 and recent_highs[-1] > recent_highs[-2]:
+                choch_candle_idx = int(max_idx[-1])
                 choch = {
-                    'type': 'bullish_choch',
-                    'price': round(recent_highs[-1], 2),
-                    'note': 'First HH in downtrend  early reversal warning',
+                    'type':       'bullish_choch',
+                    'price':      round(recent_highs[-1], 2),
+                    'candle_idx': choch_candle_idx,
+                    'candles_ago': len(working_df) - 1 - choch_candle_idx,
+                    'note':       'First HH in downtrend -> early reversal warning',
                 }
 
-            # MSB: price already through last key level
+            # ── MSB: confirmed structural break ──────────────────────────────
+            # MSB fires when price CLOSES beyond the last swing level,
+            # confirming the trend has flipped (stronger than CHoCH).
+            # We scan back to find exactly when the break candle closed,
+            # providing candle_idx for downstream OB/trap analysis.
             msb = None
-            if structure == 'uptrend' and current_price < last_swing_low:
-                msb = {
-                    'type': 'bearish_msb',
-                    'broken_level': last_swing_low,
-                    'note': 'Price broke below last swing low  structure break',
-                }
-            elif structure == 'downtrend' and current_price > last_swing_high:
-                msb = {
-                    'type': 'bullish_msb',
-                    'broken_level': last_swing_high,
-                    'note': 'Price broke above last swing high  structure break',
-                }
+            msb_candle_idx = None
+
+            # Bearish MSB in uptrend: close below last_swing_low
+            if structure == 'uptrend':
+                for idx in range(len(working_df) - 1, -1, -1):
+                    if close[idx] < last_swing_low:
+                        msb_candle_idx = idx
+                        break
+                if msb_candle_idx is not None:
+                    msb = {
+                        'type':         'bearish_msb',
+                        'broken_level': last_swing_low,
+                        'candle_idx':   msb_candle_idx,
+                        'candles_ago':  len(working_df) - 1 - msb_candle_idx,
+                        'note':         'Close below last swing low -> structure break confirmed',
+                    }
+
+            # Bullish MSB in downtrend: close above last_swing_high
+            elif structure == 'downtrend':
+                for idx in range(len(working_df) - 1, -1, -1):
+                    if close[idx] > last_swing_high:
+                        msb_candle_idx = idx
+                        break
+                if msb_candle_idx is not None:
+                    msb = {
+                        'type':         'bullish_msb',
+                        'broken_level': last_swing_high,
+                        'candle_idx':   msb_candle_idx,
+                        'candles_ago':  len(working_df) - 1 - msb_candle_idx,
+                        'note':         'Close above last swing high -> structure break confirmed',
+                    }
 
             return {
                 'structure':       structure,
@@ -1302,16 +1456,21 @@ class MathEngine:
         }
 
     def detect_liquidity_sweep(self, df: pd.DataFrame, swing_levels: Dict, equal_levels: Dict) -> Dict:
-        """Detect simple buy-side / sell-side liquidity sweeps around clustered highs/lows."""
+        """Detect buy-side / sell-side liquidity sweeps (쉽알남 Trap pattern).
+
+        ICT/쉽알남 Trap definition:
+        1. Price WICKS beyond a known liquidity level (swing high/equal highs for buy-side,
+           swing low/equal lows for sell-side).
+        2. The same candle (or the next candle) CLOSES BACK inside the level.
+        3. Optional: a follow-through confirmation candle closes further inside.
+
+        Lookback extended to 15 candles so recent traps are not missed.
+        Returns the most recent confirmed sweep with full metadata.
+        """
         if len(df) < 6:
             return {"status": "none", "confirmed": False}
 
-        recent = df.tail(5).reset_index(drop=True)
-        last = recent.iloc[-1]
-        prev = recent.iloc[-2]
-        current_price = float(last['close'])
-        tolerance = max(current_price * 0.0025, 1e-9)
-
+        # Build candidate levels from both equal-levels clusters and raw swing levels
         high_candidates: List[float] = []
         low_candidates: List[float] = []
         for item in (equal_levels.get("equal_highs", []) or []):
@@ -1320,40 +1479,91 @@ class MathEngine:
         for item in (equal_levels.get("equal_lows", []) or []):
             if isinstance(item, dict) and isinstance(item.get("price"), (int, float)):
                 low_candidates.append(float(item["price"]))
+        for h in (swing_levels.get("swing_highs", []) or []):
+            if isinstance(h, (int, float)):
+                high_candidates.append(float(h))
+        for l in (swing_levels.get("swing_lows", []) or []):
+            if isinstance(l, (int, float)):
+                low_candidates.append(float(l))
+        if isinstance(swing_levels.get("nearest_resistance"), (int, float)):
+            high_candidates.append(float(swing_levels["nearest_resistance"]))
+        if isinstance(swing_levels.get("nearest_support"), (int, float)):
+            low_candidates.append(float(swing_levels["nearest_support"]))
 
-        nearest_resistance = swing_levels.get("nearest_resistance")
-        nearest_support = swing_levels.get("nearest_support")
-        if isinstance(nearest_resistance, (int, float)):
-            high_candidates.append(float(nearest_resistance))
-        if isinstance(nearest_support, (int, float)):
-            low_candidates.append(float(nearest_support))
+        # Deduplicate candidates within 0.3 % of each other
+        def _dedup(vals: List[float], tol_pct: float = 0.003) -> List[float]:
+            vals = sorted(set(vals))
+            deduped = []
+            for v in vals:
+                if not deduped or abs(v - deduped[-1]) / max(deduped[-1], 1e-9) > tol_pct:
+                    deduped.append(v)
+            return deduped
 
-        above = sorted([p for p in high_candidates if p >= current_price])
-        below = sorted([p for p in low_candidates if p <= current_price], reverse=True)
+        high_candidates = _dedup(high_candidates)
+        low_candidates  = _dedup(low_candidates)
 
-        if above:
-            level = above[0]
-            if float(last['high']) > (level + tolerance) and float(last['close']) < level and float(prev['close']) <= level:
-                return {
-                    "status": "buy_side_sweep",
-                    "confirmed": True,
-                    "reference_level": round(level, 2),
-                    "sweep_extreme": round(float(last['high']), 2),
-                    "close_back_inside": round(float(last['close']), 2),
-                    "bias_after_sweep": "SHORT",
-                }
+        # Scan last 15 candles (most recent first) for a trap pattern
+        lookback = min(15, len(df))
+        window = df.tail(lookback).reset_index(drop=True)
+        total = len(window)
 
-        if below:
-            level = below[0]
-            if float(last['low']) < (level - tolerance) and float(last['close']) > level and float(prev['close']) >= level:
-                return {
-                    "status": "sell_side_sweep",
-                    "confirmed": True,
-                    "reference_level": round(level, 2),
-                    "sweep_extreme": round(float(last['low']), 2),
-                    "close_back_inside": round(float(last['close']), 2),
-                    "bias_after_sweep": "LONG",
-                }
+        for i in range(total - 1, 0, -1):
+            candle  = window.iloc[i]
+            c_high  = float(candle['high'])
+            c_low   = float(candle['low'])
+            c_close = float(candle['close'])
+            c_open  = float(candle['open'])
+            candles_ago = total - 1 - i
+
+            # Check for follow-through confirmation (next candle after sweep)
+            has_confirmation = False
+            if i + 1 < total:
+                conf = window.iloc[i + 1] if (i + 1) < total else None
+                # confirmation already available (candle after the sweep candle)
+                has_confirmation = conf is not None
+
+            tol = max(c_close * 0.0025, 1e-9)
+
+            # ── Buy-side sweep (Trap above highs → bearish bias) ─────────────
+            for level in sorted(high_candidates):
+                if level < c_close * 0.998:        # level too far below current price
+                    continue
+                wick_above  = c_high > (level + tol)
+                close_below = c_close < level
+                if wick_above and close_below:
+                    # Confirmation: next candle's close is also below the level
+                    conf_close = float(window.iloc[i + 1]['close']) if (i + 1) < total else None
+                    confirmed_by_next = (conf_close is not None and conf_close < level)
+                    return {
+                        "status":            "buy_side_sweep",
+                        "confirmed":         True,
+                        "reference_level":   round(level, 2),
+                        "sweep_extreme":     round(c_high, 2),
+                        "close_back_inside": round(c_close, 2),
+                        "bias_after_sweep":  "SHORT",
+                        "candles_ago":       candles_ago,
+                        "follow_through":    confirmed_by_next,
+                    }
+
+            # ── Sell-side sweep (Trap below lows → bullish bias) ─────────────
+            for level in sorted(low_candidates, reverse=True):
+                if level > c_close * 1.002:        # level too far above current price
+                    continue
+                wick_below  = c_low < (level - tol)
+                close_above = c_close > level
+                if wick_below and close_above:
+                    conf_close = float(window.iloc[i + 1]['close']) if (i + 1) < total else None
+                    confirmed_by_next = (conf_close is not None and conf_close > level)
+                    return {
+                        "status":            "sell_side_sweep",
+                        "confirmed":         True,
+                        "reference_level":   round(level, 2),
+                        "sweep_extreme":     round(c_low, 2),
+                        "close_back_inside": round(c_close, 2),
+                        "bias_after_sweep":  "LONG",
+                        "candles_ago":       candles_ago,
+                        "follow_through":    confirmed_by_next,
+                    }
 
         return {"status": "none", "confirmed": False}
 
@@ -1375,6 +1585,364 @@ class MathEngine:
                         "label": "bpr_overlap",
                     }
         return None
+
+    # ═══════════════════════════════════════════════════════════════
+    # 쉽알남 ICT 고급 패턴 감지 (알고리즘 구현)
+    # ═══════════════════════════════════════════════════════════════
+
+    def detect_amd_structure(
+        self,
+        df: pd.DataFrame,
+        mode: TradingMode = TradingMode.SWING,
+    ) -> Dict:
+        """쉽알남 AMD (Accumulation → Manipulation → Distribution) 구조 감지.
+
+        쉽알남: "박스권 형성 → 박스권 이탈(조작) → 박스권 재진입 → 추세 분출"
+
+        단계:
+        1. ACCUMULATION  : BB_width < 하위 30% 이면서 N캔들 이상 박스권 유지
+        2. MANIPULATION  : 박스 상단/하단 이탈 (close outside)
+        3. DISTRIBUTION  : 이탈 이후 박스 내부로 재진입 (close back inside)
+                           → Trap 확정, 반대 방향 추세 분출 예고
+        """
+        if len(df) < 20:
+            return {"phase": "none", "confirmed": False}
+        try:
+            closes = df['close'].astype(float).values
+            highs  = df['high'].astype(float).values
+            lows   = df['low'].astype(float).values
+            n      = len(df)
+
+            # BB_width 계산
+            period = 20
+            bb_width = np.full(n, np.nan)
+            for i in range(period - 1, n):
+                window = closes[i - period + 1: i + 1]
+                sma = window.mean()
+                std = window.std(ddof=0)
+                if sma > 0:
+                    bb_width[i] = (4 * std) / sma   # (upper - lower) / mid
+
+            # 유효한 BB_width 구간에서 하위 30% 임계값 계산
+            valid_bw = bb_width[~np.isnan(bb_width)]
+            if len(valid_bw) < 10:
+                return {"phase": "none", "confirmed": False}
+            squeeze_threshold = np.percentile(valid_bw, 30)
+
+            # 연속 squeeze 구간 찾기 (최소 8캔들)
+            min_acc_candles = 8
+            acc_start = None
+            acc_end   = None
+            for i in range(n - 1, period - 1, -1):
+                if np.isnan(bb_width[i]):
+                    continue
+                if bb_width[i] < squeeze_threshold:
+                    if acc_end is None:
+                        acc_end = i
+                    acc_start = i
+                else:
+                    if acc_end is not None and (acc_end - (acc_start or acc_end)) >= min_acc_candles - 1:
+                        break
+                    # 연속 아님 → 리셋
+                    acc_end = None
+                    acc_start = None
+
+            if acc_start is None or acc_end is None:
+                return {"phase": "none", "confirmed": False}
+            if (acc_end - acc_start) < min_acc_candles - 1:
+                return {"phase": "none", "confirmed": False}
+
+            box_high = float(np.max(highs[acc_start: acc_end + 1]))
+            box_low  = float(np.min(lows[acc_start:  acc_end + 1]))
+            box_mid  = (box_high + box_low) / 2.0
+            tol      = max(box_mid * 0.002, 1e-9)
+
+            # acc_end 이후 캔들에서 Manipulation 탐지
+            manip_idx  = None
+            manip_type = None   # "bullish_manip" (box 상방 이탈) | "bearish_manip"
+            for i in range(acc_end + 1, n):
+                if closes[i] > (box_high + tol):
+                    manip_idx  = i
+                    manip_type = "bullish_manip"
+                    break
+                if closes[i] < (box_low - tol):
+                    manip_idx  = i
+                    manip_type = "bearish_manip"
+                    break
+
+            if manip_idx is None:
+                return {
+                    "phase":          "accumulating",
+                    "confirmed":      False,
+                    "box_high":       round(box_high, 2),
+                    "box_low":        round(box_low, 2),
+                    "acc_start_ago":  n - 1 - acc_start,
+                    "acc_end_ago":    n - 1 - acc_end,
+                    "acc_candles":    acc_end - acc_start + 1,
+                }
+
+            # Manipulation 이후 Distribution (재진입) 탐지
+            dist_idx       = None
+            bias_after_amd = None
+            for i in range(manip_idx + 1, min(manip_idx + 10, n)):
+                if manip_type == "bullish_manip" and closes[i] < (box_high - tol):
+                    dist_idx       = i
+                    bias_after_amd = "SHORT"   # 상방 이탈 후 재진입 → 숏 편향
+                    break
+                if manip_type == "bearish_manip" and closes[i] > (box_low + tol):
+                    dist_idx       = i
+                    bias_after_amd = "LONG"    # 하방 이탈 후 재진입 → 롱 편향
+                    break
+
+            if dist_idx is None:
+                return {
+                    "phase":          "manipulated",
+                    "confirmed":      False,
+                    "manipulation":   manip_type,
+                    "box_high":       round(box_high, 2),
+                    "box_low":        round(box_low, 2),
+                    "manip_candle_ago": n - 1 - manip_idx,
+                }
+
+            return {
+                "phase":              "distributing",
+                "confirmed":          True,
+                "manipulation":       manip_type,
+                "bias_after_amd":     bias_after_amd,
+                "box_high":           round(box_high, 2),
+                "box_low":            round(box_low, 2),
+                "acc_candles":        acc_end - acc_start + 1,
+                "manip_candle_ago":   n - 1 - manip_idx,
+                "dist_candle_ago":    n - 1 - dist_idx,
+                "note":               f"AMD trap confirmed: {manip_type} -> reentry -> {bias_after_amd} bias",
+            }
+
+        except Exception as e:
+            logger.error(f"AMD structure detection error: {e}")
+            return {"phase": "none", "confirmed": False}
+
+    def detect_channel_trap(
+        self,
+        df: pd.DataFrame,
+        support_info: Optional[Dict] = None,
+        resistance_info: Optional[Dict] = None,
+        lookback: int = 20,
+    ) -> Dict:
+        """쉽알남 채널 Trap (대각선 채널 이탈 후 재진입).
+
+        쉽알남: "채널 이탈 후 내부로 재진입 = Trap의 대표적 예시"
+
+        Bearish trap: close가 저항선 위 → N캔들 내 저항선 아래로 재진입
+        Bullish trap: close가 지지선 아래 → N캔들 내 지지선 위로 재진입
+        """
+        if len(df) < lookback + 2:
+            return {"status": "none", "confirmed": False}
+
+        n      = len(df)
+        closes = df['close'].astype(float).values
+        results = []
+
+        for line_info, line_type in [(resistance_info, "resistance"), (support_info, "support")]:
+            if not isinstance(line_info, dict):
+                continue
+
+            x2    = line_info.get('_x2')
+            slope = line_info.get('slope')
+            y2_key = 'resistance_price' if line_type == 'resistance' else 'support_price'
+            y2    = line_info.get(y2_key)
+
+            if x2 is None or slope is None or y2 is None:
+                continue
+
+            # 전 캔들에 대한 trendline 값 계산
+            try:
+                line_vals = np.array([
+                    float(slope) * (i - int(x2)) + float(y2)
+                    for i in range(n)
+                ])
+            except Exception:
+                continue
+
+            window_start = max(0, n - lookback)
+
+            for i in range(window_start, n - 1):
+                lv_i = float(line_vals[i])
+                tol  = max(abs(lv_i) * 0.001, 1e-9)
+
+                if line_type == "resistance":
+                    # Bearish trap: close above line → close back below within 5 candles
+                    if closes[i] > lv_i + tol:
+                        for j in range(i + 1, min(i + 6, n)):
+                            if closes[j] < float(line_vals[j]) - tol:
+                                results.append({
+                                    "status":                "bearish_channel_trap",
+                                    "confirmed":             True,
+                                    "line_type":             "resistance",
+                                    "channel_level_at_break": round(lv_i, 2),
+                                    "breakout_close":        round(closes[i], 2),
+                                    "reentry_close":         round(closes[j], 2),
+                                    "breakout_candles_ago":  n - 1 - i,
+                                    "reentry_candles_ago":   n - 1 - j,
+                                    "bias_after_trap":       "SHORT",
+                                })
+                                break
+                else:
+                    # Bullish trap: close below line → close back above within 5 candles
+                    if closes[i] < lv_i - tol:
+                        for j in range(i + 1, min(i + 6, n)):
+                            if closes[j] > float(line_vals[j]) + tol:
+                                results.append({
+                                    "status":                "bullish_channel_trap",
+                                    "confirmed":             True,
+                                    "line_type":             "support",
+                                    "channel_level_at_break": round(lv_i, 2),
+                                    "breakout_close":        round(closes[i], 2),
+                                    "reentry_close":         round(closes[j], 2),
+                                    "breakout_candles_ago":  n - 1 - i,
+                                    "reentry_candles_ago":   n - 1 - j,
+                                    "bias_after_trap":       "LONG",
+                                })
+                                break
+
+        if not results:
+            return {"status": "none", "confirmed": False}
+
+        # 가장 최근 트랩 반환
+        results.sort(key=lambda x: x["reentry_candles_ago"])
+        return results[0]
+
+    def score_ict_levels(
+        self,
+        order_blocks: Dict,
+        fvg_data: Dict,
+        confluence_zones: List[Dict],
+        fibonacci: Dict,
+        market_structure: Dict,
+        current_price: float,
+    ) -> Dict:
+        """OB/FVG 중요도 스코어링.
+
+        쉽알남: "OB나 FVG가 중요 구간에서 형성됐는지가 제일 중요"
+
+        스코어 구성 (100점 만점):
+        - Confluence zone 근접 (±1.0%): +40점
+        - Fibonacci 38.2/50/61.8 근접 (±1.0%): +25점
+        - CHoCH/MSB 발생 레벨과 일치 (±0.5%): +25점
+        - Unmitigated 상태: +10점
+        """
+        def _proximity_score(price_a: float, price_b: float, pct_tol: float, max_pts: int) -> int:
+            if price_b <= 0:
+                return 0
+            dist = abs(price_a - price_b) / price_b * 100
+            if dist <= pct_tol:
+                return max_pts
+            if dist <= pct_tol * 2:
+                return max_pts // 2
+            return 0
+
+        # HTF 구조 레벨 수집 (CHoCH/MSB 가격)
+        structural_levels: List[float] = []
+        for tf_info in market_structure.values():
+            if not isinstance(tf_info, dict):
+                continue
+            for key in ("choch", "msb"):
+                evt = tf_info.get(key)
+                if isinstance(evt, dict):
+                    p = evt.get("price") or evt.get("broken_level")
+                    if isinstance(p, (int, float)):
+                        structural_levels.append(float(p))
+
+        # Fibonacci 레벨 수집
+        fib_levels: List[float] = []
+        for tf_fib in fibonacci.values():
+            if not isinstance(tf_fib, dict):
+                continue
+            for key in ("fib_382", "fib_500", "fib_618"):
+                v = tf_fib.get(key)
+                if isinstance(v, (int, float)):
+                    fib_levels.append(float(v))
+
+        def _score_level(zone_low: float, zone_high: float, is_mitigated: bool) -> Dict:
+            mid   = (zone_low + zone_high) / 2.0
+            score = 0
+            factors = []
+
+            # 1. Confluence zone
+            for zone in confluence_zones:
+                zl = zone.get("price_low")
+                zh = zone.get("price_high")
+                if isinstance(zl, (int, float)) and isinstance(zh, (int, float)):
+                    zm = (float(zl) + float(zh)) / 2.0
+                    pts = _proximity_score(mid, zm, 1.0, 40)
+                    if pts:
+                        score += pts
+                        factors.append(f"confluence_zone(+{pts})")
+                        break
+
+            # 2. Fibonacci
+            best_fib = 0
+            for fl in fib_levels:
+                pts = _proximity_score(mid, fl, 1.0, 25)
+                if pts > best_fib:
+                    best_fib = pts
+            if best_fib:
+                score += best_fib
+                factors.append(f"fib_level(+{best_fib})")
+
+            # 3. Structural level (CHoCH/MSB)
+            best_struct = 0
+            for sl in structural_levels:
+                pts = _proximity_score(mid, sl, 0.5, 25)
+                if pts > best_struct:
+                    best_struct = pts
+            if best_struct:
+                score += best_struct
+                factors.append(f"structural_level(+{best_struct})")
+
+            # 4. Unmitigated bonus
+            if not is_mitigated:
+                score += 10
+                factors.append("unmitigated(+10)")
+
+            return {
+                "importance_score":   min(score, 100),
+                "importance_grade":   "A" if score >= 70 else ("B" if score >= 45 else ("C" if score >= 20 else "D")),
+                "importance_factors": factors,
+            }
+
+        scored_obs: Dict = {}
+        for tf, obs in (order_blocks or {}).items():
+            if not isinstance(obs, list):
+                continue
+            enriched = []
+            for ob in obs:
+                ob_copy = dict(ob)
+                rating = _score_level(
+                    float(ob.get("bottom", 0)),
+                    float(ob.get("top", 0)),
+                    bool(ob.get("fully_mitigated")),
+                )
+                ob_copy.update(rating)
+                enriched.append(ob_copy)
+            scored_obs[tf] = enriched
+
+        scored_fvg: Dict = {}
+        for tf, gaps in (fvg_data or {}).items():
+            if not isinstance(gaps, list):
+                continue
+            enriched = []
+            for gap in gaps:
+                gap_copy = dict(gap)
+                rating = _score_level(
+                    float(gap.get("gap_low", 0)),
+                    float(gap.get("gap_high", 0)),
+                    bool(gap.get("fully_filled")),
+                )
+                gap_copy.update(rating)
+                enriched.append(gap_copy)
+            scored_fvg[tf] = enriched
+
+        return {"order_blocks": scored_obs, "fvg": scored_fvg}
 
     def _bias_from_structure(self, info: Dict) -> str:
         if not isinstance(info, dict):
@@ -1609,14 +2177,34 @@ class MathEngine:
                 resistances.append(float(res))
 
         tf_df = (raw_timeframes or {}).get(execution_tf)
-        equal_levels = self.detect_equal_levels(tf_df, mode=mode) if isinstance(tf_df, pd.DataFrame) and not tf_df.empty else {"equal_highs": [], "equal_lows": []}
-        sr_flip = self.detect_sr_flip(tf_df, swing.get(execution_tf, {}) or {}) if isinstance(tf_df, pd.DataFrame) and not tf_df.empty else {"status": "none", "confirmed": False}
-        liquidity_sweep = self.detect_liquidity_sweep(tf_df, swing.get(execution_tf, {}) or {}, equal_levels) if isinstance(tf_df, pd.DataFrame) and not tf_df.empty else {"status": "none", "confirmed": False}
+        _tf_ok = isinstance(tf_df, pd.DataFrame) and not tf_df.empty
 
-        long_anchor = (swing.get(execution_tf, {}) or {}).get("nearest_support")
+        equal_levels    = self.detect_equal_levels(tf_df, mode=mode) if _tf_ok else {"equal_highs": [], "equal_lows": []}
+        sr_flip         = self.detect_sr_flip(tf_df, swing.get(execution_tf, {}) or {}) if _tf_ok else {"status": "none", "confirmed": False}
+        liquidity_sweep = self.detect_liquidity_sweep(tf_df, swing.get(execution_tf, {}) or {}, equal_levels) if _tf_ok else {"status": "none", "confirmed": False}
+
+        # AMD structure (쉽알남: 박스권→이탈→재진입→추세)
+        amd_structure = self.detect_amd_structure(tf_df, mode=mode) if _tf_ok else {"phase": "none", "confirmed": False}
+
+        # Channel Trap (쉽알남: 채널 이탈 후 재진입 = Trap)
+        sup_info = structure.get(f"support_{execution_tf}") or structure.get("support_4h") or structure.get("support_1d")
+        res_info = structure.get(f"resistance_{execution_tf}") or structure.get("resistance_4h") or structure.get("resistance_1d")
+        channel_trap = self.detect_channel_trap(tf_df, sup_info, res_info) if _tf_ok else {"status": "none", "confirmed": False}
+
+        # ICT level importance scoring (쉽알남: 중요 구간의 OB/FVG만 유효)
+        ict_scored = self.score_ict_levels(
+            order_blocks=analysis.get("order_blocks", {}),
+            fvg_data=analysis.get("fvg", {}),
+            confluence_zones=confluence,
+            fibonacci=fibonacci,
+            market_structure=market_structure,
+            current_price=current_price,
+        )
+
+        long_anchor  = (swing.get(execution_tf, {}) or {}).get("nearest_support")
         short_anchor = (swing.get(execution_tf, {}) or {}).get("nearest_resistance")
-        retest_long = self.evaluate_retest_quality(tf_df, long_anchor, "LONG") if isinstance(tf_df, pd.DataFrame) and not tf_df.empty else {"score": 0, "label": "unknown"}
-        retest_short = self.evaluate_retest_quality(tf_df, short_anchor, "SHORT") if isinstance(tf_df, pd.DataFrame) and not tf_df.empty else {"score": 0, "label": "unknown"}
+        retest_long  = self.evaluate_retest_quality(tf_df, long_anchor,  "LONG")  if _tf_ok else {"score": 0, "label": "unknown"}
+        retest_short = self.evaluate_retest_quality(tf_df, short_anchor, "SHORT") if _tf_ok else {"score": 0, "label": "unknown"}
         bpr_zone = self.detect_balance_price_range(fvg_data)
 
         relevant_confluence = []
@@ -1661,6 +2249,10 @@ class MathEngine:
 
         if htf_bias != "neutral" and execution_bias not in ("neutral", htf_bias):
             revision_reason = f"HTF {htf_bias} but execution TF shifted to {execution_bias}; scenario must stay flexible."
+        elif channel_trap.get("confirmed"):
+            revision_reason = f"Channel trap confirmed: {channel_trap.get('status')} near {channel_trap.get('channel_level_at_break')} -> bias {channel_trap.get('bias_after_trap')}."
+        elif amd_structure.get("confirmed"):
+            revision_reason = f"AMD trap confirmed: {amd_structure.get('manipulation')} box={amd_structure.get('box_low')}-{amd_structure.get('box_high')} -> bias {amd_structure.get('bias_after_amd')}."
         elif liquidity_sweep.get("confirmed"):
             revision_reason = f"Recent {liquidity_sweep.get('status')} detected near {liquidity_sweep.get('reference_level')}."
         else:
@@ -1671,21 +2263,31 @@ class MathEngine:
             "higher_timeframe": htf_bias,
             "execution_timeframe": execution_bias,
         }
+        # Trap context: channel_trap > amd > liquidity_sweep (우선순위)
+        active_trap = (
+            channel_trap if channel_trap.get("confirmed")
+            else (amd_structure if amd_structure.get("confirmed")
+                  else liquidity_sweep)
+        )
+        active_setup["trap_context"] = active_trap
 
         return {
-            "profile": "inbum_shipalnam",
+            "profile":               "inbum_shipalnam",
             "higher_timeframe_bias": htf_bias,
-            "execution_bias": execution_bias,
-            "active_setup": active_setup,
-            "primary_scenario": primary,
-            "alternate_scenario": alternate,
+            "execution_bias":        execution_bias,
+            "active_setup":          active_setup,
+            "primary_scenario":      primary,
+            "alternate_scenario":    alternate,
             "liquidity_map": {
-                "equal_levels": equal_levels,
-                "liquidity_sweep": liquidity_sweep,
-                "sr_flip": sr_flip,
-                "bpr_zone": bpr_zone,
+                "equal_levels":        equal_levels,
+                "liquidity_sweep":     liquidity_sweep,
+                "channel_trap":        channel_trap,
+                "amd_structure":       amd_structure,
+                "sr_flip":             sr_flip,
+                "bpr_zone":            bpr_zone,
                 "execution_timeframe": execution_tf,
             },
+            "ict_scored_levels":     ict_scored,
             "scenario_revision_reason": revision_reason,
         }
 
@@ -1709,6 +2311,7 @@ class MathEngine:
             'fibonacci': {},
             'volume_profile': {},
             'fvg': {},
+            'order_blocks': {},
             'swing_levels': {},
             'confluence_zones': [],
             'scenario_engine': {},
@@ -1783,9 +2386,17 @@ class MathEngine:
         if len(tf_4h) >= 20:
             result['volume_profile']['4h'] = self.calculate_volume_profile(tf_4h)
 
-        # FVG on 4h
+        # FVG on 4h and 1d
         if len(tf_4h) >= 10:
             result['fvg']['4h'] = self.calculate_fvg(tf_4h)
+        if len(tf_1d) >= 10:
+            result['fvg']['1d'] = self.calculate_fvg(tf_1d, max_gaps=3)
+
+        # Order Blocks on 4h and 1d (ICT: last opposing candle before MSB)
+        if len(tf_4h) >= 20:
+            result['order_blocks']['4h'] = self.calculate_macro_order_blocks(tf_4h, count=3)
+        if len(tf_1d) >= 20:
+            result['order_blocks']['1d'] = self.calculate_macro_order_blocks(tf_1d, count=2)
 
         # Swing levels on 4h and 1d
         if len(tf_4h) >= 20:
@@ -1820,6 +2431,7 @@ class MathEngine:
             'fibonacci': {},
             'volume_profile': {},
             'fvg': {},
+            'order_blocks': {},
             'swing_levels': {},
             'confluence_zones': [],
             'scenario_engine': {},
@@ -1889,9 +2501,17 @@ class MathEngine:
         if len(tf_1d) >= 20:
             result['volume_profile']['1d'] = self.calculate_volume_profile(tf_1d)
 
-        # FVG on 1d
+        # FVG on 1d and 1w
         if len(tf_1d) >= 10:
             result['fvg']['1d'] = self.calculate_fvg(tf_1d)
+        if len(tf_1w) >= 10:
+            result['fvg']['1w'] = self.calculate_fvg(tf_1w, max_gaps=3)
+
+        # Order Blocks on 1d and 1w (ICT: last opposing candle before MSB)
+        if len(tf_1d) >= 20:
+            result['order_blocks']['1d'] = self.calculate_macro_order_blocks(tf_1d, count=3)
+        if len(tf_1w) >= 20:
+            result['order_blocks']['1w'] = self.calculate_macro_order_blocks(tf_1w, count=2)
 
         # Swing levels on 1d
         if len(tf_1d) >= 20:
