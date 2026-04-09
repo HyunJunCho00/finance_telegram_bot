@@ -60,7 +60,7 @@ class MCPTools:
                 df_1w = gcs_parquet_store.load_ohlcv("1w", symbol, months_back=m_back)
 
                 m_back_timeseries = m_back
-                db_limit = 45000
+                db_limit = 2880  # 2일치 (egress 절감: 45000→2880)
                 now_utc = pd.Timestamp.now(tz='UTC')
 
                 cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back_timeseries)
@@ -153,13 +153,13 @@ class MCPTools:
                     fnd_hist = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
 
                     # Merge with recent DB data
-                    cvd_recent = db.get_cvd_data(symbol, limit=45000)
+                    cvd_recent = db.get_cvd_data(symbol, limit=2880)
                     if not cvd_hist.empty:
                         cvd_df = pd.concat([cvd_hist, cvd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
                     else:
                         cvd_df = cvd_recent
 
-                    fnd_recent = db.get_funding_history(symbol, limit=45000)
+                    fnd_recent = db.get_funding_history(symbol, limit=2880)
                     if not fnd_hist.empty:
                         funding_df = pd.concat([fnd_hist, fnd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
                     else:

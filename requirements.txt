@@ -20,6 +20,7 @@ uvicorn>=0.32,<1
 pydantic>=2.10,<3
 pydantic-settings>=2.6,<3
 websockets>=15.0.1
+uvloop>=0.21; sys_platform != "win32"
 apscheduler>=3.10,<4
 loguru>=0.7,<1
 pandas_ta_classic==0.3.59

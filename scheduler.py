@@ -1,4 +1,12 @@
 # -*- coding: utf-8 -*-
+# [PERF] uvloop replaces CPython asyncio event loop with a C-based implementation.
+# Improves async I/O throughput 2-4x. Linux/macOS only — degrades silently on Windows.
+try:
+    import uvloop
+    uvloop.install()
+except ImportError:
+    pass  # Windows dev environment — no-op
+
 from apscheduler.triggers.cron import CronTrigger
 from collectors.price_collector import collector
 from collectors.funding_collector import funding_collector
@@ -1623,6 +1631,22 @@ def main():
     logger.info(f"  Dune: {'enabled' if dune_collector else 'disabled'}")
     logger.info(f"  LightRAG: Neo4j {'connected' if settings.NEO4J_URI else 'in-memory'} + "
                 f"Milvus {'connected' if settings.MILVUS_URI else 'in-memory'}")
+
+    # [PERF] Start real-time price feed — eliminates REST price fetch at order fire time
+    try:
+        from collectors.ws_price_feed import ws_price_feed
+        ws_price_feed.start()
+        logger.info("WS price feed started (zero-latency price reads for order execution)")
+    except Exception as e:
+        logger.warning(f"WS price feed unavailable (REST fallback active): {e}")
+
+    # [PERF] Start User Data Stream — real-time fill confirmation (replaces outbox polling)
+    try:
+        from collectors.ws_user_stream import ws_user_stream
+        ws_user_stream.start()
+        logger.info("WS user stream started (real-time fill confirmation)")
+    except Exception as e:
+        logger.warning(f"WS user stream unavailable (outbox fallback active): {e}")
 
     # Start WebSocket collector for liquidation + whale data
     try:

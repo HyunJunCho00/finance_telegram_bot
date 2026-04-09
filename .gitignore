@@ -41,6 +41,7 @@ env/
 # Personal Notes
 INTERVIEW_PREP.md
 ACID_FINANCE_HARDENING.md
+PORTFOLIO_OMS.md
 notes_*.md
 
 # Data Archives/Backups
@@ -72,3 +73,7 @@ tmp*
 todays_session.md
 
 .venv*
+BLACKROCK_INSPIRED_ARCHITECTURE.md
+QUANT_LAYERS_ARCHITECTURE.md
+*_ARCHITECTURE.md
+setup_telegram_session.py

@@ -111,6 +111,22 @@ class TradeExecutor:
             if price <= 0:
                 return {"success": False, "error": "Could not fetch price"}
 
+            # [SAFETY] 분석 기준가 대비 현재가 편차 검사.
+            # LLM 분석 완료 후 주문 시점까지 가격이 크게 움직이면 스킵.
+            # entry_price = judge_agent이 분석 시 기록한 기준가.
+            analysis_price = float(final_decision.get("entry_price", 0) or 0)
+            max_dev = float(settings.MAX_ENTRY_DEVIATION_PCT or 0)
+            if analysis_price > 0 and max_dev > 0:
+                deviation_pct = abs(price - analysis_price) / analysis_price * 100
+                if deviation_pct > max_dev:
+                    msg = (
+                        f"Entry skipped: price moved {deviation_pct:.2f}% since analysis "
+                        f"(analysis=${analysis_price:,.1f}, now=${price:,.1f}, "
+                        f"threshold={max_dev:.1f}%)"
+                    )
+                    logger.warning(f"[DeviationGuard] {msg}")
+                    return {"success": False, "note": msg}
+
             if mode_upper == "POSITION" and direction == "SHORT":
                 return {"success": False, "note": "POSITION mode does not allow SHORT."}
 
@@ -349,7 +365,7 @@ class TradeExecutor:
                 )
 
                 if exchange == 'binance':
-                    result = self._execute_binance(symbol, side, amount, leverage)
+                    result = self._execute_binance(symbol, side, amount, leverage, tp_price=tp_price, sl_price=sl_price)
                 elif exchange == 'binance_spot':
                     result = self._execute_binance_spot(symbol, side, amount)
                 elif exchange == 'upbit':
@@ -402,6 +418,15 @@ class TradeExecutor:
                     if p:
                         return float(p)
 
+            # [PERF] Try in-memory WebSocket price first (0ms) before REST (~50ms).
+            try:
+                from collectors.ws_price_feed import ws_price_feed
+                ws_price = ws_price_feed.get(symbol)
+                if ws_price:
+                    return ws_price
+            except Exception:
+                pass
+
             # [FIX SILENT-3] CCXT requires slash format: BTCUSDT - BTC/USDT
             ccxt_symbol = symbol
             if 'USDT' in symbol and '/' not in symbol:
@@ -409,7 +434,7 @@ class TradeExecutor:
             elif 'KRW' in symbol and '/' not in symbol:
                 ccxt_symbol = symbol.replace('KRW', '/KRW')
 
-            # default: live ticker reference
+            # Fallback: live ticker via REST
             ex = self.binance if exchange == 'binance' else self.binance_spot if exchange == 'binance_spot' else self.upbit if exchange == 'upbit' else self.coinbase
             ticker = ex.fetch_ticker(ccxt_symbol)
             return float(ticker.get('last') or ticker.get('close') or 0)
@@ -511,7 +536,15 @@ class TradeExecutor:
         except Exception as e:
             logger.warning(f"[P2] Fill check enqueue failed (non-blocking): {e}")
 
-    def _execute_binance(self, symbol: str, side: str, amount: float, leverage: int) -> Dict:
+    def _execute_binance(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        leverage: int,
+        tp_price: float = 0.0,
+        sl_price: float = 0.0,
+    ) -> Dict:
         try:
             self.binance.set_leverage(leverage, symbol)
 
@@ -523,13 +556,44 @@ class TradeExecutor:
             )
 
             # [P2] Market orders return average fill price, not limit price.
-            # order['average'] is the VWAP fill; order['price'] may be None for market orders.
             exchange_order_id = str(order.get('id') or '')
             filled_price = order.get('average') or order.get('price')
 
             # [P2] If fill price not yet available (async matching engine), schedule verification.
             if not filled_price and exchange_order_id:
                 self._enqueue_fill_check("binance", exchange_order_id, symbol)
+
+            # [PERF] Register TP/SL bracket at exchange level immediately after entry.
+            # Eliminates Python-side monitoring loop latency for exits.
+            close_side = 'sell' if side.upper() == 'LONG' else 'buy'
+            bracket_ids: Dict[str, str] = {}
+            if tp_price > 0:
+                try:
+                    tp_order = self.binance.create_order(
+                        symbol=symbol,
+                        type='TAKE_PROFIT_MARKET',
+                        side=close_side,
+                        amount=amount,
+                        params={'stopPrice': tp_price, 'reduceOnly': True},
+                    )
+                    bracket_ids['tp_order_id'] = str(tp_order.get('id') or '')
+                    logger.info(f"[Bracket] TP registered at {tp_price} → {bracket_ids['tp_order_id']}")
+                except Exception as e:
+                    logger.warning(f"[Bracket] TP order failed (non-blocking): {e}")
+
+            if sl_price > 0:
+                try:
+                    sl_order = self.binance.create_order(
+                        symbol=symbol,
+                        type='STOP_MARKET',
+                        side=close_side,
+                        amount=amount,
+                        params={'stopPrice': sl_price, 'reduceOnly': True},
+                    )
+                    bracket_ids['sl_order_id'] = str(sl_order.get('id') or '')
+                    logger.info(f"[Bracket] SL registered at {sl_price} → {bracket_ids['sl_order_id']}")
+                except Exception as e:
+                    logger.warning(f"[Bracket] SL order failed (non-blocking): {e}")
 
             return {
                 "success": True,
@@ -542,12 +606,96 @@ class TradeExecutor:
                 "order_id": exchange_order_id,
                 "filled_price": filled_price,
                 "fill_confirmed": bool(filled_price),
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **bracket_ids,
             }
 
         except Exception as e:
             logger.error(f"Binance execution error: {e}")
             return {"success": False, "paper": False, "error": str(e)}
+
+    def execute_limit(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        leverage: int,
+        limit_price: float,
+        exchange: str = 'binance',
+    ) -> Dict:
+        """지정가 주문 전송. SMART_DCA 2~3번째 진입에 사용."""
+        try:
+            side = side.upper()
+            if settings.PAPER_TRADING_MODE:
+                return self._simulate_order(symbol, side, amount, leverage, exchange, "SMART_DCA")
+
+            if exchange == 'binance':
+                return self._execute_binance_limit(symbol, side, amount, leverage, limit_price)
+            # 다른 거래소는 지정가 미지원 — 시장가 폴백
+            logger.warning(f"[Limit] {exchange} limit not supported, falling back to market")
+            return self._execute_binance(symbol, side, amount, leverage)
+        except Exception as e:
+            logger.error(f"Limit order error: {e}")
+            return {"success": False, "error": str(e)}
+
+    def _execute_binance_limit(
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        leverage: int,
+        limit_price: float,
+    ) -> Dict:
+        """Binance Futures 지정가 주문 (GTC)."""
+        try:
+            self.binance.set_leverage(leverage, symbol)
+
+            # CCXT amount는 코인 수량 — USD → 코인 변환
+            ccxt_symbol = symbol.replace("USDT", "/USDT") if "USDT" in symbol and "/" not in symbol else symbol
+            market = self.binance.market(ccxt_symbol)
+            amount_coin = round(amount / limit_price, market.get("precision", {}).get("amount", 3))
+
+            order = self.binance.create_order(
+                symbol=symbol,
+                type='LIMIT',
+                side=side.lower(),
+                amount=amount_coin,
+                price=limit_price,
+                params={'timeInForce': 'GTC'},
+            )
+            exchange_order_id = str(order.get('id') or '')
+            logger.info(f"[Limit] GTC placed {side} {symbol} @ {limit_price} → {exchange_order_id}")
+            return {
+                "success": True,
+                "paper": False,
+                "exchange": "binance",
+                "symbol": symbol,
+                "side": side,
+                "amount": amount,
+                "order_id": exchange_order_id,
+                "limit_price": limit_price,
+                "order_type": "LIMIT",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        except Exception as e:
+            logger.error(f"Binance limit order error: {e}")
+            return {"success": False, "paper": False, "error": str(e)}
+
+    def cancel_order(self, exchange: str, order_id: str, symbol: str) -> bool:
+        """거래소 지정가 주문 취소. 실패해도 non-blocking."""
+        try:
+            ccxt_symbol = symbol.replace("USDT", "/USDT") if "USDT" in symbol and "/" not in symbol else symbol
+            if exchange == 'binance':
+                self.binance.cancel_order(order_id, ccxt_symbol)
+            elif exchange == 'binance_spot':
+                self.binance_spot.cancel_order(order_id, ccxt_symbol)
+            elif exchange == 'upbit':
+                self.upbit.cancel_order(order_id, ccxt_symbol)
+            logger.info(f"[Cancel] Order {order_id} cancelled on {exchange}")
+            return True
+        except Exception as e:
+            logger.warning(f"[Cancel] Failed to cancel {order_id} on {exchange}: {e}")
+            return False
 
     def _execute_upbit(self, symbol: str, side: str, amount: float) -> Dict:
         try:
