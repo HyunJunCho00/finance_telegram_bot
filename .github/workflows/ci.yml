@@ -60,6 +60,9 @@ jobs:
           # 서버 내 봇 폴더로 이동 (GitHub Secrets에서 경로 불러옴)
           cd ${{ secrets.SERVER_DEPLOY_PATH }}
           
+          # Git 권한(Dubious ownership) 에러 방어 코드
+          git config --global --add safe.directory ${{ secrets.SERVER_DEPLOY_PATH }}
+          
           # 최신 코드 깃허브에서 땡겨오기
           git pull origin main
           
