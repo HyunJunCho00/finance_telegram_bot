@@ -1,0 +1,66 @@
+version: '3.8'
+
+# Base anchor for shared properties
+x-bot-service: &bot-service
+  build: .
+  image: finance-bot:latest
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "50m"
+      max-file: "3"
+
+services:
+  # =========================================================================
+  # 🔵 BLUE ENVIRONMENT (LIVE TRADING - 실제 돈)
+  # =========================================================================
+  blue-scheduler:
+    <<: *bot-service
+    container_name: tgbot-blue-scheduler
+    command: ["python", "scheduler.py"]
+    environment:
+      - USE_SECRET_MANAGER=true
+      - PROJECT_ID=${PROJECT_ID}
+      - PAPER_TRADING_MODE=False
+    restart: always
+
+  blue-executor:
+    <<: *bot-service
+    container_name: tgbot-blue-executor
+    command: ["python", "execution_main.py"]
+    environment:
+      - USE_SECRET_MANAGER=true
+      - PROJECT_ID=${PROJECT_ID}
+      - PAPER_TRADING_MODE=False
+    ports:
+      - "9091:9091"
+    restart: always
+
+  # =========================================================================
+  # 🟢 GREEN ENVIRONMENT (SHADOW / 모의투자)
+  # =========================================================================
+  green-scheduler:
+    <<: *bot-service
+    container_name: tgbot-green-scheduler
+    command: ["python", "scheduler.py"]
+    environment:
+      - USE_SECRET_MANAGER=true
+      - PROJECT_ID=${PROJECT_ID}
+      - PAPER_TRADING_MODE=True
+    profiles:
+      - shadow
+    restart: unless-stopped
+
+  green-executor:
+    <<: *bot-service
+    container_name: tgbot-green-executor
+    command: ["python", "execution_main.py"]
+    environment:
+      - USE_SECRET_MANAGER=true
+      - PROJECT_ID=${PROJECT_ID}
+      - PAPER_TRADING_MODE=True
+    ports:
+      - "9092:9091"
+    profiles:
+      - shadow
+    restart: unless-stopped
