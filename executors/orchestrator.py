@@ -90,6 +90,10 @@ from executors.post_mortem import write_post_mortem
 from executors.data_synthesizer import synthesize_training_data
 from executors.stats_thresholds import adaptive_std_floor, symbol_liq_min_std_usd
 from utils.cooldown import is_on_cooldown, set_cooldown
+from processors.factor_ic_tracker import factor_ic_tracker
+from processors.portfolio_optimizer import portfolio_optimizer
+from executors.risk_budget_controller import risk_budget_controller
+from executors.execution_planner import execution_planner
 from loguru import logger
 import gc
 
@@ -330,6 +334,20 @@ class AnalysisState(TypedDict):
     # ------------- Z Score (context_gathering ) -------------
     stats_context: dict  # {liq_mean, liq_std, imbalance_mean, ..., dvol_mean, dvol_std, ...}
 
+    # ------------- Quant Layers (Layer 1/2/3/5) -------------
+    factor_ic_result: dict    # Layer 1: {signals, ic_weights, alpha_score, confidence_label}
+    portfolio_risk: dict      # Layer 2: portfolio_optimizer.analyze() result
+    risk_budget_result: dict  # Layer 3: risk_budget_controller.approve_or_scale() result
+    execution_plan: dict      # Layer 5: execution_planner.plan() result
+
+    # Self-correction
+    self_correction_result: Optional[dict]  # {passed, challenges, loop_back_reason, confidence_delta}
+    correction_loop_count: int              # 무한루프 방지 카운터
+
+    # Paper order tracking
+    paper_order: Optional[dict]             # 생성된 가상 포지션 정보
+    paper_order_id: Optional[int]           # paper_orders.id (DB PK)
+
     # Error tracking
     errors: Annotated[list, operator.add]
 
@@ -551,7 +569,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
 
         # 5. Liquidation Context
         try:
-            liq_df = db.get_liquidation_data(symbol, limit=settings.data_lookback_hours * 60)
+            liq_df = db.get_liquidation_data(symbol, limit=2880)  # 2일치 (egress 절감: data_lookback_hours*60=262800→2880)
             _liq_cache[cache_key] = liq_df  # Cache for chart generation
             if not liq_df.empty:
                 t_long, t_short = float(liq_df['long_liq_usd'].sum()), float(liq_df['short_liq_usd'].sum())
@@ -1388,6 +1406,101 @@ def node_triage(state: AnalysisState) -> dict:
         "blackboard": {"confluence_score": confluence_score_payload},
     }
 
+
+# ── Layer 1: Factor Signal Engine ─────────────────────────────────────────────
+def node_factor_signals(state: AnalysisState) -> dict:
+    """Layer 1: IC-가중 팩터 신호 계산 및 알파 스코어 생성.
+
+    triage에서 blackboard가 채워진 후, judge 전에 실행.
+    각 팩터의 IC를 반영한 방향성 알파 스코어를 Judge에게 제공.
+    """
+    symbol = state.get("symbol", "BTCUSDT")
+    mode = state.get("mode", "swing")
+    regime = state.get("market_regime", "UNKNOWN")
+
+    try:
+        result = factor_ic_tracker.compute(
+            state=state,
+            regime=regime,
+            symbol=symbol,
+        )
+        logger.info(
+            f"[FactorSignals] {symbol} alpha={result.get('alpha_score', 0):.3f} "
+            f"conf={result.get('confidence_label', 'N/A')}"
+        )
+        return {"factor_ic_result": result}
+    except Exception as e:
+        logger.error(f"[FactorSignals] node_factor_signals failed: {e}")
+        return {"factor_ic_result": {
+            "signals": {}, "ic_weights": {}, "alpha_score": 0.0,
+            "confidence_label": "UNKNOWN", "regime": regime,
+        }}
+
+
+# ── Layer 2+3: Portfolio Risk + Risk Budget ────────────────────────────────────
+def node_risk_budget(state: AnalysisState) -> dict:
+    """Layer 2+3: 포트폴리오 리스크 계산 + 스트레스 테스트 + 리스크 예산 검증.
+
+    risk_manager 직후, portfolio_leverage_guard 전에 실행.
+    Institutional quant 방식: 개별 자산 리스크가 아닌 포트폴리오 전체 리스크를 평가.
+    """
+    symbol = state.get("symbol", "BTCUSDT")
+    mode = state.get("mode", "swing")
+    regime = state.get("market_regime", "UNKNOWN")
+    final_decision = state.get("final_decision", {})
+
+    decision_dir = str(final_decision.get("decision", "HOLD")).upper()
+    allocation = float(final_decision.get("allocation_pct", 0) or 0)
+
+    try:
+        # Layer 2: 포트폴리오 리스크 (BTC-ETH 상관관계)
+        portfolio_risk_result = portfolio_optimizer.analyze(
+            current_symbol=symbol,
+            current_allocation_pct=allocation,
+            other_symbol_allocation_pct=0.0,  # 단순화: 다른 심볼 오픈 포지션 없다 가정
+            lookback_days=30,
+        )
+
+        # Layer 3: 리스크 예산 + 스트레스 테스트
+        if decision_dir in ["LONG", "SHORT"]:
+            updated_decision = risk_budget_controller.approve_or_scale(
+                draft_decision=final_decision,
+                regime=regime,
+                symbol=symbol,
+                portfolio_risk=portfolio_risk_result,
+                other_open_positions=[],
+                account_balance_usd=float(
+                    getattr(__import__("config.settings", fromlist=["settings"]).settings,
+                            "BINANCE_PAPER_BALANCE_USD", 2000.0)
+                ),
+            )
+        else:
+            updated_decision = dict(final_decision)
+            updated_decision["risk_budget_check"] = {
+                "passed": True, "reason": f"direction={decision_dir} — no stress test needed",
+                "stress_test": None,
+            }
+
+        risk_budget_check = updated_decision.get("risk_budget_check", {})
+        logger.info(
+            f"[RiskBudget] {symbol} {decision_dir} passed={risk_budget_check.get('passed')} "
+            f"port_vol={portfolio_risk_result.get('portfolio_risk', {}).get('portfolio_vol_pct', 0):.2f}%"
+        )
+
+        return {
+            "final_decision": updated_decision,
+            "portfolio_risk": portfolio_risk_result,
+            "risk_budget_result": risk_budget_check,
+        }
+
+    except Exception as e:
+        logger.error(f"[RiskBudget] node_risk_budget failed: {e}")
+        return {
+            "portfolio_risk": {},
+            "risk_budget_result": {"passed": True, "reason": f"error: {e}"},
+        }
+
+
 def node_rule_based_chart(state: AnalysisState) -> dict:
     """Deterministic chart-rule expert (no LLM cost)."""
     symbol = state.get("symbol", "BTCUSDT")
@@ -1616,7 +1729,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
     try:
         liquidation_df = _liq_cache.get(cache_key)
         if liquidation_df is None:
-            liq_limit = settings.data_lookback_hours * 60
+            liq_limit = 2880  # 2일치 (egress 절감)
             liquidation_df = db.get_liquidation_data(symbol, limit=liq_limit)
             _liq_cache[cache_key] = liquidation_df
     except Exception:
@@ -1721,6 +1834,13 @@ def node_judge_agent(state: AnalysisState) -> dict:
     # Chart image is NOT forwarded - VLMGeometricAgent is the sole visual analyst.
     # Judge reads VLM's structured text output from the blackboard instead.
     regime_ctx = state.get("regime_context", {})
+
+    # [Quant Layer 1] Factor IC 분석 결과를 feedback_text에 추가
+    factor_ic_result = state.get("factor_ic_result") or {}
+    if factor_ic_result:
+        ic_summary = factor_ic_tracker.format_for_judge(factor_ic_result)
+        feedback_text = (feedback_text + "\n\n" + ic_summary).strip() if feedback_text else ic_summary
+
     decision = judge_agent.make_decision(
         market_data_compact=compact,
         blackboard=blackboard,
@@ -1864,6 +1984,127 @@ def node_judge_agent(state: AnalysisState) -> dict:
     }
 
 
+def node_self_correction(state: AnalysisState) -> dict:
+    """Judge 결정을 LLM이 자율적으로 반박하는 강제 검증 레이어.
+
+    - judge_agent 이후 항상 실행 (skip 불가)
+    - LLM이 루프백 여부를 직접 판단 (라우팅 함수 아님)
+    - 최대 2회 루프백 후 강제 통과 (무한루프 방지)
+    - HOLD 결정은 검증 생략 (이미 보수적 판단)
+    """
+    decision = state.get("final_decision", {})
+    direction = str(decision.get("decision", "HOLD")).upper()
+    loop_count = state.get("correction_loop_count", 0)
+
+    # HOLD는 검증 불필요
+    if direction == "HOLD":
+        return {
+            "self_correction_result": {"passed": True, "reason": "HOLD_SKIP"},
+            "correction_loop_count": loop_count,
+        }
+
+    # 무한루프 방지: 2회 초과 시 강제 통과
+    if loop_count >= 2:
+        logger.warning(f"[SelfCorrection] Max loops reached ({loop_count}), forcing pass")
+        return {
+            "self_correction_result": {
+                "passed": True,
+                "forced": True,
+                "reason": "MAX_LOOP_EXCEEDED",
+            },
+            "correction_loop_count": loop_count,
+        }
+
+    symbol = state.get("symbol", "BTCUSDT")
+    mode = state.get("mode", "swing")
+    reasoning = decision.get("reasoning", {})
+    win_prob = decision.get("win_probability_pct", 0)
+    allocation = decision.get("allocation_pct", 0)
+    counter_scenario = reasoning.get("counter_scenario", "")
+
+    prompt = f"""You are a devil's advocate reviewing a {direction} decision on {symbol} ({mode} mode).
+
+Decision summary:
+- Direction: {direction}
+- Allocation: {allocation}%
+- Win probability: {win_prob}%
+- Judge's counter-scenario: {counter_scenario}
+- Entry: {decision.get('entry_price')}, SL: {decision.get('stop_loss')}, TP: {decision.get('take_profit')}
+- Key factors: {decision.get('key_factors', [])}
+
+Market context:
+- Regime: {state.get('market_regime', 'unknown')}
+- Funding: {str(state.get('funding_context', ''))[:300]}
+- Onchain: {str(state.get('onchain_context', ''))[:300]}
+
+Your task: Challenge this decision aggressively. Ask yourself:
+1. What critical signal is being ignored or underweighted?
+2. Does the current regime actually support this direction?
+3. Is the counter-scenario more likely than the judge admits?
+4. Is the entry timing premature?
+
+Then decide: should this go back for re-analysis, or is it acceptable to proceed?
+
+Respond ONLY in JSON:
+{{
+  "passed": true or false,
+  "challenges": ["challenge 1", "challenge 2"],
+  "loop_back_reason": "specific reason to loop back" or null,
+  "confidence_delta": float between -1.0 and 0.0 (how much this reduces confidence)
+}}
+
+Rule: Set passed=false ONLY if you found a material blind spot not already in the counter_scenario.
+If challenges are minor or already reflected, set passed=true."""
+
+    try:
+        from agents.ai_router import ai_client as _ai
+        import json as _json
+        import re as _re
+
+        raw = _ai.generate_response(
+            system_prompt="You are a rigorous devil's advocate for trading decisions. Always respond in valid JSON.",
+            user_message=prompt,
+            max_tokens=512,
+            temperature=0.3,
+            use_premium=True,
+            role="judge",
+        )
+        # JSON 파싱
+        match = _re.search(r"\{[\s\S]*\}", raw or "")
+        if match:
+            result = _json.loads(match.group())
+        else:
+            result = {"passed": True, "challenges": [], "loop_back_reason": None, "confidence_delta": 0.0}
+
+        passed = bool(result.get("passed", True))
+        logger.info(
+            f"[SelfCorrection] {symbol} {direction} | passed={passed} "
+            f"loop={loop_count} | reason={result.get('loop_back_reason')}"
+        )
+        return {
+            "self_correction_result": result,
+            "correction_loop_count": loop_count + (0 if passed else 1),
+        }
+
+    except Exception as e:
+        logger.error(f"[SelfCorrection] LLM call failed: {e}, defaulting to pass")
+        return {
+            "self_correction_result": {"passed": True, "error": str(e)},
+            "correction_loop_count": loop_count,
+        }
+
+
+def route_after_self_correction(state: AnalysisState) -> str:
+    """self_correction 결과에 따라 라우팅.
+    LLM이 passed=false를 반환한 경우에만 meta_agent로 루프백.
+    """
+    result = state.get("self_correction_result", {})
+    if not result.get("passed", True):
+        logger.info(f"[SelfCorrection] Looping back to meta_agent: {result.get('loop_back_reason')}")
+        return "meta_agent"
+    return "risk_manager"
+
+
 def node_risk_manager(state: AnalysisState) -> dict:
     """Run Risk Manager (CRO). VETO power over Judge's draft."""
     draft = state.get("final_decision", {})
@@ -1984,6 +2225,57 @@ def node_execute_trade(state: AnalysisState) -> dict:
         }
         return {"final_decision": decision}
     
+    # [Quant Layer 5] Execution Planner: 분할 진입 계획 생성
+    exec_plan = {}
+    decision_dir = str(decision.get("decision", "HOLD")).upper()
+    if decision_dir in ["LONG", "SHORT"]:
+        try:
+            cache_key = _cache_key(symbol, TradingMode(state["mode"]))
+            market_data = _market_data_cache.get(cache_key, {}) or {}
+            current_price = float(market_data.get("current_price", 0) or 0)
+            allocation = float(decision.get("allocation_pct", 40) or 40)
+            leverage = float(decision.get("leverage", 1) or 1)
+            exec_style = str(decision.get("recommended_execution_style", "SMART_DCA"))
+            total_size_usd = (
+                float(getattr(__import__("config.settings", fromlist=["settings"]).settings,
+                              "BINANCE_PAPER_BALANCE_USD", 2000.0))
+                * (allocation / 100.0)
+            )
+            exec_plan = execution_planner.plan(
+                symbol=symbol,
+                direction=decision_dir,
+                total_size_usd=total_size_usd,
+                execution_style=exec_style,
+                current_price=current_price,
+                atr_anchor=state.get("atr_anchor", {}),
+                market_data=market_data,
+                approved_allocation_pct=allocation,
+            )
+            decision["execution_plan"] = exec_plan
+            logger.info(
+                f"[ExecPlan] {symbol} {decision_dir} "
+                f"entries={len(exec_plan.get('entries', []))} "
+                f"invalidation={exec_plan.get('invalidation_price', 0):.2f}"
+            )
+        except Exception as e:
+            logger.error(f"[ExecPlan] execution_planner failed: {e}")
+
+    # [Layer 1] factor_signals DB 저장 (결정과 신호 연결)
+    try:
+        factor_ic_result = state.get("factor_ic_result") or {}
+        if factor_ic_result:
+            report_id = None  # generate_report 전이라 아직 없음 — decision_id는 report 후 별도 저장
+            factor_ic_tracker.save_signal_snapshot(
+                symbol=symbol,
+                mode=state.get("mode", "swing"),
+                result=factor_ic_result,
+                decision_id=None,  # post-hoc update in generate_report
+                final_decision=decision_dir,
+                allocation_pct=float(decision.get("allocation_pct", 0) or 0),
+            )
+    except Exception as e:
+        logger.error(f"[FactorSignals] save failed in execute_trade: {e}")
+
     # Bridge to execution
     # This will simulate DCA or single entries based on the mode and CRO sizing
     execution_result = trade_executor.execute_from_decision(
@@ -1992,10 +2284,65 @@ def node_execute_trade(state: AnalysisState) -> dict:
         symbol,
         playbook_context=state.get("playbook_context", {}),
     )
-    
+
     # Attach execution receipt back to the decision for reporting
     decision["execution_receipt"] = execution_result
-    return {"final_decision": decision}
+    return {"final_decision": decision, "execution_plan": exec_plan}
+
+
+def node_paper_order_record(state: AnalysisState) -> dict:
+    """execute_trade 직후 실행 — 가상 포지션을 paper_orders 테이블에 기록.
+
+    - LONG/SHORT이고 paper execution 성공한 경우에만 생성
+    - self_correction_result 스냅샷 포함 (왜 이 거래가 통과했는지)
+    - ws_price_feed가 이 레코드를 모니터링해서 SL/TP 청산 처리
+    """
+    decision = state.get("final_decision", {})
+    direction = str(decision.get("decision", "HOLD")).upper()
+
+    if direction not in ("LONG", "SHORT"):
+        return {"paper_order": None, "paper_order_id": None}
+
+    receipt = decision.get("execution_receipt", {})
+    if not receipt.get("success"):
+        logger.info(f"[PaperOrder] Skipping record — execution not successful: {receipt.get('error')}")
+        return {"paper_order": None, "paper_order_id": None}
+
+    exec_plan = state.get("execution_plan") or decision.get("execution_plan") or {}
+    factor_ic = state.get("factor_ic_result") or {}
+    sc_result = state.get("self_correction_result") or {}
+
+    # 첫 번째 진입가 기준 (DCA 플랜의 첫 진입)
+    entries = exec_plan.get("entries", [])
+    entry_price = float(entries[0].get("price", 0)) if entries else float(decision.get("entry_price") or 0)
+
+    paper_order = {
+        "symbol":                   state["symbol"],
+        "mode":                     state["mode"],
+        "side":                     direction,
+        "size_usdt":                float(exec_plan.get("total_size_usd") or 0),
+        "entry_price":              entry_price,
+        "sl_price":                 float(exec_plan.get("invalidation_price") or decision.get("stop_loss") or 0),
+        "tp1_price":                float(exec_plan.get("tp1") or decision.get("take_profit") or 0),
+        "tp2_price":                float(exec_plan.get("tp2") or 0),
+        "allocation_pct":           float(decision.get("allocation_pct") or 0),
+        "leverage":                 float(decision.get("leverage") or 1),
+        "status":                   "OPEN",
+        "self_correction_passed":   bool(sc_result.get("passed", True)),
+        "self_correction_result":   sc_result,
+        "correction_loop_count":    int(state.get("correction_loop_count") or 0),
+        "alpha_score":              float(factor_ic.get("alpha_score") or 0),
+        "factor_signals_snapshot":  factor_ic,
+        "regime":                   state.get("market_regime"),
+    }
+
+    order_id = db.insert_paper_order(paper_order)
+    if order_id:
+        logger.info(f"[PaperOrder] Created id={order_id} | {state['symbol']} {direction} @ {entry_price:.2f}")
+    else:
+        logger.warning("[PaperOrder] DB insert returned None")
+
+    return {"paper_order": paper_order, "paper_order_id": order_id}
 
 
 def _safe_float(value) -> Optional[float]:
@@ -2467,18 +2814,31 @@ def build_analysis_graph():
     graph.add_node("context_gathering", node_context_gathering)
     graph.add_node("unify_narrative", node_unify_narrative)
     graph.add_node("meta_agent", node_meta_agent)
-    
+
     # Core decision path
     graph.add_node("triage", node_triage)
     graph.add_node("generate_chart", node_generate_chart)
     graph.add_node("rule_based_chart", node_rule_based_chart)
     graph.add_node("vlm_expert", node_vlm_geometric_expert)
+
+    # [Quant Layer 1] Factor IC 계산 — vlm_expert 후, judge 전
+    graph.add_node("factor_signals", node_factor_signals)
+
     graph.add_node("judge_agent", node_judge_agent)
     graph.add_node("risk_manager", node_risk_manager)
+
+    # [Quant Layer 2+3] Portfolio Risk + Risk Budget — risk_manager 후, leverage_guard 전
+    graph.add_node("risk_budget", node_risk_budget)
+
     graph.add_node("portfolio_leverage_guard", node_portfolio_leverage_guard)
     graph.add_node("execute_trade", node_execute_trade)
+    graph.add_node("paper_order_record", node_paper_order_record)  # NEW
+    graph.add_node("report_writer", node_report_writer)
     graph.add_node("generate_report", node_generate_report)
     graph.add_node("data_synthesis", node_data_synthesis)
+
+    # Self-correction node (judge → self_correction → risk_manager or meta_agent)
+    graph.add_node("self_correction", node_self_correction)         # NEW
 
     graph.set_entry_point("collect_data")
 
@@ -2493,16 +2853,27 @@ def build_analysis_graph():
 
     # VLM node exists in the graph but internally decides whether to run
     # based on triage + deterministic chart rules.
-    # IMPORTANT: Keep a single upstream path to avoid double-triggering
-    # downstream judge/risk nodes and concurrent writes to final_decision.
     graph.add_edge("rule_based_chart", "vlm_expert")
 
-    # Sequential finalization
-    graph.add_edge("vlm_expert", "judge_agent")
-    graph.add_edge("judge_agent", "risk_manager")
-    graph.add_edge("risk_manager", "portfolio_leverage_guard")
+    # [Quant Layer 1] factor_signals 노드 삽입 (vlm → factor_signals → judge)
+    graph.add_edge("vlm_expert", "factor_signals")
+    graph.add_edge("factor_signals", "judge_agent")
+
+    # [Self-correction] judge → self_correction → risk_manager (or loop back to meta_agent)
+    graph.add_edge("judge_agent", "self_correction")
+    graph.add_conditional_edges(
+        "self_correction",
+        route_after_self_correction,
+        {"risk_manager": "risk_manager", "meta_agent": "meta_agent"},
+    )
+
+    # [Quant Layer 2+3] risk_budget 노드 삽입 (risk_manager → risk_budget → leverage_guard)
+    graph.add_edge("risk_manager", "risk_budget")
+    graph.add_edge("risk_budget", "portfolio_leverage_guard")
+
     graph.add_edge("portfolio_leverage_guard", "execute_trade")
-    graph.add_edge("execute_trade", "report_writer")
+    graph.add_edge("execute_trade", "paper_order_record")           # NEW: 포지션 기록
+    graph.add_edge("paper_order_record", "report_writer")
     graph.add_edge("report_writer", "generate_report")
     graph.add_edge("generate_report", "data_synthesis")
     graph.add_edge("data_synthesis", END)
@@ -3048,6 +3419,12 @@ class Orchestrator:
             logger.error(f"Judge error: {e}")
             state["final_decision"] = {"decision": "HOLD", "reasoning": str(e), "confidence": 0}
 
+        # Self-correction (sequential: 루프백 없이 1회만 실행)
+        try:
+            state.update(node_self_correction(state))
+        except Exception as e:
+            logger.error(f"Self-correction error (sequential): {e}")
+
         # [FIX CRASH-1] Risk Manager (CRO) - was completely missing from sequential fallback
         try:
             state.update(node_risk_manager(state))
@@ -3064,6 +3441,12 @@ class Orchestrator:
             state.update(node_execute_trade(state))
         except Exception as e:
             logger.error(f"Trade execution error (sequential): {e}")
+
+        # Paper order record
+        try:
+            state.update(node_paper_order_record(state))
+        except Exception as e:
+            logger.error(f"Paper order record error (sequential): {e}")
 
         # Report
         try:

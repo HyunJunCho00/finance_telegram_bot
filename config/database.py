@@ -117,7 +117,7 @@ class DatabaseClient:
         "trade_executions", "dune_query_results", "daily_playbooks",
         "monitor_logs", "market_status_events", "evaluation_predictions",
         "evaluation_outcomes", "evaluation_component_scores",
-        "evaluation_rollups_daily",
+        "evaluation_rollups_daily", "paper_orders",
     }
 
     def __init__(self):
@@ -1004,5 +1004,166 @@ class DatabaseClient:
 
         return results
 
+    # ══════════════════════════════════════════════════════════════════════════
+    # Quant Layer 1/6: Factor Signals, IC History, Trade Attribution
+    # ══════════════════════════════════════════════════════════════════════════
+
+    def insert_factor_signals(self, data: dict) -> dict:
+        """factor_signals 테이블에 신호 스냅샷 저장."""
+        try:
+            r = self.client_text.table("factor_signals").insert(data).execute()
+            return r.data[0] if r.data else {}
+        except Exception as e:
+            logger.error(f"[DB] insert_factor_signals failed: {e}")
+            return {}
+
+    def get_factor_signals_by_decision_id(self, decision_id: str) -> dict:
+        """decision_id로 factor_signals 레코드 조회."""
+        try:
+            if not decision_id:
+                return {}
+            r = (
+                self.client_text.table("factor_signals")
+                .select("*")
+                .eq("decision_id", str(decision_id))
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            return r.data[0] if r.data else {}
+        except Exception as e:
+            logger.error(f"[DB] get_factor_signals_by_decision_id failed: {e}")
+            return {}
+
+    def get_factor_signals(
+        self,
+        symbol: str,
+        limit: int = 100,
+        mode: str = None,
+    ) -> list:
+        """최근 factor_signals 목록 조회."""
+        try:
+            q = (
+                self.client_text.table("factor_signals")
+                .select("*")
+                .eq("symbol", symbol)
+                .order("created_at", desc=True)
+                .limit(limit)
+            )
+            if mode:
+                q = q.eq("mode", mode)
+            r = q.execute()
+            return r.data or []
+        except Exception as e:
+            logger.error(f"[DB] get_factor_signals failed: {e}")
+            return []
+
+    def upsert_factor_ic(self, data: dict) -> dict:
+        """factor_ic_history 테이블에 IC 값 저장 (upsert)."""
+        try:
+            r = self.client_text.table("factor_ic_history").insert(data).execute()
+            return r.data[0] if r.data else {}
+        except Exception as e:
+            logger.error(f"[DB] upsert_factor_ic failed: {e}")
+            return {}
+
+    def get_factor_ic_history(
+        self,
+        symbol: str,
+        factor_name: str = None,
+        regime: str = None,
+        limit: int = 1,
+    ) -> list:
+        """최신 IC 히스토리 조회. factor_name 없으면 모든 팩터 반환."""
+        try:
+            q = (
+                self.client_text.table("factor_ic_history")
+                .select("*")
+                .eq("symbol", symbol)
+                .order("computed_at", desc=True)
+                .limit(limit * 8)  # 팩터 수만큼 여유 있게
+            )
+            if factor_name:
+                q = q.eq("factor_name", factor_name)
+            if regime:
+                q = q.eq("regime", regime)
+            r = q.execute()
+            if not r.data:
+                return []
+            # 팩터별 가장 최신 1개만
+            seen = set()
+            result = []
+            for row in r.data:
+                key = (row.get("factor_name"), row.get("regime"))
+                if key not in seen:
+                    seen.add(key)
+                    result.append(row)
+            return result
+        except Exception as e:
+            logger.error(f"[DB] get_factor_ic_history failed: {e}")
+            return []
+
+    def insert_trade_attribution(self, data: dict) -> dict:
+        """trade_attribution 테이블에 거래 귀인 저장."""
+        try:
+            r = self.client_text.table("trade_attribution").insert(data).execute()
+            return r.data[0] if r.data else {}
+        except Exception as e:
+            logger.error(f"[DB] insert_trade_attribution failed: {e}")
+            return {}
+
+    def get_trade_attributions(
+        self,
+        symbol: str,
+        limit: int = 90,
+    ) -> list:
+        """최근 trade_attribution 목록 조회."""
+        try:
+            r = (
+                self.client_text.table("trade_attribution")
+                .select("*")
+                .eq("symbol", symbol)
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            return r.data or []
+        except Exception as e:
+            logger.error(f"[DB] get_trade_attributions failed: {e}")
+            return []
+
+    # ── Paper Orders ───────────────────────────────────────────────────────────
+
+    def insert_paper_order(self, data: dict) -> Optional[int]:
+        """paper_orders 테이블에 가상 포지션 기록. 생성된 id 반환."""
+        try:
+            r = self.client_text.table("paper_orders").insert(data).execute()
+            return r.data[0]["id"] if r.data else None
+        except Exception as e:
+            logger.error(f"[DB] insert_paper_order failed: {e}")
+            return None
+
+    def get_open_paper_orders(self) -> List[Dict]:
+        """현재 OPEN 상태인 모든 paper_orders 조회 (ws_price_feed 모니터링용)."""
+        try:
+            r = (
+                self.client_text.table("paper_orders")
+                .select("*")
+                .eq("status", "OPEN")
+                .execute()
+            )
+            return r.data or []
+        except Exception as e:
+            logger.error(f"[DB] get_open_paper_orders failed: {e}")
+            return []
+
+    def update_paper_order_closed(self, order_id: int, data: dict) -> bool:
+        """paper_order 청산 처리 (exit_price, pnl, status 업데이트)."""
+        try:
+            self.client_text.table("paper_orders").update(data).eq("id", order_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"[DB] update_paper_order_closed failed: {e}")
+            return False
 
 db = DatabaseClient()

@@ -160,6 +160,14 @@ Identify what worked and provide:
             evaluation = item.get("evaluation", {})
             if evaluation and not evaluation.get("error"):
                 self.generate_feedback(evaluation)
+
+                # [Quant Layer 6] Factor Attribution & IC 피드백 루프
+                try:
+                    from evaluators.trade_attribution_engine import trade_attribution_engine
+                    trade_attribution_engine.run_attribution_for_evaluation(evaluation)
+                except Exception as _attr_err:
+                    logger.warning(f"[Attribution] run_attribution_for_evaluation skipped: {_attr_err}")
+
             if report_created_at and (not max_cursor or report_created_at > max_cursor):
                 max_cursor = report_created_at
 

@@ -146,6 +146,12 @@ class Settings(BaseSettings):
     ENABLE_DIRECT_MCP_TRADING: bool = False
     BINANCE_USE_TESTNET: bool = False
     UPBIT_PAPER_ONLY: bool = True
+
+    # ===== Order execution safety =====
+    # 분석 기준가 대비 현재가 편차가 이 값 초과 시 주문 스킵 (0 = 비활성화)
+    MAX_ENTRY_DEVIATION_PCT: float = 2.0
+    # SMART_DCA 지정가 주문 미체결 시 자동 취소 시간 (분, 기본 4시간)
+    SMART_DCA_LIMIT_TTL_MINUTES: int = 240
     
     # ===== V8: Retail Multi-Exchange Execution Limits =====
     # Hardcoded by User Request for Retail Scale limits
@@ -326,8 +332,9 @@ class Settings(BaseSettings):
     # ===== Candle Limits per Mode (Supabase gap-fill 상한) =====
     # 1m 캔들은 GCS 로컬 캐시(역사적 데이터)에서 로드 후,
     # 캐시의 마지막 타임스탬프 ~ 현재까지의 갭만 Supabase에서 보충.
-    # Supabase 보존 기간(RETENTION_MARKET_DATA_DAYS=30일) 기준 최대 43,200개.
-    SWING_CANDLE_LIMIT: int = 43200
+    # GCS 로컬 캐시가 없을 때 fallback 상한을 2일(2880)로 제한하여 egress 절감.
+    # (이전: 43,200 = 30일 → Supabase egress 초과 원인)
+    SWING_CANDLE_LIMIT: int = 2880
 
     # ===== Historical Window (GCS 로컬 캐시 로딩 기간) =====
     # Swing: 6개월 (1m 세부 분석)
