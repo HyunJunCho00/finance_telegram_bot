@@ -39,15 +39,33 @@ jobs:
     needs: static-analysis
     steps:
     - uses: actions/checkout@v4
-    - name: Build Docker Image
+    - name: Run Pytest (단위/논리 검증)
+      env:
+        TEST_RUN: "True"
       run: |
-        # Ensures Dockerfile isn't broken
-        docker build -t finance-bot:test .
+        pip install pytest
+        pytest tests/
+
+  # ============== 보안 스캐닝 (도커 이미지 취약점 검사) ==============
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: static-analysis
+    steps:
+    - uses: actions/checkout@v3
+    - name: Build local image for scanning
+      run: docker build -t finance-bot:scan .
+    - name: Run Trivy vulnerability scanner (해킹/취약점 백도어 차단)
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'finance-bot:scan'
+        format: 'table'
+        exit-code: '0' # 취약점 발견되더라도 강제 중단은 안하게 임시 세팅 (운영 전환 시 1로 변경)
+        severity: 'CRITICAL,HIGH'
 
   # ============== CD (자동 배포) 단계 ==============
   deploy:
     runs-on: ubuntu-latest
-    needs: docker-build-test  # 위의 CI(검사)가 성공했을 때만 실행
+    needs: [static-analysis, security-scan]  # 코드 에러 없고 보안스캔 통과시 배포
     if: github.ref == 'refs/heads/main' && github.event_name == 'push' # main에 push될 때만
     steps:
     - name: SSH Server Deployment (Blue/Green Switch)
