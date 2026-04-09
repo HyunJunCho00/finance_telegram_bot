@@ -56,6 +56,7 @@ jobs:
         host: ${{ secrets.SERVER_HOST }}     # 서버 IP
         username: ${{ secrets.SERVER_USER }} # 서버 아이디
         key: ${{ secrets.SERVER_SSH_KEY }}   # 접속용 Private Key
+        command_timeout: 30m                 # 긴 도커 빌드 시간(최대 30분) 허용
         script: |
           # 서버 내 봇 폴더로 이동 (GitHub Secrets에서 경로 불러옴)
           cd ${{ secrets.SERVER_DEPLOY_PATH }}

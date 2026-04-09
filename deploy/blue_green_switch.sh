@@ -13,7 +13,7 @@ echo "🚀 Starting Graceful Deployment Process..."
 
 # 1. 새 버전 이미지 빌드
 echo "🔨 Building new Docker image..."
-docker compose build
+docker build -t finance-bot:latest .
 
 # 2. 🟢 먼저 그린 환경(Shadow)을 띄워 로직 무결성을 확인합니다 (Paper Trading 모드)
 echo "🟢 Spinning up Green Environment in Shadow(Paper) mode..."
