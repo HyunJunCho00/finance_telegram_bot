@@ -63,9 +63,7 @@ COMMANDS.md
 ACID_FINANCE_HARDENING.md
 
 # Tests and Temporary Scripts
-test/
-test*
-!tests/test_health.py
+/tests/temp/
 AI_test.py
 ARCHITECTURE_V8_FINAL.md
 setup_telegram_session.py
