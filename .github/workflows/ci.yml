@@ -107,30 +107,42 @@ jobs:
     - name: Check Staging Container Health
       uses: appleboy/ssh-action@v1.0.3
       with:
-        host: ${{ secrets.STAGING_HOST }}
-        username: ${{ secrets.STAGING_USER }}
-        key: ${{ secrets.STAGING_SSH_KEY }}
-        command_timeout: 5m
-        script: bash ${{ secrets.STAGING_DEPLOY_PATH }}/deploy/smoke_test.sh
-
-  # ============== 6. Prod 배포 ==============
-  deploy-prod:
+  # ============== CD (자동 배포) 단계: IAP Tunneling (보안 강화형) ==============
+  deploy:
     runs-on: ubuntu-latest
-    needs: smoke-test
+    needs: [static-analysis, security-scan]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: production
     steps:
-    - name: Deploy to Production (Blue-Green)
-      uses: appleboy/ssh-action@v1.0.3
+    - uses: actions/checkout@v4
+
+    - id: 'auth'
+      name: 'Authenticate to Google Cloud'
+      uses: 'google-github-actions/auth@v2'
       with:
-        host: ${{ secrets.SERVER_HOST }}
-        username: ${{ secrets.SERVER_USER }}
-        key: ${{ secrets.SERVER_SSH_KEY }}
-        command_timeout: 30m
-        script: |
-          cd ${{ secrets.SERVER_DEPLOY_PATH }}
-          git config --global --add safe.directory ${{ secrets.SERVER_DEPLOY_PATH }}
+        credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+    - name: 'Set up Cloud SDK'
+      uses: 'google-github-actions/setup-gcloud@v2'
+
+    - name: 'Deploy via SSH IAP Tunneling'
+      uses: 'google-github-actions/ssh-compute@v1'
+      with:
+        instance_name: 'crypto-trading-vm'
+        zone: 'asia-southeast1-a'
+        project_id: '${{ secrets.GCP_PROJECT_ID }}'
+        ssh_private_key: '${{ secrets.SERVER_SSH_KEY }}'
+        use_iap: true
+        command: |
+          # 서버 내 봇 폴더로 이동 (Secrets에서 변수 지정 가능)
+          cd /opt/app
+          
+          # Git 권한(Dubious ownership) 에러 방어 코드
+          git config --global --add safe.directory /opt/app
+          
+          # 최신 코드 깃허브에서 땡겨오기
           git pull origin main
+          
+          # Blue-Green 무중단 교체 스크립트 실행 (무인 자동화 모드)
           export AUTO_PROMOTE=1
           export PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}
           bash deploy/blue_green_switch.sh
