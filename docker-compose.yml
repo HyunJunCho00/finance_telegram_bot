@@ -4,6 +4,8 @@ version: '3.8'
 x-bot-service: &bot-service
   build: .
   image: finance-bot:latest
+  volumes:
+    - /opt/app/data:/app/data
   logging:
     driver: "json-file"
     options:
