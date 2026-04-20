@@ -103,22 +103,15 @@ echo "=== Startup: $(date) ==="
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq git ca-certificates curl gnupg
+apt-get install -y -qq git docker.io docker-compose-v2
 
-# ── Docker Engine + Compose plugin 설치 ──
-install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-chmod a+r /etc/apt/keyrings/docker.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
-  > /etc/apt/sources.list.d/docker.list
-apt-get update -qq
-apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-# docker 소켓 권한 (서비스 계정 접근 허용)
-usermod -aG docker ubuntu 2>/dev/null || true
+# docker 서비스 시작 + 부팅 자동 등록
 systemctl enable docker
 systemctl start docker
+
+# SSH 접속 유저가 sudo 없이 docker 사용 가능하게
+usermod -aG docker ubuntu 2>/dev/null || true
+echo 'export PATH=/usr/bin:$PATH' >> /home/ubuntu/.bashrc
 
 # ── 레포 클론 ──
 APP_DIR="/opt/app"
@@ -137,7 +130,7 @@ git config --global --add safe.directory "$APP_DIR"
 # ── 초기 이미지 빌드 및 공유 계층(shared) 컨테이너 기동 ──
 # shared-data / shared-listener / shared-bot 은 항상 켜져 있어야 하므로 VM 기동 시 자동 시작
 export PROJECT_ID=PLACEHOLDER_PROJECT_ID
-docker compose up -d shared-data shared-listener shared-bot
+/usr/bin/docker compose -f "$APP_DIR/docker-compose.yml" up -d shared-data shared-listener shared-bot
 
 # ── VM 재부팅 시 shared 계층 자동 복구 ──
 sed "s|Environment=\"PROJECT_ID=\"|Environment=\"PROJECT_ID=PLACEHOLDER_PROJECT_ID\"|g" \

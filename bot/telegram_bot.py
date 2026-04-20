@@ -1370,3 +1370,6 @@ class TradingBot:
 
 
 trading_bot = TradingBot()
+
+if __name__ == "__main__":
+    trading_bot.run()

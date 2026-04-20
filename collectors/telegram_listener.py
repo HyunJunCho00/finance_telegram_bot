@@ -499,3 +499,7 @@ class TelegramListener:
         return ""
 
 telegram_listener = TelegramListener()
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(telegram_listener.start())
