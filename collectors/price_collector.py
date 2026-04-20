@@ -332,21 +332,7 @@ class PriceCollector:
                 f"written to local parquet cache"
             )
 
-        # ── 2순위: Supabase (실패해도 무방) ──────────────────────────────
-        all_market = [r for rows in binance_market.values() for r in rows] + upbit_market
-        all_cvd    = [r for rows in binance_cvd.values() for r in rows]
-
-        if all_market:
-            try:
-                db.batch_insert_market_data(all_market)
-            except Exception as e:
-                logger.warning(f"[DB] market_data Supabase write skipped: {e}")
-
-        if all_cvd:
-            try:
-                db.batch_upsert_cvd_data(all_cvd)
-            except Exception as e:
-                logger.warning(f"[DB] cvd_data Supabase write skipped: {e}")
+        # Supabase market_data / cvd_data 제거 — 로컬 parquet이 단일 소스
 
     def run(self) -> None:
         data = self.collect_all_prices()

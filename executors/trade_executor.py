@@ -7,6 +7,7 @@ from config.local_state import state_manager
 from loguru import logger
 from executors.execution_repository import DuplicateActiveIntentError, execution_repository
 from executors.outbox_dispatcher import outbox_dispatcher
+from executors.exchange_circuit_breaker import get_breaker, is_trip_worthy
 
 # ── Prometheus 메트릭 ──────────────────────────────────────────────────────────
 try:
@@ -294,8 +295,8 @@ class TradeExecutor:
                 return False, msg
             return True, ""
         except Exception as e:
-            logger.warning(f"Paper budget pre-check failed ({exchange}): {e}")
-            return True, ""
+            logger.error(f"Paper budget pre-check failed ({exchange}): {e}")
+            return False, f"Budget check error ({exchange}): {e}"
 
     def execute(
         self,
@@ -545,26 +546,81 @@ class TradeExecutor:
         tp_price: float = 0.0,
         sl_price: float = 0.0,
     ) -> Dict:
+        """
+        amount: USD notional. Converted to coin quantity internally before sending to Binance.
+        Binance Futures create_order expects base asset quantity (e.g. BTC), not USD.
+
+        Circuit Breaker 통합:
+          - OPEN 상태이면 거래소 API 호출 없이 즉시 Fail-Fast
+          - 헬스 예외(NetworkError 계열) N회 연속 → OPEN
+          - probe 성공 → CLOSED 복귀
+        """
+        breaker = get_breaker("binance")
+
+        # [CB] OPEN이면 API 호출 없이 즉시 차단
+        if not breaker.allow_request():
+            s = breaker.status()
+            logger.warning(
+                f"[CB:binance] OPEN — {side} {symbol} 차단 "
+                f"(probe까지 {s['seconds_until_probe']:.0f}s)"
+            )
+            return {
+                "success": False,
+                "paper": False,
+                "error": (
+                    f"Binance circuit breaker OPEN — "
+                    f"retry in {s['seconds_until_probe']:.0f}s"
+                ),
+                "circuit_open": True,
+            }
+
         try:
-            self.binance.set_leverage(leverage, symbol)
+            # [SAFETY] Fetch live price for USD → coin conversion.
+            # Must happen before set_leverage so we fail fast if price is unavailable.
+            ref_price = self._get_reference_price(symbol, 'binance')
+            if not ref_price:
+                return {"success": False, "paper": False, "error": "Could not fetch price for quantity calculation"}
+
+            coin_qty = amount / ref_price
+            # Round to Binance minimum step size to avoid precision rejection.
+            # CCXT normalises this via market info but we round conservatively to 3 dp.
+            coin_qty = round(coin_qty, 3)
+            if coin_qty <= 0:
+                return {"success": False, "paper": False, "error": f"Calculated coin_qty={coin_qty} is invalid"}
+
+            # [SAFETY] set_leverage failure must block the order — wrong leverage = wrong risk.
+            try:
+                self.binance.set_leverage(leverage, symbol)
+            except Exception as lev_err:
+                # 헬스 에러 → CB 트리핑; 비즈니스 에러 → 거래소가 살아있으므로 success 기록
+                if is_trip_worthy(lev_err):
+                    breaker.record_failure(lev_err)
+                else:
+                    breaker.record_success()
+                return {"success": False, "paper": False, "error": f"set_leverage failed: {lev_err}"}
 
             order = self.binance.create_order(
                 symbol=symbol,
                 type='market',
                 side=side.lower(),
-                amount=amount
+                amount=coin_qty,  # Coin quantity, NOT USD notional
             )
+
+            # [CB] 거래소 호출 성공 → CLOSED 복귀
+            breaker.record_success()
 
             # [P2] Market orders return average fill price, not limit price.
             exchange_order_id = str(order.get('id') or '')
             filled_price = order.get('average') or order.get('price')
+            # Use actual filled quantity from exchange response for TP/SL bracket sizing.
+            filled_qty = float(order.get('amount') or order.get('filled') or coin_qty)
 
             # [P2] If fill price not yet available (async matching engine), schedule verification.
             if not filled_price and exchange_order_id:
                 self._enqueue_fill_check("binance", exchange_order_id, symbol)
 
             # [PERF] Register TP/SL bracket at exchange level immediately after entry.
-            # Eliminates Python-side monitoring loop latency for exits.
+            # Use filled_qty (coin) — not USD notional — for reduceOnly bracket orders.
             close_side = 'sell' if side.upper() == 'LONG' else 'buy'
             bracket_ids: Dict[str, str] = {}
             if tp_price > 0:
@@ -573,7 +629,7 @@ class TradeExecutor:
                         symbol=symbol,
                         type='TAKE_PROFIT_MARKET',
                         side=close_side,
-                        amount=amount,
+                        amount=filled_qty,
                         params={'stopPrice': tp_price, 'reduceOnly': True},
                     )
                     bracket_ids['tp_order_id'] = str(tp_order.get('id') or '')
@@ -587,7 +643,7 @@ class TradeExecutor:
                         symbol=symbol,
                         type='STOP_MARKET',
                         side=close_side,
-                        amount=amount,
+                        amount=filled_qty,
                         params={'stopPrice': sl_price, 'reduceOnly': True},
                     )
                     bracket_ids['sl_order_id'] = str(sl_order.get('id') or '')
@@ -601,7 +657,7 @@ class TradeExecutor:
                 "exchange": "binance",
                 "symbol": symbol,
                 "side": side,
-                "amount": amount,
+                "amount": filled_qty,
                 "leverage": leverage,
                 "order_id": exchange_order_id,
                 "filled_price": filled_price,
@@ -611,6 +667,8 @@ class TradeExecutor:
             }
 
         except Exception as e:
+            # 예상치 못한 예외 — 헬스 에러면 CB 트리핑
+            breaker.record_failure(e)
             logger.error(f"Binance execution error: {e}")
             return {"success": False, "paper": False, "error": str(e)}
 

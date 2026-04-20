@@ -70,13 +70,17 @@ class FearGreedCollector:
         data = self.fetch()
         if data:
             try:
-                db.upsert_fear_greed(data)
+                import pandas as pd
+                from processors.gcs_parquet import gcs_parquet_store
+                df = pd.DataFrame([data])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+                gcs_parquet_store.write_timeseries_to_local("fear_greed", "global", df, ["timestamp"])
                 logger.info(
                     f"Fear & Greed: {data['value']} ({data['classification']})"
                     f"  prev={data.get('value_prev')} Δ={data.get('change')}"
                 )
             except Exception as e:
-                logger.error(f"Fear & Greed DB save error: {e}")
+                logger.error(f"Fear & Greed save error: {e}")
 
 
 fear_greed_collector = FearGreedCollector()

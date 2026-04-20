@@ -69,44 +69,18 @@ class MCPTools:
                     month_start = now_utc.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
                     cvd_hist = cvd_hist[cvd_hist['timestamp'] < month_start].copy()
 
-                since_cvd = cvd_hist['timestamp'].max() if not cvd_hist.empty else None
-                bridge_cvd = db.get_cvd_data(symbol, limit=db_limit, since=since_cvd) if since_cvd is not None else pd.DataFrame()
-                cvd_recent = db.get_cvd_data(symbol, limit=db_limit)
-                merged_cvd = merge_cvd_sources(cvd_hist, bridge_cvd, cvd_recent)
-
+                # CVD: parquet에서 직접 로드 (Supabase 불필요)
+                cvd_all = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back_timeseries)
                 fallback_px = float(df['close'].iloc[-1]) if not df.empty else 60000.0
                 price_timeline = build_price_timeline(df_1m=df, df_1d=df_1d, fallback_price=fallback_px)
-                cvd_df = normalize_cvd_to_usd(merged_cvd, price_timeline, fallback_price=fallback_px)
+                cvd_df = normalize_cvd_to_usd(cvd_all, price_timeline, fallback_price=fallback_px)
 
-                fnd_hist_dfs = []
-                for m in range(1, m_back + 1):
-                    month_str = (now_utc - pd.DateOffset(months=m)).strftime("%Y-%m")
-                    path = f"funding/{symbol}/{month_str}.parquet"
-                    df_part = gcs_parquet_store._download_parquet(path)
-                    if df_part is not None:
-                        fnd_hist_dfs.append(df_part)
-
-                fnd_hist = pd.concat(fnd_hist_dfs, ignore_index=True) if fnd_hist_dfs else pd.DataFrame()
-                if not fnd_hist.empty:
-                    fnd_hist.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
-                    fnd_hist = fnd_hist.loc[:, ~fnd_hist.columns.duplicated()].reset_index(drop=True)
-                    fnd_hist['timestamp'] = pd.to_datetime(fnd_hist['timestamp'], utc=True)
-
-                    fnd_recent = db.get_funding_history(symbol, limit=db_limit)
-                    if fnd_recent is not None and not fnd_recent.empty:
-                        fnd_recent.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
-                        fnd_recent = fnd_recent.loc[:, ~fnd_recent.columns.duplicated()].reset_index(drop=True)
-                        fnd_recent['timestamp'] = pd.to_datetime(fnd_recent['timestamp'], utc=True)
-
-                        funding_df = pd.concat([fnd_hist, fnd_recent], ignore_index=True).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-                        funding_df = funding_df.reset_index(drop=True)
-                    else:
-                        funding_df = fnd_hist
-                else:
-                    funding_df = db.get_funding_history(symbol, limit=db_limit)
-                    if funding_df is not None and not funding_df.empty:
-                        funding_df.rename(columns={'open_interest_value': 'open_interest'}, inplace=True)
-                        funding_df['timestamp'] = pd.to_datetime(funding_df['timestamp'], utc=True)
+                # Funding: parquet에서 직접 로드
+                funding_df = gcs_parquet_store.get_funding_history_parquet(symbol, limit=0)
+                if funding_df is not None and not funding_df.empty:
+                    funding_df = funding_df.rename(columns={'open_interest_value': 'open_interest'})
+                    funding_df = funding_df.loc[:, ~funding_df.columns.duplicated()].reset_index(drop=True)
+                    funding_df['timestamp'] = pd.to_datetime(funding_df['timestamp'], utc=True)
 
                 liq_df = db.get_liquidation_data(symbol, limit=db_limit)
             except Exception as e:
@@ -152,18 +126,9 @@ class MCPTools:
                     cvd_hist = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
                     fnd_hist = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
 
-                    # Merge with recent DB data
-                    cvd_recent = db.get_cvd_data(symbol, limit=2880)
-                    if not cvd_hist.empty:
-                        cvd_df = pd.concat([cvd_hist, cvd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-                    else:
-                        cvd_df = cvd_recent
-
-                    fnd_recent = db.get_funding_history(symbol, limit=2880)
-                    if not fnd_hist.empty:
-                        funding_df = pd.concat([fnd_hist, fnd_recent]).drop_duplicates(subset=['timestamp']).sort_values('timestamp')
-                    else:
-                        funding_df = fnd_recent
+                    # CVD / Funding: parquet에서 직접 로드
+                    cvd_df = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=m_back)
+                    funding_df = gcs_parquet_store.get_funding_history_parquet(symbol, limit=0)
                 except Exception as e:
                     logger.warning(f"GCS load for analysis tool skipped: {e}")
 
@@ -181,7 +146,7 @@ class MCPTools:
 
     def get_telegram_summary(self, hours: int = 4) -> Dict:
         try:
-            messages = db.get_recent_telegram_messages(hours=hours)
+            messages = gcs_parquet_store.get_recent_telegram_messages_parquet(hours=hours)
             if not messages:
                 return {"summary": "No recent news", "message_count": 0}
 
@@ -240,7 +205,9 @@ class MCPTools:
     def get_cvd_data(self, symbol: str, limit: int = 240) -> Dict:
         """Get CVD (Cumulative Volume Delta) data."""
         try:
-            cvd_df = db.get_cvd_data(symbol, limit=limit)
+            cvd_df = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=1)
+            if not cvd_df.empty and limit > 0:
+                cvd_df = cvd_df.tail(limit).reset_index(drop=True)
             if cvd_df.empty:
                 return {"error": "No CVD data available"}
 

@@ -11,6 +11,7 @@ from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
 from config.settings import settings
 from config.database import db
+from processors.gcs_parquet import gcs_parquet_store
 from agents.ai_router import ai_client
 from processors.light_rag import light_rag
 from utils.text_sanitizer import clean_telegram_text
@@ -350,8 +351,8 @@ class TelegramListener:
 
     def _get_max_id(self, channel: str) -> int:
         try:
-            res = db.client.table("telegram_messages").select("message_id").eq("channel", channel).order("message_id", desc=True).limit(1).execute()
-            return res.data[0]["message_id"] if res.data else 0
+            from processors.gcs_parquet import gcs_parquet_store
+            return gcs_parquet_store.get_max_telegram_message_id(channel)
         except Exception as e:
             logger.warning(f"_get_max_id failed for {channel}, starting from 0: {e}")
             return 0
@@ -374,15 +375,14 @@ class TelegramListener:
             "timestamp": message.date.isoformat() if hasattr(message, 'date') and message.date else datetime.now(timezone.utc).isoformat()
         }
         
-        # 1. Immediate Persistence (V13.8 Refactor)
-        # [FIX] Wrap sync DB call to prevent loop blocking
+        # 1. Immediate Persistence — 로컬 parquet
         await asyncio.to_thread(
-            db.upsert_telegram_message,
+            gcs_parquet_store.write_telegram_to_local,
             {
-                "channel": sender_name, 
-                "text": clean_text, 
+                "channel": sender_name,
+                "text": clean_text,
                 "message_id": message.id,
-                "timestamp": msg_payload["timestamp"]
+                "timestamp": msg_payload["timestamp"],
             }
         )
 

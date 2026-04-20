@@ -62,32 +62,25 @@ class GCSParquetStore:
     def _build_archive_specs(self) -> List[ArchiveSpec]:
         report_days = int(getattr(settings, "RETENTION_REPORTS_DAYS", 365))
         market_days = int(getattr(settings, "RETENTION_MARKET_DATA_DAYS", 30))
-        cvd_days = int(getattr(settings, "RETENTION_CVD_DAYS", 30))
-        telegram_days = int(getattr(settings, "RETENTION_TELEGRAM_DAYS", 90))
         execution_days = int(getattr(settings, "RETENTION_EXECUTIONS_DAYS", report_days))
         evaluation_days = int(getattr(settings, "RETENTION_EVALUATION_DAYS", report_days))
         evaluation_component_days = int(getattr(settings, "RETENTION_EVALUATION_COMPONENT_DAYS", report_days))
         rollup_days = int(getattr(settings, "RETENTION_ROLLUPS_DAYS", report_days * 10))
 
+        # 로컬 parquet으로 이전된 테이블은 여기서 제외:
+        # market_data, cvd_data, funding_data, telegram_messages,
+        # macro_data, deribit_data, fear_greed_data, onchain_daily_snapshots
         return [
-            ArchiveSpec("market_data", "timestamp", market_days, "ohlcv/1m", symbol_column="symbol"),
-            ArchiveSpec("cvd_data", "timestamp", cvd_days, "cvd", symbol_column="symbol"),
-            ArchiveSpec("funding_data", "timestamp", market_days, "funding", symbol_column="symbol"),
-            ArchiveSpec("telegram_messages", "created_at", telegram_days, "archive/telegram_messages"),
             ArchiveSpec("narrative_data", "timestamp", report_days, "archive/narrative_data", symbol_column="symbol"),
             ArchiveSpec("ai_reports", "created_at", report_days, "archive/ai_reports", symbol_column="symbol"),
             ArchiveSpec("feedback_logs", "created_at", report_days, "archive/feedback_logs", symbol_column="symbol"),
             ArchiveSpec("trade_executions", "created_at", execution_days, "archive/trade_executions", symbol_column="symbol"),
             ArchiveSpec("dune_query_results", "collected_at", report_days, "archive/dune_query_results"),
             ArchiveSpec("microstructure_data", "timestamp", market_days, "archive/microstructure_data", symbol_column="symbol"),
-            ArchiveSpec("macro_data", "timestamp", report_days, "archive/macro_data"),
-            ArchiveSpec("deribit_data", "timestamp", market_days, "archive/deribit_data", symbol_column="symbol"),
-            ArchiveSpec("fear_greed_data", "timestamp", report_days, "archive/fear_greed_data"),
             ArchiveSpec("liquidations", "timestamp", market_days, "liquidations", symbol_column="symbol"),
             ArchiveSpec("daily_playbooks", "created_at", report_days, "archive/daily_playbooks", symbol_column="symbol"),
             ArchiveSpec("monitor_logs", "created_at", report_days, "archive/monitor_logs", symbol_column="symbol"),
             ArchiveSpec("market_status_events", "created_at", report_days, "archive/market_status_events", symbol_column="symbol"),
-            ArchiveSpec("onchain_daily_snapshots", "as_of_date", report_days, "archive/onchain_daily_snapshots", symbol_column="symbol", time_kind="date"),
             ArchiveSpec("evaluation_predictions", "prediction_time", evaluation_days, "archive/evaluation_predictions", symbol_column="symbol"),
             ArchiveSpec("evaluation_outcomes", "evaluated_at", evaluation_days, "archive/evaluation_outcomes"),
             ArchiveSpec("evaluation_component_scores", "created_at", evaluation_component_days, "archive/evaluation_component_scores"),
@@ -626,6 +619,159 @@ class GCSParquetStore:
         today = datetime.now(timezone.utc).date().isoformat()
         object_path = f"{prefix}/{symbol}/{today}.parquet"
         return self._merge_to_local_cache(object_path, df, dedup_cols)
+
+    # ------------------------------------------------------------------
+    # Supabase 대체 읽기 API
+    # QUANT 시계열 + telegram → 로컬 parquet에서 직접 읽기.
+    # ------------------------------------------------------------------
+
+    def get_latest_row(self, prefix: str, symbol: str = "global") -> Optional[Dict]:
+        """prefix/symbol 경로에서 가장 최근 행 1개를 반환.
+
+        오늘 → 어제 → 그제 순으로 탐색해 데이터가 있는 첫 파일의 마지막 행을 반환.
+        fear_greed, macro, deribit, onchain 등 'latest snapshot' 패턴에 사용.
+        """
+        now = datetime.now(timezone.utc)
+        for delta in range(3):
+            day = (now - timedelta(days=delta)).date().isoformat()
+            df = self._download_parquet(f"{prefix}/{symbol}/{day}.parquet")
+            if df is not None and not df.empty:
+                return df.iloc[-1].to_dict()
+        return None
+
+    def get_funding_history_parquet(self, symbol: str, limit: int = 100, since=None) -> pd.DataFrame:
+        """funding/{symbol} 로컬 parquet에서 최근 N행 반환.
+
+        db.get_funding_history() 대체용. since(datetime)로 시작 시점 필터 가능.
+        """
+        df = self.load_timeseries("funding", symbol, months_back=2)
+        if df.empty:
+            return df
+        if since is not None:
+            since_ts = pd.Timestamp(since)
+            if since_ts.tzinfo is None:
+                since_ts = since_ts.tz_localize("UTC")
+            if "timestamp" in df.columns:
+                df = df[df["timestamp"] >= since_ts]
+        if limit > 0:
+            return df.tail(limit).reset_index(drop=True)
+        return df.reset_index(drop=True)
+
+    def write_telegram_to_local(self, data: Dict) -> None:
+        """telegram 메시지 1건을 오늘 날짜 로컬 parquet에 append."""
+        try:
+            df = pd.DataFrame([data])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            self.write_timeseries_to_local("telegram", "global", df, ["message_id"])
+        except Exception as e:
+            logger.debug(f"Telegram local write failed: {e}")
+
+    def get_max_telegram_message_id(self, channel: str) -> int:
+        """채널별 마지막으로 처리된 message_id 반환 (중복 방지용).
+
+        db.client.table('telegram_messages') 쿼리 대체.
+        최근 3일치 parquet을 스캔해 해당 채널의 최대 message_id를 반환.
+        """
+        now = datetime.now(timezone.utc)
+        max_id = 0
+        for delta in range(3):
+            day = (now - timedelta(days=delta)).date().isoformat()
+            df = self._download_parquet(f"telegram/global/{day}.parquet")
+            if df is None or df.empty:
+                continue
+            if "message_id" not in df.columns or "channel" not in df.columns:
+                continue
+            ch_df = df[df["channel"] == channel]
+            if not ch_df.empty:
+                max_id = max(max_id, int(ch_df["message_id"].max()))
+        return max_id
+
+    def get_recent_telegram_messages_parquet(self, hours: int = 24) -> List[Dict]:
+        """최근 N시간 telegram 메시지 반환.
+
+        db.get_recent_telegram_messages() 대체용.
+        """
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=hours)
+        days_back = max(1, hours // 24 + 1)
+        dfs = []
+        for delta in range(days_back + 1):
+            day = (now - timedelta(days=delta)).date().isoformat()
+            df = self._download_parquet(f"telegram/global/{day}.parquet")
+            if df is not None and not df.empty:
+                dfs.append(df)
+        if not dfs:
+            return []
+        result = pd.concat(dfs, ignore_index=True)
+        if "timestamp" in result.columns:
+            result["timestamp"] = pd.to_datetime(result["timestamp"], utc=True, errors="coerce")
+            result = result[result["timestamp"] >= cutoff]
+        return result.to_dict("records")
+
+    def get_telegram_messages_for_rag_parquet(self, days: int = 7, limit: int = 1000) -> List[Dict]:
+        """RAG 인덱싱용 최근 N일 telegram 메시지 반환.
+
+        db.get_telegram_messages_for_rag() 대체용.
+        """
+        now = datetime.now(timezone.utc)
+        dfs = []
+        for delta in range(days + 1):
+            day = (now - timedelta(days=delta)).date().isoformat()
+            df = self._download_parquet(f"telegram/global/{day}.parquet")
+            if df is not None and not df.empty:
+                dfs.append(df)
+        if not dfs:
+            return []
+        result = pd.concat(dfs, ignore_index=True)
+        if "timestamp" in result.columns:
+            result["timestamp"] = pd.to_datetime(result["timestamp"], utc=True, errors="coerce")
+            result = result.sort_values("timestamp")
+        return result.tail(limit).to_dict("records")
+
+
+    def refresh_higher_tf_cache(self, symbol: str) -> None:
+        """1m 로컬 캐시에서 4h/1d/1w를 재계산해 로컬 parquet 갱신.
+
+        스케줄러에서 하루 1회 호출. 최근 2달치 4h gap을 자동으로 채움.
+        - 4h: monthly 파일  (ohlcv/4h/{symbol}/{YYYY-MM}.parquet)
+        - 1d: yearly 파일   (ohlcv/1d/{symbol}/{YYYY}.parquet)
+        - 1w: yearly 파일   (ohlcv/1w/{symbol}/{YYYY}.parquet)
+        """
+        # 6개월치 1m 데이터 로드 (1d/1w 연간 파일도 최근 연도가 바뀔 수 있음)
+        df_1m = self.load_ohlcv("1m", symbol, months_back=6)
+        if df_1m is None or df_1m.empty:
+            logger.warning(f"refresh_higher_tf_cache: no 1m data for {symbol}")
+            return
+
+        df_1m = df_1m.copy()
+        df_1m["timestamp"] = pd.to_datetime(df_1m["timestamp"], utc=True, errors="coerce")
+        df_1m = df_1m.dropna(subset=["timestamp"]).set_index("timestamp")
+        ohlcv_cols = [c for c in ("open", "high", "low", "close", "volume") if c in df_1m.columns]
+        df_1m = df_1m[ohlcv_cols].astype(float)
+
+        agg = {c: ("first" if c == "open" else "max" if c == "high" else "min" if c == "low" else "last" if c == "close" else "sum") for c in ohlcv_cols}
+
+        tf_configs = [
+            ("4h",  "4h",  "%Y-%m"),   # monthly partitions
+            ("1d",  "1D",  "%Y"),      # yearly partitions
+            ("1w",  "1W-MON", "%Y"),   # yearly partitions (week anchored Monday)
+        ]
+
+        for tf, rule, period_fmt in tf_configs:
+            try:
+                resampled = df_1m.resample(rule, label="left", closed="left").agg(agg).dropna().reset_index()
+                resampled["symbol"] = symbol
+
+                resampled["_period"] = resampled["timestamp"].dt.strftime(period_fmt)
+                for period, group in resampled.groupby("_period"):
+                    group = group.drop(columns=["_period"]).reset_index(drop=True)
+                    object_path = f"ohlcv/{tf}/{symbol}/{period}.parquet"
+                    written = self._merge_to_local_cache(object_path, group, ["timestamp"])
+                    logger.debug(f"[refresh_higher_tf] {object_path}: {written} rows")
+
+                logger.info(f"[refresh_higher_tf] {symbol} {tf}: {len(resampled)} candles refreshed")
+            except Exception as e:
+                logger.error(f"refresh_higher_tf_cache failed for {symbol} {tf}: {e}")
 
 
 gcs_parquet_store = GCSParquetStore()

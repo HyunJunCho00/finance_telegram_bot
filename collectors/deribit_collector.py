@@ -277,17 +277,12 @@ class DeribitCollector:
                 except Exception as e:
                     logger.debug(f"[LocalCache] deribit local write skipped: {e}")
 
-                # ── 2순위: Supabase ──────────────────────────────────────
-                try:
-                    db.upsert_deribit_data(data)
-                    logger.info(
-                        f"Deribit {currency}: DVOL={data.get('dvol')} "
-                        f"PCR_OI={data.get('pcr_oi')} "
-                        f"IV_1m={data.get('iv_1m')} "
-                        f"Skew_1m={data.get('skew_1m')}"
-                    )
-                except Exception as e:
-                    logger.warning(f"[DB] deribit Supabase write skipped (local cache OK): {e}")
+                logger.info(
+                    f"Deribit {currency}: DVOL={data.get('dvol')} "
+                    f"PCR_OI={data.get('pcr_oi')} "
+                    f"IV_1m={data.get('iv_1m')} "
+                    f"Skew_1m={data.get('skew_1m')}"
+                )
 
 
 deribit_collector = DeribitCollector()

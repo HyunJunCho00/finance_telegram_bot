@@ -16,6 +16,25 @@ _DB_PATH: str = str(_Path(__file__).resolve().parents[1] / "data" / "local_state
 FEE_PCT = 0.0005  # 0.05% Binance Futures Market Fee
 
 _WRITE_LOCK = threading.RLock()
+_thread_local = threading.local()
+
+
+def _get_connection() -> sqlite3.Connection:
+    """Return the thread-local persistent SQLite connection, creating it if needed."""
+    conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(
+            _DB_PATH,
+            check_same_thread=False,
+            isolation_level=None,
+            timeout=30.0,
+        )
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=30000;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        _thread_local.conn = conn
+    return conn
 
 
 class DuplicateActiveIntentError(RuntimeError):
@@ -32,15 +51,7 @@ class ExecutionRepository:
     @contextmanager
     def transaction(self):
         with _WRITE_LOCK:
-            conn = sqlite3.connect(
-                _DB_PATH,
-                check_same_thread=False,
-                isolation_level=None,
-                timeout=30.0,
-            )
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA busy_timeout = 30000;")
+            conn = _get_connection()
             try:
                 conn.execute("BEGIN IMMEDIATE")
                 yield conn
@@ -48,8 +59,6 @@ class ExecutionRepository:
             except Exception:
                 conn.rollback()
                 raise
-            finally:
-                conn.close()
 
     def create_intent(self, **intent_spec) -> str:
         return self.create_intents([intent_spec])[0]
@@ -461,14 +470,8 @@ class ExecutionRepository:
     def get_oldest_pending_outbox_age_seconds(self) -> float:
         """Return age in seconds of the oldest PENDING outbox event, 0.0 if none."""
         with _WRITE_LOCK:
-            conn = sqlite3.connect(
-                _DB_PATH,
-                check_same_thread=False,
-                isolation_level=None,
-                timeout=5.0,
-            )
-            conn.row_factory = sqlite3.Row
             try:
+                conn = _get_connection()
                 row = conn.execute(
                     "SELECT created_at FROM execution_outbox WHERE status = 'PENDING' "
                     "ORDER BY created_at ASC LIMIT 1"
@@ -480,8 +483,6 @@ class ExecutionRepository:
                 return max(0.0, (now - created).total_seconds())
             except Exception:
                 return 0.0
-            finally:
-                conn.close()
 
     def update_intent_status(self, intent_id: str, new_status: str) -> Dict:
         with self.transaction() as conn:

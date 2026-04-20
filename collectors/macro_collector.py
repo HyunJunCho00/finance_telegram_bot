@@ -112,10 +112,14 @@ class MacroCollector:
             payload["ust_2s10s_spread"] = None
 
         try:
-            db.upsert_macro_data(payload)
+            import pandas as pd
+            from processors.gcs_parquet import gcs_parquet_store
+            df = pd.DataFrame([payload])
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+            gcs_parquet_store.write_timeseries_to_local("macro", "global", df, ["timestamp"])
             logger.info("Saved macro data snapshot")
         except Exception as e:
-            logger.error(f"Macro DB save error: {e}")
+            logger.error(f"Macro save error: {e}")
 
 
 macro_collector = MacroCollector()

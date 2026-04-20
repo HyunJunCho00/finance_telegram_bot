@@ -557,6 +557,7 @@ job_pressure_signal_evaluation (매 15분)
 - 심각도 레벨: `WATCH` → `WARN` → `CONFIRM`
 - DB: `liquidation_cascade_features`, `liquidation_cascade_predictions`
 - 임계값 (settings): `LIQUIDATION_CASCADE_WATCH_PROB=0.45`, `WARN=0.60`, `CONFIRM=0.75`
+- `LIQUIDATION_CASCADE_ARTIFACT_DIR` | `data/models/liquidation_cascade` |
 
 ---
 

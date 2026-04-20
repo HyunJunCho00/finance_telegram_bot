@@ -115,7 +115,13 @@ class CoinMetricsCollector:
             metric_aliases=metric_aliases,
             source="coinmetrics",
         )
-        db.upsert_onchain_daily_snapshot(snapshot)
+        try:
+            import pandas as pd
+            from processors.gcs_parquet import gcs_parquet_store
+            df = pd.DataFrame([snapshot])
+            gcs_parquet_store.write_timeseries_to_local("onchain", symbol, df, ["as_of_date"])
+        except Exception as e:
+            logger.debug(f"[LocalCache] onchain local write skipped: {e}")
         logger.info(
             f"Coin Metrics snapshot saved for {symbol}: bias={snapshot.get('risk_bias')} "
             f"score={snapshot.get('bias_score')}"

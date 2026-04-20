@@ -151,13 +151,15 @@ class PerplexityCollector:
         """
         state: Dict = {}
         try:
-            # Fear & Greed Index (daily, from alternative.me)
-            fg = db.get_latest_fear_greed()
-            if fg:
-                state["fear_greed"] = f"{fg.get('value', 'N/A')} ({fg.get('label', 'N/A')})"
+            from processors.gcs_parquet import gcs_parquet_store
 
-            # Macro indicators (FRED + yfinance snapshot, 4h cadence)
-            macro = db.get_latest_macro_data()
+            # Fear & Greed Index
+            fg = gcs_parquet_store.get_latest_row("fear_greed")
+            if fg:
+                state["fear_greed"] = f"{fg.get('value', 'N/A')} ({fg.get('classification', 'N/A')})"
+
+            # Macro indicators
+            macro = gcs_parquet_store.get_latest_row("macro")
             if macro:
                 for state_key, db_key in [
                     ("dgs10", "dgs10"),
@@ -168,59 +170,32 @@ class PerplexityCollector:
                     if macro.get(db_key) is not None:
                         state[state_key] = macro[db_key]
 
-            # ----------- Current price (1 row lightweight) -----------
-            latest_df = db.get_latest_market_data(symbol, limit=1)
-            if not latest_df.empty and "close" in latest_df.columns:
-                state["current_price"] = float(latest_df["close"].iloc[-1])
+            # Current price + 30d return from local parquet
+            ohlcv_df = gcs_parquet_store.load_ohlcv("1m", symbol, months_back=1)
+            if not ohlcv_df.empty and "close" in ohlcv_df.columns:
+                state["current_price"] = float(ohlcv_df["close"].iloc[-1])
+                cutoff_30d = datetime.now(timezone.utc) - timedelta(days=31)
+                early = ohlcv_df[ohlcv_df["timestamp"] >= cutoff_30d]
+                if not early.empty:
+                    price_30d = float(early["close"].iloc[0])
+                    if price_30d > 0:
+                        state["return_30d"] = round(
+                            (state["current_price"] / price_30d - 1) * 100, 1
+                        )
 
-                # 30d return: fetch earliest close within last 31 days (2 rows total)
-                cutoff_30d = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
-                try:
-                    res = (
-                        db.client.table("market_data")
-                        .select("close")
-                        .eq("symbol", symbol)
-                        .eq("exchange", "binance")
-                        .gte("timestamp", cutoff_30d)
-                        .order("timestamp")
-                        .limit(1)
-                        .execute()
-                    )
-                    if res.data:
-                        price_30d = float(res.data[0]["close"])
-                        if price_30d > 0:
-                            state["return_30d"] = round(
-                                (state["current_price"] / price_30d - 1) * 100, 1
-                            )
-                except Exception:
-                    pass
-
-            # Latest funding rate (1 row)
+            # Funding rate + OI + positioning
             try:
-                funding_df = db.get_funding_history(symbol, limit=1)
+                funding_df = gcs_parquet_store.get_funding_history_parquet(symbol, limit=4)
                 if not funding_df.empty and "funding_rate" in funding_df.columns:
                     state["funding_rate"] = float(funding_df["funding_rate"].iloc[-1])
-            except Exception:
-                pass
-
-            try:
-                raw_funding_res = (
-                    db.client.table("funding_data")
-                    .select("funding_rate,long_short_ratio,oi_binance,oi_bybit,oi_okx,timestamp")
-                    .eq("symbol", symbol)
-                    .order("timestamp", desc=True)
-                    .limit(4)
-                    .execute()
-                )
-                if raw_funding_res.data:
-                    latest = raw_funding_res.data[0]
+                    latest = funding_df.iloc[-1]
                     ls_ratio = latest.get("long_short_ratio")
                     if ls_ratio is not None:
                         state["long_short_ratio"] = float(ls_ratio)
 
-                    if len(raw_funding_res.data) >= 2:
+                    if len(funding_df) >= 2:
                         latest_oi = sum(float(latest.get(k, 0) or 0) for k in ("oi_binance", "oi_bybit", "oi_okx"))
-                        prev = raw_funding_res.data[-1]
+                        prev = funding_df.iloc[0]
                         prev_oi = sum(float(prev.get(k, 0) or 0) for k in ("oi_binance", "oi_bybit", "oi_okx"))
                         if prev_oi:
                             state["oi_change_pct"] = round(((latest_oi - prev_oi) / prev_oi) * 100, 2)

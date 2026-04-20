@@ -17,6 +17,48 @@ from requests import exceptions as requests_exceptions
 from config.settings import settings
 
 
+class CircuitBreaker:
+    def __init__(self, failure_threshold=3, recovery_timeout=60, half_open_max_calls=1):
+        self.state = "CLOSED"
+        self.failure_count = 0
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.open_time = 0.0
+        self.half_open_calls = 0
+        self.half_open_max_calls = half_open_max_calls
+        self._lock = threading.Lock()
+
+    def allow_request(self) -> bool:
+        with self._lock:
+            if self.state == "CLOSED":
+                return True
+            if self.state == "OPEN":
+                if time.time() > self.open_time + self.recovery_timeout:
+                    self.state = "HALF_OPEN"
+                    self.half_open_calls = self.half_open_max_calls - 1
+                    return True
+                return False
+            if self.state == "HALF_OPEN":
+                if self.half_open_calls > 0:
+                    self.half_open_calls -= 1
+                    return True
+                return False
+            return False
+
+    def record_success(self):
+        with self._lock:
+            self.failure_count = 0
+            if self.state == "HALF_OPEN":
+                self.state = "CLOSED"
+
+    def record_failure(self):
+        with self._lock:
+            self.failure_count += 1
+            if self.state == "HALF_OPEN" or self.failure_count >= self.failure_threshold:
+                self.state = "OPEN"
+                self.open_time = time.time()
+
+
 class CloudflareGenerator:
     """Cloudflare Workers AI helper for triage/rerank style requests."""
 
@@ -257,7 +299,8 @@ class AIClient:
             "llama-3.1-8b-instant",                       # RPD 14,400 — 마지막 보루
         ]
 
-        self._circuit_breakers = {}
+        self._circuit_breakers: Dict[str, CircuitBreaker] = {}
+        self._cb_lock = threading.Lock()
 
         # Gemini context cache registry — keyed by md5(model_id + system_prompt)
         # Value: (cache_name: str, created_ts: float)
@@ -304,13 +347,25 @@ class AIClient:
             )
         return self._openrouter_client
 
+    def _get_cb(self, model_id: str) -> CircuitBreaker:
+        with self._cb_lock:
+            if model_id not in self._circuit_breakers:
+                self._circuit_breakers[model_id] = CircuitBreaker()
+            return self._circuit_breakers[model_id]
+
     def _is_model_available(self, model_id: str) -> bool:
-        expiry = self._circuit_breakers.get(model_id, 0)
-        return time.time() > expiry
+        return self._get_cb(model_id).allow_request()
 
     def _mark_model_exhausted(self, model_id: str, duration: int = 3600):
         logger.warning(f"CIRCUIT BREAKER: Blocking [{model_id}] for {duration}s due to temporary failure/quota")
-        self._circuit_breakers[model_id] = time.time() + duration
+        cb = self._get_cb(model_id)
+        with cb._lock:
+            cb.state = "OPEN"
+            cb.open_time = time.time()
+            cb.recovery_timeout = duration
+
+    def _mark_model_success(self, model_id: str):
+        self._get_cb(model_id).record_success()
 
     def _get_route(self, role: str) -> Tuple[str, str, int]:
         role = (role or "general").lower()
@@ -403,6 +458,7 @@ class AIClient:
             )
             if result:
                 logger.success(f"Cloudflare Fallback SUCCEEDED for [{role}] with [{model_id}]")
+                self._mark_model_success(model_id)
                 return result
             failure_kind = self._cf_generator.last_failure_kind
             if failure_kind == "rate_limit":
@@ -832,6 +888,7 @@ class AIClient:
                     contents=[types.Content(role="user", parts=parts)],
                     config=types.GenerateContentConfig(**config_kwargs),
                 )
+                self._mark_model_success(model_id)
                 return response.text or ""
             except Exception as e:
                 err_str = str(e).lower()
@@ -888,6 +945,7 @@ class AIClient:
                 max_tokens=max_tokens,
                 timeout=timeout,
             )
+            self._mark_model_success(model_id)
             return resp.choices[0].message.content or ""
         except Exception as e:
             err_str = str(e).lower()

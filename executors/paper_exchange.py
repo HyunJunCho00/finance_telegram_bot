@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from loguru import logger
 
 from config.local_state import DB_PATH
-from executors.execution_repository import FEE_PCT, execution_repository
+from executors.execution_repository import FEE_PCT, execution_repository, _WRITE_LOCK, _get_connection
 from executors.outbox_dispatcher import outbox_dispatcher
 
 
@@ -15,38 +15,22 @@ class PaperExchangeEngine:
     Paper trading state manager.
     DB writes go through execution_repository so position changes and outbox events
     can commit atomically.
+    Reads use the shared thread-local connection from execution_repository directly.
     """
 
-    def __init__(self):
-        self._lock = threading.Lock()
-
-    @staticmethod
-    def _new_connection():
-        conn = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout = 30000;")
-        return conn
-
     def _fetch_one(self, query: str, params: tuple = ()):
-        with self._lock:
-            conn = self._new_connection()
-            try:
-                cursor = conn.cursor()
-                cursor.execute(query, params)
-                return cursor.fetchone()
-            finally:
-                conn.close()
+        with _WRITE_LOCK:
+            conn = _get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return cursor.fetchone()
 
     def _fetch_all(self, query: str, params: tuple = ()) -> List[Dict]:
-        with self._lock:
-            conn = self._new_connection()
-            try:
-                cursor = conn.cursor()
-                cursor.execute(query, params)
-                return [dict(row) for row in cursor.fetchall()]
-            finally:
-                conn.close()
+        with _WRITE_LOCK:
+            conn = _get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
 
     def _queue_notification(self, message: str, idempotency_key: str) -> Dict:
         return {
@@ -111,7 +95,22 @@ class PaperExchangeEngine:
             tp1_exit_pct=tp1_exit_pct,
         )
         if result.get("success"):
-            self._flush_outbox()
+            # Fix 1: 포지션 오픈 즉시 WS 모니터에 등록 (60초 DB 갱신 대기 제거)
+            try:
+                from collectors.ws_price_feed import ws_price_feed
+                ws_price_feed.register_order(symbol, {
+                    "id":          result["order_id"],
+                    "symbol":      symbol,
+                    "side":        direction,
+                    "entry_price": result["filled_price"],
+                    "sl_price":    sl_price,
+                    "tp1_price":   tp_price,
+                    "created_at":  __import__("datetime").datetime.now(
+                                       __import__("datetime").timezone.utc
+                                   ).isoformat(),
+                })
+            except Exception:
+                pass  # non-blocking — WS monitor 등록 실패해도 주문은 유효
             logger.info(
                 f"V8 Paper | [{exchange}] {direction} {symbol} @ {result['filled_price']:.4f} "
                 f"(slip={result['slippage_applied_pct']:.2f}% lev={leverage}x margin=${result['margin_used']:.2f} "

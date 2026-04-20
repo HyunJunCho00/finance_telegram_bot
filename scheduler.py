@@ -27,6 +27,7 @@ from evaluators.evaluation_rollup import evaluation_rollup_service
 from processors.light_rag import light_rag
 from processors.gcs_archive import gcs_archive_exporter
 from processors.math_engine import math_engine
+from processors.gcs_parquet import gcs_parquet_store
 from agents.market_monitor_agent import market_monitor_agent
 from tools.evaluate_market_status_pressure import run_evaluation as run_pressure_signal_evaluation
 from config import scheduler_config
@@ -256,7 +257,7 @@ def _build_realtime_pressure(symbol: str, df) -> dict:
         chg_3m = _pct_change(current_price, float(closes.iloc[-4])) if len(closes) >= 4 else None
         chg_5m = _pct_change(current_price, float(closes.iloc[-6])) if len(closes) >= 6 else None
 
-        cvd_df = db.get_cvd_data(symbol, limit=15)
+        cvd_df = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=1).tail(15).reset_index(drop=True)
         liq_df = db.get_liquidation_data(symbol, limit=15)
 
         cvd_3m = cvd_5m = whale_delta_5m = None
@@ -368,8 +369,6 @@ def _build_mode_technical_snapshot(symbol: str, mode: TradingMode) -> dict:
     """Build deterministic mode-specific technical snapshot for hourly Telegram status."""
     snapshot = {}
     try:
-        # GCS-first: local parquet cache + Supabase gap-fill only (≤1440 rows)
-        from processors.gcs_parquet import gcs_parquet_store
         import pandas as pd
         df = pd.DataFrame()
         try:
@@ -885,7 +884,7 @@ def job_routine_market_status():
 
             # Funding Rate
             try:
-                f_df = db.get_funding_history(symbol, limit=1)
+                f_df = gcs_parquet_store.get_funding_history_parquet(symbol, limit=1)
                 if not f_df.empty and "funding_rate" in f_df.columns:
                     indicators[symbol]["funding_rate"] = float(f_df["funding_rate"].iloc[-1])
             except Exception:
@@ -910,7 +909,7 @@ def job_routine_market_status():
             }
             indicators[symbol]["playbook_snapshot"] = _get_latest_playbook_snapshot(symbol)
             try:
-                onchain = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
+                onchain = gcs_parquet_store.get_latest_row("onchain", symbol)
                 if onchain:
                     indicators[symbol]["onchain_snapshot"] = {
                         "risk_bias": onchain.get("risk_bias"),
@@ -940,7 +939,7 @@ def job_routine_market_status():
             from agents.ai_router import ai_client
             import time as _time
 
-            tg_messages = db.get_recent_telegram_messages(hours=1) or []
+            tg_messages = gcs_parquet_store.get_recent_telegram_messages_parquet(hours=1) or []
             tg_items = []
             for msg in tg_messages[:20]:
                 tg_items.append({
@@ -1431,6 +1430,22 @@ def job_pressure_signal_evaluation():
         logger.error(f"Realtime pressure evaluation job error: {e}")
 
 
+def job_daily_refresh_higher_tf_cache():
+    """1m 로컬 parquet → 4h/1d/1w 재계산. 매일 02:00 UTC 실행.
+
+    최근 2~6개월치 1m 데이터를 리샘플링해 4h(월별)/1d/1w(연별) 파일을 갱신.
+    차트 요청 시 1m 전체를 메모리에 올리지 않아도 되므로 메모리 할당 문제 해결.
+    """
+    try:
+        symbols = list(settings.trading_symbols)   # e.g. ["BTCUSDT", "ETHUSDT"]
+        for symbol in symbols:
+            logger.info(f"[refresh_higher_tf] start {symbol}")
+            gcs_parquet_store.refresh_higher_tf_cache(symbol)
+        logger.info("[refresh_higher_tf] all symbols done")
+    except Exception as e:
+        logger.error(f"job_daily_refresh_higher_tf_cache error: {e}")
+
+
 def job_daily_archive_to_gcs():
     """Archive expiring rows to GCS Parquet and verify manifests."""
     try:
@@ -1675,284 +1690,287 @@ def main():
         max_instances=1
     )
 
-    # [FIX Cold Start] Run Telegram bot in a daemon thread
-    def _run_telegram_bot():
-        try:
-            from bot.telegram_bot import trading_bot
-            trading_bot.run()  # blocking within this thread
-        except Exception as e:
-            logger.error(f"Telegram bot crashed: {e}")
-            logger.info("Trading system continues WITHOUT Telegram bot commands.")
+    import os
+    # [FIX Cold Start] Run Telegram bot in a daemon thread (unless disabled by env var)
+    if os.environ.get("DISABLE_TELEGRAM_BOT") != "true":
+        def _run_telegram_bot():
+            try:
+                from bot.telegram_bot import trading_bot
+                trading_bot.run()  # blocking within this thread
+            except Exception as e:
+                logger.error(f"Telegram bot crashed: {e}")
+                logger.info("Trading system continues WITHOUT Telegram bot commands.")
 
-    bot_thread = threading.Thread(target=_run_telegram_bot, name="telegram-bot", daemon=True)
-    bot_thread.start()
-    logger.info("Telegram bot started in background thread.")
+        bot_thread = threading.Thread(target=_run_telegram_bot, name="telegram-bot", daemon=True)
+        bot_thread.start()
+        logger.info("Telegram bot started in background thread.")
+    else:
+        logger.info("Telegram bot starting skipped (DISABLE_TELEGRAM_BOT=true).")
+        # 더미 스레드를 생성하여 is_alive() 체크에서 터지지 않도록 방어
+        bot_thread = threading.Thread(target=lambda: None)
 
     # [V13.1] Persistent Telegram Listener (Real-Time Alpha Ingestion)
-    def _run_telegram_listener():
-        try:
-            from collectors.telegram_listener import telegram_listener
-            import asyncio
-            asyncio.run(telegram_listener.start())
-        except Exception as e:
-            logger.error(f"Telegram listener crashed: {e}")
+    if os.environ.get("DISABLE_TELEGRAM_LISTENER") != "true":
+        def _run_telegram_listener():
+            try:
+                from collectors.telegram_listener import telegram_listener
+                import asyncio
+                asyncio.run(telegram_listener.start())
+            except Exception as e:
+                logger.error(f"Telegram listener crashed: {e}")
 
-    listener_thread = threading.Thread(target=_run_telegram_listener, name="telegram-listener", daemon=True)
-    listener_thread.start()
-    logger.info("Real-time Telegram Listener (Alpha V13.1) started.")
+        listener_thread = threading.Thread(target=_run_telegram_listener, name="telegram-listener", daemon=True)
+        listener_thread.start()
+        logger.info("Real-time Telegram Listener (Alpha V13.1) started.")
+    else:
+        logger.info("Telegram Listener starting skipped (DISABLE_TELEGRAM_LISTENER=true).")
+        listener_thread = threading.Thread(target=lambda: None)
 
-    # 1-minute tick: price, funding, microstructure, volatility
-    scheduler_config.scheduler.add_job(
-        job_1min_tick,
-        'interval',
-        minutes=1,
-        id='job_1min_tick',
-        max_instances=1
-    )
-    
-    # 1-minute execution tick: ExecutionDesk and Paper Engine Liquidations
-    # execution_main.py 분리 실행 시 EXECUTION_PROCESS_SEPARATE=True 로 설정하면 skip
-    if not EXECUTION_PROCESS_SEPARATE:
+        role = os.environ.get("SCHEDULER_ROLE", "all").lower()
+    logger.info(f"Scheduler starting with ROLE: {role.upper()}")
+
+    # ==========================================
+    # DATA JOBS: 데이터 수집 및 인프라 (가격, 온체인, 뉴스)
+    # ==========================================
+    if role in ("all", "data"):
+        # 1-minute tick: price, funding, microstructure, volatility
         scheduler_config.scheduler.add_job(
-            job_1min_execution,
+            job_1min_tick,
             'interval',
             minutes=1,
-            id='job_1min_execution',
+            id='job_1min_tick',
             max_instances=1
         )
-
-    scheduler_config.scheduler.add_job(
-        job_liquidation_cascade_monitor,
-        'interval',
-        minutes=1,
-        id='job_liquidation_cascade_monitor',
-        max_instances=1
-    )
-
-    # 15-minute Dune
-    scheduler_config.scheduler.add_job(
-        job_15min_dune,
-        'interval',
-        minutes=15,
-        id='job_15min_dune',
-        max_instances=1
-    )
-
-    # Deribit options data: DVOL, PCR, IV Term Structure, 25d Skew - every 1 hour
-    scheduler_config.scheduler.add_job(
-        job_1hour_deribit,
-        CronTrigger(minute=0),
-        id='job_1hour_deribit',
-        max_instances=1
-    )
-
-    # Funding Fee Simulation - every 8 hours (00:00, 08:00, 16:00 UTC)
-    if settings.PAPER_TRADING_MODE and not EXECUTION_PROCESS_SEPARATE:
+        
         scheduler_config.scheduler.add_job(
-            job_8hour_funding_fee,
-            CronTrigger(hour='0,8,16', minute=0),
-            id='job_8hour_funding_fee',
+            job_15min_dune,
+            'interval',
+            minutes=15,
+            id='job_15min_dune',
             max_instances=1
         )
 
-    # Fear & Greed Index - daily at 00:15 UTC (after data refreshes)
-    scheduler_config.scheduler.add_job(
-        job_daily_fear_greed,
-        CronTrigger(hour=0, minute=15),
-        id='job_daily_fear_greed',
-        max_instances=1
-    )
-
-    # Coin Metrics daily snapshot refresh - moved to 03:12 UTC to ensure data is updated
-    scheduler_config.scheduler.add_job(
-        job_daily_coinmetrics,
-        CronTrigger(hour=3, minute=12),
-        id='job_daily_coinmetrics',
-        max_instances=1
-    )
-
-    # Farside ETF flow - daily at 06:00 UTC (Farside updates after US market close)
-    scheduler_config.scheduler.add_job(
-        job_daily_etf_flow,
-        CronTrigger(hour=6, minute=0),
-        id='job_daily_etf_flow',
-        max_instances=1
-    )
-
-    # Stablecoin supply - daily at 06:15 UTC
-    scheduler_config.scheduler.add_job(
-        job_daily_stablecoin,
-        CronTrigger(hour=6, minute=15),
-        id='job_daily_stablecoin',
-        max_instances=1
-    )
-
-    # CoinGlass LSR + OI - every 4h (aligned with analysis cycle)
-    scheduler_config.scheduler.add_job(
-        job_4hour_coinglass,
-        CronTrigger(hour='0,4,8,12,16,20', minute=30),
-        id='job_4hour_coinglass',
-        max_instances=1
-    )
-
-    # 1-Hour Telegram Batching & Ingestion
-    scheduler_config.scheduler.add_job(
-        job_1hour_telegram,
-        CronTrigger(minute=5),
-        id='job_1hour_telegram',
-        max_instances=1
-    )
-
-    # 1-Hour Crypto News API Fetch & Ingestion
-    scheduler_config.scheduler.add_job(
-        job_1hour_crypto_news,
-        CronTrigger(minute=10),
-        id='job_1hour_crypto_news',
-        max_instances=1
-    )
-
-    # Outbox safety-net drain: 발송 실패한 큐 메시지를 5분마다 재시도
-    scheduler_config.scheduler.add_job(
-        job_outbox_drain,
-        'interval',
-        minutes=5,
-        id='job_outbox_drain',
-        max_instances=1,
-    )
-
-    # Realtime pressure signal evaluation -> write 5m/15m/30m outcomes into market_status_events JSONB
-    scheduler_config.scheduler.add_job(
-        job_pressure_signal_evaluation,
-        CronTrigger(minute='*/15'),
-        id='job_pressure_signal_evaluation',
-        max_instances=1,
-    )
-
-    # ### Daily Precision (UTC-configurable) independent symbol jobs - 
-    daily_gap_minutes = max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
-    for symbol_index, symbol in enumerate(settings.trading_symbols):
-        slot_offset = symbol_index * daily_gap_minutes
-        for hour, minute in _daily_precision_schedule_slots_utc(offset_minutes=slot_offset):
-            scheduler_config.scheduler.add_job(
-                lambda _symbol=symbol: job_daily_precision_symbol(_symbol),
-                CronTrigger(hour=hour, minute=minute),
-                id=f"job_daily_precision_{symbol.lower()}_{hour:02d}{minute:02d}",
-                max_instances=1,
-            )
-
-    # Async-DAG snapshot prewarm for fast report hot path
-    scheduler_config.scheduler.add_job(
-        job_snapshot_refresh_fast,
-        CronTrigger(minute='*/15'),
-        id='job_snapshot_refresh_fast',
-        max_instances=1,
-    )
-
-    # Slower narrative refresh keeps cached Perplexity/RAG context warm
-    scheduler_config.scheduler.add_job(
-        job_snapshot_refresh_narrative,
-        CronTrigger(minute='2,32'),
-        id='job_snapshot_refresh_narrative',
-        max_instances=1,
-    )
-
-    # ### Hourly Monitor [NO_ACTION / WATCH / TRIGGER] against Daily Playbook - 
-    scheduler_config.scheduler.add_job(
-        job_hourly_monitor,
-        CronTrigger(minute=15),
-        id='job_hourly_monitor',
-        max_instances=1,
-    )
-
-    # Routine Market Status (Free-First) - kept for passive hourly Telegram update
-    scheduler_config.scheduler.add_job(
-        job_routine_market_status,
-        CronTrigger(minute=20),
-        id='job_market_status',
-        max_instances=1,
-    )
-
-    # Hourly Swing charts (BTC/ETH)
-    scheduler_config.scheduler.add_job(
-        job_hourly_swing_charts,
-        CronTrigger(minute=22),
-        id='job_hourly_swing_charts',
-        max_instances=1,
-    )
-
-    # Daily evaluation at 00:30 UTC = 09:30 KST
-    scheduler_config.scheduler.add_job(
-        job_24hour_evaluation,
-        CronTrigger(hour=0, minute=30),
-        id='job_24hour_evaluation',
-        max_instances=1
-    )
-
-    scheduler_config.scheduler.add_job(
-        job_daily_evaluation_rollup,
-        CronTrigger(hour=0, minute=40),
-        id='job_daily_evaluation_rollup',
-        max_instances=1
-    )
-    
-    # 1-Hour RAG Episodic Memory Evaluation (V6)
-    scheduler_config.scheduler.add_job(
-        job_1hour_evaluation,
-        CronTrigger(minute=45),
-        id='job_1hour_evaluation',
-        max_instances=1
-    )
-
-    # Daily archive at 01:00 UTC = 10:00 KST
-    scheduler_config.scheduler.add_job(
-        job_daily_archive_to_gcs,
-        CronTrigger(hour=1, minute=0),
-        id='job_daily_archive_to_gcs',
-        max_instances=1
-    )
-
-    # Safe cleanup after archive verification
-    scheduler_config.scheduler.add_job(
-        job_daily_safe_cleanup,
-        CronTrigger(hour=1, minute=20),
-        id='job_daily_safe_cleanup',
-        max_instances=1
-    )
-
-    # Spot Position daily analysis (SpotMode.POSITION only)
-    try:
-        from executors.spot_orchestrator import (
-            SPOT_MODE_ENABLED as _SPOT_ENABLED,
-            SPOT_MODE as _SPOT_MODE,
-            SPOT_POSITION_ANALYSIS_HOUR_UTC as _SPOT_HOUR,
-            SpotMode as _SpotMode,
+        scheduler_config.scheduler.add_job(
+            job_1hour_deribit,
+            CronTrigger(minute=0),
+            id='job_1hour_deribit',
+            max_instances=1
         )
-        if _SPOT_ENABLED and _SPOT_MODE == _SpotMode.POSITION:
-            def job_spot_position_daily():
-                """SpotMode.POSITION: 매일 구조적 thesis 재평가."""
-                try:
-                    from executors.spot_orchestrator import spot_orchestrator
-                    for sym in settings.trading_symbols:
-                        spot_orchestrator.run_position_analysis(sym)
-                except Exception as e:
-                    logger.error(f"Spot position daily analysis error: {e}")
 
+        scheduler_config.scheduler.add_job(
+            job_daily_fear_greed,
+            CronTrigger(hour=0, minute=15),
+            id='job_daily_fear_greed',
+            max_instances=1
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_daily_coinmetrics,
+            CronTrigger(hour=3, minute=12),
+            id='job_daily_coinmetrics',
+            max_instances=1
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_daily_etf_flow,
+            CronTrigger(hour=6, minute=0),
+            id='job_daily_etf_flow',
+            max_instances=1
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_daily_stablecoin,
+            CronTrigger(hour=6, minute=15),
+            id='job_daily_stablecoin',
+            max_instances=1
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_4hour_coinglass,
+            CronTrigger(hour='0,4,8,12,16,20', minute=30),
+            id='job_4hour_coinglass',
+            max_instances=1
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_1hour_crypto_news,
+            CronTrigger(minute=10),
+            id='job_1hour_crypto_news',
+            max_instances=1
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_daily_refresh_higher_tf_cache,
+            CronTrigger(hour=2, minute=0),
+            id='job_daily_refresh_higher_tf_cache',
+            max_instances=1
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_daily_archive_to_gcs,
+            CronTrigger(hour=1, minute=0),
+            id='job_daily_archive_to_gcs',
+            max_instances=1
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_daily_safe_cleanup,
+            CronTrigger(hour=1, minute=20),
+            id='job_daily_safe_cleanup',
+            max_instances=1
+        )
+
+
+    # ==========================================
+    # BRAIN JOBS: AI 판단, 주문 실행, 텔레그램 리포트 관리
+    # ==========================================
+    if role in ("all", "brain"):
+        if not EXECUTION_PROCESS_SEPARATE:
             scheduler_config.scheduler.add_job(
-                job_spot_position_daily,
-                CronTrigger(hour=_SPOT_HOUR, minute=30),
-                id='job_spot_position_daily',
-                max_instances=1,
+                job_1min_execution,
+                'interval',
+                minutes=1,
+                id='job_1min_execution',
+                max_instances=1
             )
-            logger.info(f"Spot position daily job registered at {_SPOT_HOUR:02d}:30 UTC")
-    except Exception as _spot_sched_err:
-        logger.warning(f"Spot scheduler setup skipped: {_spot_sched_err}")
+
+        scheduler_config.scheduler.add_job(
+            job_liquidation_cascade_monitor,
+            'interval',
+            minutes=1,
+            id='job_liquidation_cascade_monitor',
+            max_instances=1
+        )
+
+        if settings.PAPER_TRADING_MODE and not EXECUTION_PROCESS_SEPARATE:
+            scheduler_config.scheduler.add_job(
+                job_8hour_funding_fee,
+                CronTrigger(hour='0,8,16', minute=0),
+                id='job_8hour_funding_fee',
+                max_instances=1
+            )
+
+        scheduler_config.scheduler.add_job(
+            job_1hour_telegram,
+            CronTrigger(minute=5),
+            id='job_1hour_telegram',
+            max_instances=1
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_outbox_drain,
+            'interval',
+            minutes=5,
+            id='job_outbox_drain',
+            max_instances=1,
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_pressure_signal_evaluation,
+            CronTrigger(minute='*/15'),
+            id='job_pressure_signal_evaluation',
+            max_instances=1,
+        )
+
+        daily_gap_minutes = max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
+        for symbol_index, symbol in enumerate(settings.trading_symbols):
+            slot_offset = symbol_index * daily_gap_minutes
+            for hour, minute in _daily_precision_schedule_slots_utc(offset_minutes=slot_offset):
+                scheduler_config.scheduler.add_job(
+                    lambda _symbol=symbol: job_daily_precision_symbol(_symbol),
+                    CronTrigger(hour=hour, minute=minute),
+                    id=f"job_daily_precision_{symbol.lower()}_{hour:02d}{minute:02d}",
+                    max_instances=1,
+                )
+
+        scheduler_config.scheduler.add_job(
+            job_snapshot_refresh_fast,
+            CronTrigger(minute='*/15'),
+            id='job_snapshot_refresh_fast',
+            max_instances=1,
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_snapshot_refresh_narrative,
+            CronTrigger(minute='2,32'),
+            id='job_snapshot_refresh_narrative',
+            max_instances=1,
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_hourly_monitor,
+            CronTrigger(minute=15),
+            id='job_hourly_monitor',
+            max_instances=1,
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_routine_market_status,
+            CronTrigger(minute=20),
+            id='job_market_status',
+            max_instances=1,
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_hourly_swing_charts,
+            CronTrigger(minute=22),
+            id='job_hourly_swing_charts',
+            max_instances=1,
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_24hour_evaluation,
+            CronTrigger(hour=0, minute=30),
+            id='job_24hour_evaluation',
+            max_instances=1
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_daily_evaluation_rollup,
+            CronTrigger(hour=0, minute=40),
+            id='job_daily_evaluation_rollup',
+            max_instances=1
+        )
+        
+        scheduler_config.scheduler.add_job(
+            job_1hour_evaluation,
+            CronTrigger(minute=45),
+            id='job_1hour_evaluation',
+            max_instances=1
+        )
+
+        try:
+            from executors.spot_orchestrator import (
+                SPOT_MODE_ENABLED as _SPOT_ENABLED,
+                SPOT_MODE as _SPOT_MODE,
+                SPOT_POSITION_ANALYSIS_HOUR_UTC as _SPOT_HOUR,
+                SpotMode as _SpotMode,
+            )
+            if _SPOT_ENABLED and _SPOT_MODE == _SpotMode.POSITION:
+                def job_spot_position_daily():
+                    try:
+                        from executors.spot_orchestrator import spot_orchestrator
+                        for sym in settings.trading_symbols:
+                            spot_orchestrator.run_position_analysis(sym)
+                    except Exception as e:
+                        logger.error(f"Spot position daily analysis error: {e}")
+
+                scheduler_config.scheduler.add_job(
+                    job_spot_position_daily,
+                    CronTrigger(hour=_SPOT_HOUR, minute=30),
+                    id='job_spot_position_daily',
+                    max_instances=1,
+                )
+                logger.info(f"Spot position daily job registered at {_SPOT_HOUR:02d}:30 UTC")
+        except Exception as _spot_sched_err:
+            logger.warning(f"Spot scheduler setup skipped: {_spot_sched_err}")
 
     scheduler_config.scheduler.start()
     logger.info("Scheduler started.")
     logger.info(
         f"Cadence(UTC): daily_precision={_daily_precision_all_labels_utc()} | snapshot_fast=hh:*/5 | "
         "snapshot_narrative=hh:02,32 | telegram_batch=hh:05 | crypto_news=hh:10 | hourly_monitor=hh:15 | market_status=hh:20 | daily_rollup=00:40 | "
-        "hourly_eval=hh:45 | gcs_archive=01:00 | safe_cleanup=01:20"
+        "hourly_eval=hh:45 | gcs_archive=01:00 | safe_cleanup=01:20 | higher_tf_refresh=02:00"
     )
 
     # [FIX Cold Start] Run initial data collection immediately so first analysis has data
@@ -2010,18 +2028,20 @@ def main():
         import time
         while True:
             time.sleep(60)
-            # Optional: restart bot thread if it dies
-            if not bot_thread.is_alive():
-                logger.warning("Telegram bot thread died  - restarting in 30s...")
-                time.sleep(30)
-                bot_thread = threading.Thread(target=_run_telegram_bot, name="telegram-bot", daemon=True)
-                bot_thread.start()
+            # Optional: restart bot thread if it dies (only if not disabled)
+            if os.environ.get("DISABLE_TELEGRAM_BOT") != "true":
+                if not bot_thread.is_alive():
+                    logger.warning("Telegram bot thread died  - restarting in 30s...")
+                    time.sleep(30)
+                    bot_thread = threading.Thread(target=_run_telegram_bot, name="telegram-bot", daemon=True)
+                    bot_thread.start()
 
-            if not listener_thread.is_alive():
-                logger.warning("Telegram listener thread died  - restarting in 30s...")
-                time.sleep(30)
-                listener_thread = threading.Thread(target=_run_telegram_listener, name="telegram-listener", daemon=True)
-                listener_thread.start()
+            if os.environ.get("DISABLE_TELEGRAM_LISTENER") != "true":
+                if not listener_thread.is_alive():
+                    logger.warning("Telegram listener thread died  - restarting in 30s...")
+                    time.sleep(30)
+                    listener_thread = threading.Thread(target=_run_telegram_listener, name="telegram-listener", daemon=True)
+                    listener_thread.start()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Shutting down...")
         # Upload Telegram session to Secret Manager before exit

@@ -1,80 +1,226 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Environment and Secrets
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a standalone easy_install,
+#  a dependency index or a python setup.py install step.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+pytestdebug.log
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+#   For a library or package, you might want to ignore these files since the Python version is
+#   often specific to the developer's environment.
+# .python-version
+
+# pipenv
+#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
+#   However, in case of collaboration, if you want to keep your dependencies next to your project
+#   and not installing them in your system, create a venv and add it to the .gitignore.
+#Pipfile.lock
+
+# poetry
+#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
+#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
+#poetry.lock
+
+# pdm
+#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
+#   https://pdm.fming.dev/#commit-your-pdmlock-file-to-version-control
+#pdm.lock
+
+# PEP 582; used by e.g. github.com/fannheyward/coc-pyright
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
 .env
-!.env.example
 .env.local
 .env.live
 .env.paper
-*.session
-*.session-journal
-telegram_session
-telegram_session-journal
+.env.staging
+.env.test
+.venv
+venv/
+ENV/
+env/
+pythonenv*
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# Secret and Credential Files
+*.pem
+*.key
+*.p12
+*.pfx
 credentials.json
 service-account-key.json
+*.session
+*.session-journal
+telegram_session*
+*.json-key
+keys/
+secrets/
 
 # Data and Logs
 *.log
 logs/
 data/
 tmp/
+cache/
 *.sqlite
 *.db
 *.parquet
 dune_data_*.json
 charts/
+importtime_settings.log
 
-# Editor and System
-.vscode/
-.idea/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
-.claude*
+# Project specific archives
+coin_1m*/
+merged_coin/
+binance_data/
+oi_funding/
+old_backup/
+*.zip
+*.tar.gz
+*.7z
 
-# Virtual Environment
-venv/
-ENV/
-env/
-
-# Personal Notes
+# Personal and Internal Architecture Notes
+# (Users often want to keep their main repo clean of scratch notes)
 INTERVIEW_PREP.md
 ACID_FINANCE_HARDENING.md
 PORTFOLIO_OMS.md
 notes_*.md
-
-# Data Archives/Backups
-coin_1m/
-coin_1m_bin/
-coin_1m_bin_kst/
-coin_1m_up/
-merged_coin/
-binance_data/
-oi_funding/
-old_backup
-*.zip
-*.tar.gz
-
-# Local notes (not for version control)
-COMMANDS.md
-ACID_FINANCE_HARDENING.md
-
-# Tests and Temporary Scripts
-/tests/temp/
-AI_test.py
 ARCHITECTURE_V8_FINAL.md
-setup_telegram_session.py
-.pytest_cache/
-.coverage
-htmlcov/
-tmp*
-todays_session.md
-
-.venv*
+CICD_ARCHITECTURE_COMPARISON.md
 BLACKROCK_INSPIRED_ARCHITECTURE.md
 QUANT_LAYERS_ARCHITECTURE.md
-*_ARCHITECTURE.md
+CLOUD_MIGRATION_REPORT.md
+todays_session.md
+COMMANDS.md
+INFRASTRUCTURE_ARCHITECTURE.md
+AGENTS_ARCHITECTURE.md
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Project/Script specific Ignores
 setup_telegram_session.py
+AI_test.py
+tmp*
+tests
+.claude

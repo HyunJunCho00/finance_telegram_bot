@@ -21,6 +21,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from config.settings import settings, TradingMode
 from config.database import db
+from processors.gcs_parquet import gcs_parquet_store
 from loguru import logger
 import json
 from io import BytesIO
@@ -823,7 +824,7 @@ class TradingBot:
                 await update.message.reply_text("Unable to detect current chat.")
                 return
             for symbol in symbols:
-                snapshot = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
+                snapshot = gcs_parquet_store.get_latest_row("onchain", symbol)
                 if not snapshot:
                     await update.message.reply_text(f"No on-chain snapshot for {symbol}")
                     continue

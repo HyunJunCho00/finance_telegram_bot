@@ -7,6 +7,7 @@ from typing import Optional
 import pandas as pd
 
 from config.database import db
+from processors.gcs_parquet import gcs_parquet_store
 
 from .features import compute_feature_panel
 from .labels import attach_labels
@@ -68,8 +69,20 @@ def _fetch_panel_since(symbol: str, since: datetime, row_limit: int) -> pd.DataF
     """Fetch and merge all panel tables from `since` up to `row_limit` rows each."""
     market_df  = db.get_market_data_since(symbol=symbol, since=since, limit=row_limit, columns=MARKET_COLUMNS)
     liq_df     = db.get_liquidation_data(symbol=symbol, limit=row_limit, since=since, columns=LIQUIDATION_COLUMNS)
-    funding_df = db.get_funding_history(symbol=symbol, limit=row_limit, since=since, columns=FUNDING_COLUMNS)
-    cvd_df     = db.get_cvd_data(symbol=symbol, limit=row_limit, since=since, columns=CVD_COLUMNS)
+    funding_df = gcs_parquet_store.get_funding_history_parquet(symbol, limit=row_limit, since=since)
+    if not funding_df.empty:
+        keep = [c for c in FUNDING_COLUMNS.split(",") if c in funding_df.columns]
+        funding_df = funding_df[keep] if keep else funding_df
+    cvd_df = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=2)
+    if not cvd_df.empty:
+        if since is not None:
+            since_ts = pd.Timestamp(since)
+            if since_ts.tzinfo is None:
+                since_ts = since_ts.tz_localize("UTC")
+            cvd_df = cvd_df[cvd_df["timestamp"] >= since_ts]
+        cvd_df = cvd_df.tail(row_limit).reset_index(drop=True)
+        keep = [c for c in CVD_COLUMNS.split(",") if c in cvd_df.columns]
+        cvd_df = cvd_df[keep] if keep else cvd_df
     micro_df   = db.get_microstructure_history(symbol=symbol, limit=row_limit, since=since, columns=MICRO_COLUMNS)
     panel = _merge_panel(market_df, liq_df, funding_df, micro_df, cvd_df)
     if not panel.empty:

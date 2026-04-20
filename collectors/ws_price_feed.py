@@ -16,7 +16,7 @@ import asyncio
 import json
 import threading
 import time
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 import websockets
 from loguru import logger
@@ -25,23 +25,30 @@ from loguru import logger
 _FUTURES_WS = "wss://fstream.binance.com/stream"
 _STALE_SECONDS = 5.0   # price older than this → fall back to REST
 
+# 재연결 백오프: 3s → 6s → 12s → 최대 30s
+_RECONNECT_BASE = 3.0
+_RECONNECT_MAX  = 30.0
+
 
 class WsPriceFeed:
     def __init__(self) -> None:
+        self._lock = threading.Lock()                  # Fix 3: 공유 상태 보호
+
         self._prices: Dict[str, float] = {}
         self._mark_prices: Dict[str, float] = {}
         self._updated_at: Dict[str, float] = {}
-        self._symbols: list[str] = []
+        self._symbols: List[str] = []
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        # Paper order monitoring (instance-level)
+
+        # Paper order monitoring
         self._last_fetch: Dict[str, float] = {}
-        self._open_orders: Dict[str, list] = {}
+        self._open_orders: Dict[str, List[dict]] = {}
 
     # ── Public API ──────────────────────────────────────────────────────────────
 
-    def start(self, symbols: Optional[list[str]] = None) -> None:
+    def start(self, symbols: Optional[List[str]] = None) -> None:
         """Start background streaming. Safe to call multiple times."""
         if self._running:
             return
@@ -67,33 +74,70 @@ class WsPriceFeed:
     def get(self, symbol: str) -> Optional[float]:
         """Latest trade price from memory. None if stale (>5s) or not yet received."""
         key = symbol.upper().replace("/", "")
-        ts = self._updated_at.get(key, 0.0)
+        with self._lock:                               # Fix 3
+            ts = self._updated_at.get(key, 0.0)
+            price = self._prices.get(key)
         if time.monotonic() - ts < _STALE_SECONDS:
-            return self._prices.get(key)
+            return price
         return None
 
     def get_mark(self, symbol: str) -> Optional[float]:
         """Latest futures mark price from memory."""
-        return self._mark_prices.get(symbol.upper().replace("/", ""))
+        key = symbol.upper().replace("/", "")
+        with self._lock:                               # Fix 3
+            return self._mark_prices.get(key)
 
     def is_live(self, symbol: str) -> bool:
         key = symbol.upper().replace("/", "")
-        return (time.monotonic() - self._updated_at.get(key, 0.0)) < _STALE_SECONDS
+        with self._lock:                               # Fix 3
+            ts = self._updated_at.get(key, 0.0)
+        return (time.monotonic() - ts) < _STALE_SECONDS
+
+    # ── Fix 1: 주문 즉시 등록 ───────────────────────────────────────────────────
+
+    def register_order(self, symbol: str, order: dict) -> None:
+        """포지션 오픈 즉시 메모리에 등록 — 60초 DB 갱신 대기 없이 바로 모니터링.
+
+        order 필드: id, symbol, side, entry_price, sl_price, tp1_price
+        """
+        sym = symbol.upper().replace("/", "")
+        with self._lock:
+            orders = self._open_orders.setdefault(sym, [])
+            # 중복 방지
+            existing_ids = {o.get("id") for o in orders}
+            if order.get("id") not in existing_ids:
+                orders.append(order)
+                logger.debug(f"[WsPriceFeed] Registered order {order.get('id')} for {sym} monitoring")
+
+    def deregister_order(self, symbol: str, order_id) -> None:
+        """포지션 청산 시 메모리에서 제거."""
+        sym = symbol.upper().replace("/", "")
+        with self._lock:
+            orders = self._open_orders.get(sym, [])
+            self._open_orders[sym] = [o for o in orders if o.get("id") != order_id]
 
     # ── Internal ────────────────────────────────────────────────────────────────
 
     def _run_loop(self) -> None:
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
+        backoff = _RECONNECT_BASE                      # Fix 2: 지수 백오프
         while self._running:
             try:
                 self._loop.run_until_complete(self._stream())
+                backoff = _RECONNECT_BASE              # 정상 종료 시 백오프 리셋
             except Exception as exc:
-                logger.warning(f"[WsPriceFeed] Disconnected ({exc}), reconnecting in 3s…")
-                time.sleep(3)
+                logger.warning(
+                    f"[WsPriceFeed] Disconnected ({exc}), "
+                    f"reconnecting in {backoff:.0f}s…"
+                )
+                # Fix 2: 재연결 공백 동안 REST fallback으로 SL 긴급 체크
+                self._fallback_sl_check_on_reconnect()
+                time.sleep(backoff)
+                backoff = min(backoff * 2, _RECONNECT_MAX)
 
     async def _stream(self) -> None:
-        streams: list[str] = []
+        streams: List[str] = []
         for sym in self._symbols:
             s = sym.lower()
             streams.append(f"{s}@aggTrade")
@@ -120,34 +164,81 @@ class WsPriceFeed:
             if not sym:
                 return
             if event == "aggTrade":
-                self._prices[sym] = float(data["p"])
-                self._updated_at[sym] = time.monotonic()
-                self._check_paper_orders(sym, float(data["p"]))
+                price = float(data["p"])
+                with self._lock:                       # Fix 3
+                    self._prices[sym] = price
+                    self._updated_at[sym] = time.monotonic()
+                self._check_paper_orders(sym, price)   # 락 밖에서 호출
             elif event == "markPriceUpdate":
-                self._mark_prices[sym] = float(data["p"])
+                with self._lock:                       # Fix 3
+                    self._mark_prices[sym] = float(data["p"])
         except Exception:
             pass  # single bad frame — keep going
 
+    # ── Fix 2: 재연결 공백 동안 REST fallback ────────────────────────────────────
+
+    def _fallback_sl_check_on_reconnect(self) -> None:
+        """WS 연결이 끊긴 동안 REST로 현재가 조회해서 SL/TP 긴급 체크."""
+        with self._lock:
+            all_orders = {
+                sym: list(orders)
+                for sym, orders in self._open_orders.items()
+                if orders
+            }
+        if not all_orders:
+            return
+
+        logger.warning("[WsPriceFeed] WS down — running REST fallback SL check")
+        try:
+            import ccxt
+            from config.settings import settings
+            exchange = ccxt.binance({
+                "apiKey": settings.BINANCE_API_KEY,
+                "secret": settings.BINANCE_API_SECRET,
+                "options": {"defaultType": "future"},
+            })
+            for sym, orders in all_orders.items():
+                try:
+                    ccxt_sym = sym.replace("USDT", "/USDT") if "/" not in sym else sym
+                    ticker = exchange.fetch_ticker(ccxt_sym)
+                    price = float(ticker.get("last") or 0)
+                    if price > 0:
+                        self._check_paper_orders(sym, price)
+                        logger.info(f"[WsPriceFeed] REST fallback check {sym} @ {price:.2f}")
+                except Exception as e:
+                    logger.warning(f"[WsPriceFeed] REST fallback failed for {sym}: {e}")
+        except Exception as e:
+            logger.error(f"[WsPriceFeed] REST fallback init failed: {e}")
+
     # ── Paper Order Monitoring ──────────────────────────────────────────────────
 
-    _FETCH_INTERVAL = 60.0               # 60초마다 DB에서 OPEN 주문 재조회
+    _FETCH_INTERVAL = 60.0  # DB 전체 재조회 주기 (register_order로 즉시 등록 보완)
 
     def _check_paper_orders(self, symbol: str, current_price: float) -> None:
         """실시간 가격이 들어올 때마다 paper_orders SL/TP 조건 확인."""
         now = time.monotonic()
 
-        # 주기적으로 DB에서 OPEN 주문 목록 갱신
+        # 주기적으로 DB에서 전체 OPEN 목록 동기화 (register_order 누락분 보완)
         if now - self._last_fetch.get(symbol, 0) > self._FETCH_INTERVAL:
             self._last_fetch[symbol] = now
             try:
                 from config.database import db
                 all_open = db.get_open_paper_orders()
-                self._open_orders[symbol] = [o for o in all_open if o.get("symbol") == symbol]
+                db_orders = [o for o in all_open if o.get("symbol") == symbol]
+                with self._lock:
+                    existing = self._open_orders.get(symbol, [])
+                    existing_ids = {o.get("id") for o in existing}
+                    # DB에만 있고 메모리에 없는 것 추가 (재시작 후 복원)
+                    for o in db_orders:
+                        if o.get("id") not in existing_ids:
+                            existing.append(o)
+                    self._open_orders[symbol] = existing
             except Exception as e:
                 logger.warning(f"[PaperMonitor] DB fetch failed for {symbol}: {e}")
-                return
 
-        orders = self._open_orders.get(symbol, [])
+        with self._lock:
+            orders = list(self._open_orders.get(symbol, []))
+
         if not orders:
             return
 
@@ -156,7 +247,9 @@ class WsPriceFeed:
             closed = self._try_close_order(order, current_price)
             if not closed:
                 still_open.append(order)
-        self._open_orders[symbol] = still_open
+
+        with self._lock:
+            self._open_orders[symbol] = still_open
 
     def _try_close_order(self, order: dict, current_price: float) -> bool:
         """SL 또는 TP 조건 충족 시 paper_order 청산 처리. 청산됐으면 True 반환."""
@@ -165,8 +258,8 @@ class WsPriceFeed:
             from datetime import datetime, timezone
 
             side = str(order.get("side", "")).upper()
-            sl = float(order.get("sl_price") or 0)
-            tp1 = float(order.get("tp1_price") or 0)
+            sl   = float(order.get("sl_price") or 0)
+            tp1  = float(order.get("tp1_price") or 0)
             entry = float(order.get("entry_price") or current_price)
             order_id = order.get("id")
 
@@ -182,7 +275,11 @@ class WsPriceFeed:
                 return False
 
             status = "CLOSED_SL" if hit_sl else "CLOSED_TP1"
-            pnl_pct = ((current_price - entry) / entry * 100) if side == "LONG" else ((entry - current_price) / entry * 100)
+            pnl_pct = (
+                (current_price - entry) / entry * 100
+                if side == "LONG"
+                else (entry - current_price) / entry * 100
+            )
 
             created_at_str = order.get("created_at", "")
             try:

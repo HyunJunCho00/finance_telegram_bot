@@ -1,6 +1,6 @@
 version: '3.8'
 
-# Base anchor for shared properties
+# Base anchor for shared properties (DRY)
 x-bot-service: &bot-service
   build: .
   image: finance-bot:latest
@@ -12,18 +12,65 @@ x-bot-service: &bot-service
 
 services:
   # =========================================================================
-  # 🔵 BLUE ENVIRONMENT (LIVE TRADING - 실제 돈)
+  # 🌐 1. SHARED SERVICES (절대 재시작하지 않는 무중단 계층)
+  # 업데이트가 거의 필요 없으며, 항시 켜져서 데이터를 제공하는 역할
   # =========================================================================
-  blue-scheduler:
+  
+  # 데이터 수집 엔진 (1분봉 가격, 펀딩비, 코인메트릭스, 차트 압축 등)
+  # GitHub Actions로 분석기가 재시작되어도 절대 꺼지지 않습니다.
+  shared-data:
     <<: *bot-service
-    container_name: tgbot-blue-scheduler
+    container_name: tgbot-shared-data
+    command: ["python", "scheduler.py"]
+    environment:
+      - USE_SECRET_MANAGER=true
+      - PROJECT_ID=${PROJECT_ID}
+      - SCHEDULER_ROLE=data
+      - DISABLE_TELEGRAM_BOT=true
+      - DISABLE_TELEGRAM_LISTENER=true
+    restart: always
+
+  # 텔레그램 실시간 뉴스 리스너 (RAG DB 인제스트)
+  shared-listener:
+    <<: *bot-service
+    container_name: tgbot-shared-listener
+    command: ["python", "-m", "collectors.telegram_listener"]
+    environment:
+      - USE_SECRET_MANAGER=true
+      - PROJECT_ID=${PROJECT_ID}
+    restart: always
+
+  # 텔레그램 챗봇 인터페이스 (단일 토큰 충돌 방지)
+  shared-bot:
+    <<: *bot-service
+    container_name: tgbot-shared-interface
+    command: ["python", "-m", "bot.telegram_bot"]
+    environment:
+      - USE_SECRET_MANAGER=true
+      - PROJECT_ID=${PROJECT_ID}
+    restart: always
+
+
+  # =========================================================================
+  # 🔵 2. BLUE ENVIRONMENT (LIVE TRADING - 실제 돈)
+  # AI 로직 등을 자주 업데이트 하기 위해 수시로 껐다 킬 수 있는 계층
+  # =========================================================================
+  
+  # Blue 두뇌: 실시간 판단, 프롬프트, 플레이북 생성 (수집은 하지 않음)
+  blue-brain:
+    <<: *bot-service
+    container_name: tgbot-blue-brain
     command: ["python", "scheduler.py"]
     environment:
       - USE_SECRET_MANAGER=true
       - PROJECT_ID=${PROJECT_ID}
       - PAPER_TRADING_MODE=False
+      - SCHEDULER_ROLE=brain
+      - DISABLE_TELEGRAM_BOT=true
+      - DISABLE_TELEGRAM_LISTENER=true
     restart: always
 
+  # Blue 실행기: 바이낸스 실제 주문 발송 및 포지션 관리
   blue-executor:
     <<: *bot-service
     container_name: tgbot-blue-executor
@@ -36,21 +83,28 @@ services:
       - "9091:9091"
     restart: always
 
+
   # =========================================================================
-  # 🟢 GREEN ENVIRONMENT (SHADOW / 모의투자)
+  # 🟢 3. GREEN ENVIRONMENT (SHADOW / 모의투자 / 새 프롬프트 테스트)
   # =========================================================================
-  green-scheduler:
+  
+  # Green 두뇌: 섀도우 분석 및 새로운 전략/프롬프트 테스트
+  green-brain:
     <<: *bot-service
-    container_name: tgbot-green-scheduler
+    container_name: tgbot-green-brain
     command: ["python", "scheduler.py"]
     environment:
       - USE_SECRET_MANAGER=true
       - PROJECT_ID=${PROJECT_ID}
       - PAPER_TRADING_MODE=True
+      - SCHEDULER_ROLE=brain
+      - DISABLE_TELEGRAM_BOT=true
+      - DISABLE_TELEGRAM_LISTENER=true
     profiles:
       - shadow
     restart: unless-stopped
 
+  # Green 실행기: 페이퍼 레코딩 및 가상 주문 성사 처리
   green-executor:
     <<: *bot-service
     container_name: tgbot-green-executor

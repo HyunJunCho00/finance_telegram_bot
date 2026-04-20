@@ -69,6 +69,7 @@ from processors.math_engine import math_engine
 from processors.chart_generator import chart_generator
 from processors.light_rag import light_rag
 from processors.onchain_signal_engine import onchain_signal_engine
+from processors.gcs_parquet import gcs_parquet_store
 # CVD normalizer removed - CVD pipeline deprecated
 from collectors.perplexity_collector import perplexity_collector
 from collectors.macro_collector import macro_collector
@@ -368,8 +369,6 @@ def node_collect_data(state: AnalysisState) -> dict:
     cache_key = _cache_key(symbol, mode)
     months_back = settings.history_lookback_months_for_mode(mode)
 
-    from processors.gcs_parquet import gcs_parquet_store
-
     # ── 1. GCS 로컬 캐시에서 1m 역사 데이터 로드 ─────────────────────────
     df_cached = pd.DataFrame()
     try:
@@ -399,10 +398,9 @@ def node_collect_data(state: AnalysisState) -> dict:
             df = df_cached
             logger.info(f"No gap data from Supabase, using cache only: {len(df):,} rows")
     else:
-        # 캐시 없음 → Supabase 전체 fallback (최대 30일)
-        fallback_limit = settings.SWING_CANDLE_LIMIT
-        logger.warning(f"GCS local cache empty for {symbol}, Supabase fallback (limit={fallback_limit:,})")
-        df = db.get_latest_market_data(symbol, limit=fallback_limit)
+        # 캐시 없음 → 로컬 parquet 재시도 (Supabase 의존 제거)
+        logger.warning(f"GCS local cache empty for {symbol}, retrying parquet load")
+        df = gcs_parquet_store.load_ohlcv("1m", symbol, months_back=settings.SWING_HISTORY_MONTHS)
 
     if df.empty:
         return {"df_size": 0, "errors": state.get("errors", []) + [f"No market data for {symbol}"]}
@@ -579,7 +577,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
 
         # 7. Telegram News
         try:
-            news = db.get_recent_telegram_messages(hours=1 if is_emergency else 4)
+            news = gcs_parquet_store.get_recent_telegram_messages_parquet(hours=1 if is_emergency else 4)
             db_updates["telegram_news"] = "\n".join([f"[{m['channel']}] {m['text'][:200]}" for m in news[:10]]) if news else "No news."
         except Exception as e: logger.error(f"Telegram news error: {e}")
 
@@ -602,16 +600,16 @@ def node_context_gathering(state: AnalysisState) -> dict:
             if snap: db_updates["microstructure_context"] = f"[MICRO] spread={snap.get('spread_bps', 0):.2f}bps imbalance={snap.get('orderbook_imbalance', 0):.4f}"
         except Exception: pass
         try:
-            m = db.get_latest_macro_data()
+            m = gcs_parquet_store.get_latest_row("macro")
             if m: db_updates["macro_context"] = f"[MACRO] DGS10={m.get('dgs10', 'N/A')} DXY={m.get('dxy', 'N/A')} NASDAQ={m.get('nasdaq', 'N/A')}"
         except Exception: pass
         try:
             currency = symbol[:-4] if symbol.endswith('USDT') else symbol
-            d = db.get_latest_deribit_data(currency)
+            d = gcs_parquet_store.get_latest_row("deribit", currency)
             if d: db_updates["deribit_context"] = f"[DERIBIT {currency}] DVOL={d.get('dvol')} PCR={d.get('pcr_oi')}"
         except Exception: pass
         try:
-            fg = db.get_latest_fear_greed()
+            fg = gcs_parquet_store.get_latest_row("fear_greed")
             if fg: db_updates["fear_greed_context"] = f"[FEAR&GREED] {fg.get('value')}/100"
         except Exception: pass
         try:
@@ -839,7 +837,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
 
     def fetch_onchain_context():
         try:
-            snapshot = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
+            snapshot = gcs_parquet_store.get_latest_row("onchain", symbol)
             return {
                 "onchain_snapshot": snapshot or {},
                 "onchain_context": onchain_signal_engine.format_context(snapshot),
@@ -1230,11 +1228,7 @@ def node_triage(state: AnalysisState) -> dict:
         # [FIX CRASH-2] Use cached DataFrame from node_collect_data
         df = _df_cache.get(cache_key)
         if df is None:
-            df = db.get_latest_market_data(
-                symbol,
-                limit=int(getattr(settings, "ORCHESTRATOR_MARKET_FALLBACK_LIMIT", 2880)),
-                columns="timestamp,open,high,low,close,volume",
-            )  # fallback if cache miss
+            df = gcs_parquet_store.load_ohlcv("1m", symbol, months_back=1)  # fallback if cache miss
         if not df.empty:
             df_1h = df.resample('1h', on='timestamp').agg({
                 'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
@@ -1689,7 +1683,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
     # [FIX CRASH-2] Use cached DataFrame from node_collect_data
     df = _df_cache.get(cache_key)
     if df is None:
-        df = db.get_latest_market_data(symbol, limit=candle_limit)  # fallback
+        df = gcs_parquet_store.load_ohlcv("1m", symbol, months_back=1)  # fallback
     if df.empty:
         return {"chart_image_b64": None, "chart_bytes": None, "vlm_context_text": ""}
 
@@ -1718,7 +1712,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
             cvd_df = _cvd_cache.get(cache_key)
             if cvd_df is None:
                 cvd_limit = settings.data_lookback_hours * 60
-                cvd_df = db.get_cvd_data(symbol, limit=cvd_limit)
+                cvd_df = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=1).tail(cvd_limit).reset_index(drop=True)
                 _cvd_cache[cache_key] = cvd_df
         except Exception as e:
             logger.warning(f"CVD data load for chart skipped: {e}")
@@ -1743,7 +1737,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
             if funding_df is None:
                 # Fetch funding data (includes OI, LSR) matching the lookback
                 funding_limit = settings.data_lookback_hours * 60
-                funding_df = db.get_funding_history(symbol, limit=funding_limit)
+                funding_df = gcs_parquet_store.get_funding_history_parquet(symbol, limit=funding_limit)
                 if funding_df is not None and not funding_df.empty:
                     funding_df = funding_df.loc[:, ~funding_df.columns.duplicated()].reset_index(drop=True)
                 
@@ -1759,7 +1753,7 @@ def node_generate_chart(state: AnalysisState) -> dict:
                         })
                         hist_fnd['timestamp'] = pd.to_datetime(hist_fnd['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
                         since_fnd = hist_fnd['timestamp'].max()
-                        bridge_fnd = db.get_funding_history(
+                        bridge_fnd = gcs_parquet_store.get_funding_history_parquet(
                             symbol,
                             limit=int(getattr(settings, "ORCHESTRATOR_FUNDING_BRIDGE_LIMIT", 5000)),
                             since=since_fnd,
@@ -2130,7 +2124,7 @@ def node_risk_manager(state: AnalysisState) -> dict:
     cvd_df = _cvd_cache.get(cache_key)
     if cvd_df is None:
         try:
-            cvd_df = db.get_cvd_data(symbol, limit=60)
+            cvd_df = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=1).tail(60).reset_index(drop=True)
         except Exception:
             cvd_df = None
 
@@ -2478,11 +2472,10 @@ def node_generate_report(state: AnalysisState) -> dict:
     mode = TradingMode(state["mode"])
     cache_key = _cache_key(symbol, mode)
 
-    candle_limit = settings.SWING_CANDLE_LIMIT
     # [FIX CRASH-2] Use cached DataFrame from node_collect_data
     df = _df_cache.get(cache_key)
     if df is None:
-        df = db.get_latest_market_data(symbol, limit=candle_limit)  # fallback
+        df = gcs_parquet_store.load_ohlcv("1m", symbol, months_back=1)  # fallback
     # [FIX RESOURCE-1] Use cached market_data
     market_data = _market_data_cache.get(cache_key)
     if market_data is None:

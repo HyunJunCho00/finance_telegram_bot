@@ -26,6 +26,7 @@ from executors.playbook_guard import build_playbook_context
 from loguru import logger
 from processors.math_engine import math_engine
 from processors.onchain_signal_engine import onchain_signal_engine
+from processors.gcs_parquet import gcs_parquet_store
 
 
 class MarketMonitorAgent:
@@ -161,7 +162,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         except Exception:
             pass
         try:
-            f_df = db.get_funding_history(symbol, limit=1)
+            f_df = gcs_parquet_store.get_funding_history_parquet(symbol, limit=1)
             if f_df is not None and not f_df.empty and "funding_rate" in f_df.columns:
                 indicators["funding_rate"] = float(f_df["funding_rate"].iloc[-1])
         except Exception:
@@ -263,7 +264,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             "onchain_gate": trigger_result.get("onchain_gate", {}),
         }
         try:
-            snapshot = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
+            snapshot = gcs_parquet_store.get_latest_row("onchain", symbol)
             if snapshot:
                 payload["onchain_snapshot"] = {
                     "risk_bias": snapshot.get("risk_bias"),
@@ -274,7 +275,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         except Exception:
             pass
         try:
-            news = db.get_recent_telegram_messages(hours=2) or []
+            news = gcs_parquet_store.get_recent_telegram_messages_parquet(hours=2) or []
             payload["recent_telegram_news"] = [
                 {
                     "channel": item.get("channel", ""),
@@ -618,7 +619,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             result["status"] = "WATCH"
 
         try:
-            snapshot = db.get_latest_onchain_snapshot(symbol, max_age_hours=48)
+            snapshot = gcs_parquet_store.get_latest_row("onchain", symbol)
             gate = onchain_signal_engine.build_gate(snapshot)
             blocked = (
                 playbook_direction == "LONG" and not gate.get("allow_long", True)
@@ -662,7 +663,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                         cvd_df = None
                         liq_df = None
                         try:
-                            cvd_df = db.get_cvd_data(symbol, limit=60)
+                            cvd_df = gcs_parquet_store.load_timeseries("cvd", symbol, months_back=1).tail(60).reset_index(drop=True)
                         except Exception:
                             pass
                         try:

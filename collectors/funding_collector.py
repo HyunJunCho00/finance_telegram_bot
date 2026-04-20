@@ -214,13 +214,7 @@ class FundingCollector:
         except Exception as e:
             logger.debug(f"[LocalCache] funding local write skipped: {e}")
 
-        # ── 2순위: Supabase (실패해도 로컬에 이미 저장됨) ─────────────────
-        try:
-            for record in data:
-                db.upsert_funding_data(record)
-            logger.info(f"Saved {len(data)} funding data records (global OI)")
-        except Exception as e:
-            logger.warning(f"[DB] funding_data Supabase write skipped (local cache OK): {e}")
+        logger.info(f"Saved {len(data)} funding data records to local parquet")
 
     def run(self) -> None:
         data = self.collect_all_funding_data()
