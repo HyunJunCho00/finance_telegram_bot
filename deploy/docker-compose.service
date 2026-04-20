@@ -1,0 +1,17 @@
+[Unit]
+Description=Finance Bot Docker Compose (shared layer)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/app
+Environment="PROJECT_ID="
+ExecStart=/usr/bin/docker compose up -d shared-data shared-listener shared-bot
+ExecStop=/usr/bin/docker compose stop shared-data shared-listener shared-bot
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

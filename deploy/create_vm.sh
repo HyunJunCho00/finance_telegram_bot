@@ -103,8 +103,24 @@ echo "=== Startup: $(date) ==="
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq git python3.11 python3.11-venv python3.11-dev python3-pip
+apt-get install -y -qq git ca-certificates curl gnupg
 
+# ── Docker Engine + Compose plugin 설치 ──
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+  https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+  > /etc/apt/sources.list.d/docker.list
+apt-get update -qq
+apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# docker 소켓 권한 (서비스 계정 접근 허용)
+usermod -aG docker ubuntu 2>/dev/null || true
+systemctl enable docker
+systemctl start docker
+
+# ── 레포 클론 ──
 APP_DIR="/opt/app"
 if [[ -d "$APP_DIR/.git" ]]; then
   echo "Repo exists — pulling latest..."
@@ -116,31 +132,21 @@ fi
 
 cd "$APP_DIR"
 mkdir -p data
+git config --global --add safe.directory "$APP_DIR"
 
-if [[ ! -d venv ]]; then
-  python3.11 -m venv venv
-fi
-source venv/bin/activate
-pip install -q --upgrade pip
-pip install -q -r requirements.txt
+# ── 초기 이미지 빌드 및 공유 계층(shared) 컨테이너 기동 ──
+# shared-data / shared-listener / shared-bot 은 항상 켜져 있어야 하므로 VM 기동 시 자동 시작
+export PROJECT_ID=PLACEHOLDER_PROJECT_ID
+docker compose up -d shared-data shared-listener shared-bot
 
-# ── Create app user (required by scheduler.service User=crypto_trader) ──
-useradd -m -s /bin/bash crypto_trader 2>/dev/null || true
-chown -R crypto_trader:crypto_trader "$APP_DIR"
-
-sed -i \
-  -e "s|Environment=\"PROJECT_ID=.*\"|Environment=\"PROJECT_ID=PLACEHOLDER_PROJECT_ID\"|g" \
-  -e "s|Environment=\"VERTEX_REGION=.*\"|Environment=\"VERTEX_REGION=PLACEHOLDER_VERTEX_REGION\"|g" \
-  deploy/scheduler.service deploy/execution.service deploy/mcp_server.service
-
-cp deploy/scheduler.service /etc/systemd/system/
-cp deploy/execution.service /etc/systemd/system/
-cp deploy/mcp_server.service /etc/systemd/system/
+# ── VM 재부팅 시 shared 계층 자동 복구 ──
+sed "s|Environment=\"PROJECT_ID=\"|Environment=\"PROJECT_ID=PLACEHOLDER_PROJECT_ID\"|g" \
+  "$APP_DIR/deploy/docker-compose.service" > /etc/systemd/system/docker-compose.service
 systemctl daemon-reload
-systemctl enable scheduler.service execution.service mcp_server.service
-systemctl start scheduler.service execution.service mcp_server.service
+systemctl enable docker-compose.service
 
-echo "=== Startup complete: $(date) ==="'
+echo "=== Startup complete: $(date) ==="
+echo "Blue-Green 배포는 CI/CD(blue_green_switch.sh)가 담당합니다."'
 
 STARTUP_SCRIPT="${STARTUP_SCRIPT//PLACEHOLDER_REPO_URL/$REPO_URL}"
 STARTUP_SCRIPT="${STARTUP_SCRIPT//PLACEHOLDER_PROJECT_ID/$PROJECT_ID}"
