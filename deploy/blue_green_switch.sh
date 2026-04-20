@@ -11,7 +11,13 @@
 
 echo "🚀 Starting Graceful Deployment Process..."
 
-# 1. 새 버전 이미지 빌드
+# 1. 현재 이미지를 previous로 백업 (롤백용)
+if docker image inspect finance-bot:latest &>/dev/null; then
+    echo "📦 Saving current image as finance-bot:previous (rollback snapshot)..."
+    docker tag finance-bot:latest finance-bot:previous
+fi
+
+# 2. 새 버전 이미지 빌드
 echo "🔨 Building new Docker image..."
 docker build -t finance-bot:latest .
 

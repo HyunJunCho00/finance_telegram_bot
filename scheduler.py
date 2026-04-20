@@ -1726,7 +1726,7 @@ def main():
         logger.info("Telegram Listener starting skipped (DISABLE_TELEGRAM_LISTENER=true).")
         listener_thread = threading.Thread(target=lambda: None)
 
-        role = os.environ.get("SCHEDULER_ROLE", "all").lower()
+    role = os.environ.get("SCHEDULER_ROLE", "all").lower()
     logger.info(f"Scheduler starting with ROLE: {role.upper()}")
 
     # ==========================================

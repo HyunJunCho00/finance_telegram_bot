@@ -74,21 +74,25 @@ for role in roles/aiplatform.user roles/secretmanager.secretAccessor roles/loggi
     --role="$role" >/dev/null
 done
 
-# storage.objectAdmin scoped to the specific GCS bucket (not project-wide)
+# storage.objectAdmin scoped to the specific GCS bucket (only if it exists)
 GCS_BUCKET="${GCS_ARCHIVE_BUCKET:-}"
 if [[ -z "$GCS_BUCKET" ]]; then
+  # Try to fall back to Secret Manager value if not provided as env var
   GCS_BUCKET="$(gcloud secrets versions access latest --secret=GCS_ARCHIVE_BUCKET \
     --project="$PROJECT_ID" 2>/dev/null || true)"
 fi
+
 if [[ -n "$GCS_BUCKET" ]]; then
-  echo "Granting storage.objectAdmin on gs://${GCS_BUCKET} only..."
-  gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
-    --member="serviceAccount:${SA_EMAIL}" \
-    --role="roles/storage.objectAdmin" >/dev/null
+  if gcloud storage buckets describe "gs://${GCS_BUCKET}" --project="$PROJECT_ID" &>/dev/null; then
+    echo "Granting storage.objectAdmin on gs://${GCS_BUCKET} only..."
+    gcloud storage buckets add-iam-policy-binding "gs://${GCS_BUCKET}" \
+      --member="serviceAccount:${SA_EMAIL}" \
+      --role="roles/storage.objectAdmin" >/dev/null
+  else
+    echo "NOTICE: GCS bucket gs://${GCS_BUCKET} does not exist. Skipping bucket-level IAM binding."
+  fi
 else
-  echo "WARNING: GCS_ARCHIVE_BUCKET not found — skipping bucket-level storage IAM binding."
-  echo "         Run manually after deploy: gcloud storage buckets add-iam-policy-binding gs://<bucket> \\"
-  echo "           --member=serviceAccount:${SA_EMAIL} --role=roles/storage.objectAdmin"
+  echo "INFO: GCS_ARCHIVE_BUCKET not set — skipping bucket-level storage IAM binding."
 fi
 
 # ─── Startup script ───────────────────────────────────────────────────────
