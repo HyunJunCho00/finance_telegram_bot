@@ -43,6 +43,8 @@ jobs:
       env:
         TEST_RUN: "True"
       run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
         pip install pytest
         pytest tests/
 
@@ -91,13 +93,16 @@ jobs:
           # 서버 내 봇 폴더로 이동
           cd /opt/app
           
-          # Git 권한 방어
-          git config --global --add safe.directory /opt/app
+          # 루트(sudo) 환경에도 Git 권한(Dubious ownership) 에러 방어 코드 추가
+          sudo git config --global --add safe.directory /opt/app
           
-          # 최신 코드 땡겨오기
+          # 최신 코드 깃허브에서 땡겨오기
+          sudo git reset --hard
           sudo git pull origin main
           
-          # Blue-Green 무중단 교체 스크립트 실행
-          export AUTO_PROMOTE=1
-          export PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}
-          sudo bash deploy/blue_green_switch.sh
+          # 파이썬 패키지 업데이트
+          sudo /opt/app/venv/bin/pip install -r requirements.txt --quiet
+          
+          # Systemd 서비스 재시작 (Docker 대신 네이티브 구동 방식)
+          sudo systemctl daemon-reload
+          sudo systemctl restart scheduler.service execution.service mcp_server.service
