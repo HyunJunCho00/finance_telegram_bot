@@ -188,20 +188,9 @@ old_backup/
 *.7z
 
 # Personal and Internal Architecture Notes
-# (Users often want to keep their main repo clean of scratch notes)
-INTERVIEW_PREP.md
-ACID_FINANCE_HARDENING.md
-PORTFOLIO_OMS.md
-notes_*.md
-ARCHITECTURE_V8_FINAL.md
-CICD_ARCHITECTURE_COMPARISON.md
-BLACKROCK_INSPIRED_ARCHITECTURE.md
+md/
 QUANT_LAYERS_ARCHITECTURE.md
-CLOUD_MIGRATION_REPORT.md
 todays_session.md
-COMMANDS.md
-INFRASTRUCTURE_ARCHITECTURE.md
-AGENTS_ARCHITECTURE.md
 
 # OS specific files
 .DS_Store
@@ -224,3 +213,6 @@ AI_test.py
 tmp*
 tests
 .claude
+scratch/
+deploy/GITHUB_SECRETS_SETUP.md
+PORTFOLIO_OMS.md

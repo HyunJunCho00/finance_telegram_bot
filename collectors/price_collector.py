@@ -24,6 +24,7 @@ import pytz
 from config.settings import settings
 from config.database import db
 from utils.retry import api_retry
+from utils.redis_client import redis_cache
 from loguru import logger
 
 
@@ -48,6 +49,7 @@ class PriceCollector:
         }
 
     @api_retry(max_attempts=3, delay_seconds=2)
+    @redis_cache(ttl_seconds=60, key_prefix="binance_cvd")
     def fetch_binance_ohlcv_with_cvd(
         self,
         symbol: str,

@@ -1,40 +1,25 @@
 from __future__ import annotations
 
 import json
-import sqlite3
+import psycopg2
+from psycopg2.pool import ThreadedConnectionPool
+from psycopg2.extras import RealDictCursor
+from config.settings import settings
 import threading
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
-from pathlib import Path as _Path
-
-# DB_PATH resolved locally to avoid circular import with config.local_state
-_DB_PATH: str = str(_Path(__file__).resolve().parents[1] / "data" / "local_state.db")
-
 FEE_PCT = 0.0005  # 0.05% Binance Futures Market Fee
 
-_WRITE_LOCK = threading.RLock()
-_thread_local = threading.local()
+_pool = None
 
-
-def _get_connection() -> sqlite3.Connection:
-    """Return the thread-local persistent SQLite connection, creating it if needed."""
-    conn: sqlite3.Connection | None = getattr(_thread_local, "conn", None)
-    if conn is None:
-        conn = sqlite3.connect(
-            _DB_PATH,
-            check_same_thread=False,
-            isolation_level=None,
-            timeout=30.0,
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=30000;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        _thread_local.conn = conn
-    return conn
+def _get_pool():
+    global _pool
+    if _pool is None:
+        _pool = ThreadedConnectionPool(1, 20, dsn=settings.EXECUTION_DB_URL)
+    return _pool
 
 
 class DuplicateActiveIntentError(RuntimeError):
@@ -50,15 +35,14 @@ class DuplicateActiveIntentError(RuntimeError):
 class ExecutionRepository:
     @contextmanager
     def transaction(self):
-        with _WRITE_LOCK:
-            conn = _get_connection()
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-                yield conn
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
+        pool = _get_pool()
+        conn = pool.getconn()
+        try:
+            with conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    yield cur
+        finally:
+            pool.putconn(conn)
 
     def create_intent(self, **intent_spec) -> str:
         return self.create_intents([intent_spec])[0]
@@ -69,9 +53,9 @@ class ExecutionRepository:
             return []
 
         created_ids: List[str] = []
-        with self.transaction() as conn:
+        with self.transaction() as cur:
             for spec in specs:
-                created_ids.append(self._insert_intent_locked(conn, spec))
+                created_ids.append(self._insert_intent_locked(cur, spec))
         return created_ids
 
     def open_paper_position(
@@ -91,7 +75,7 @@ class ExecutionRepository:
         execution_record_base: Optional[Dict] = None,
         outbox_events: Optional[Iterable[Dict]] = None,
     ) -> Dict:
-        with self.transaction() as conn:
+        with self.transaction() as cur:
             result = self._open_paper_position_locked(
                 conn,
                 exchange=exchange,
@@ -125,7 +109,7 @@ class ExecutionRepository:
                     )
                     result["execution_outbox_enqueued"] = True
                     result["execution_outbox_event_id"] = event_id
-                self._enqueue_outbox_events_locked(conn, outbox_events)
+                self._enqueue_outbox_events_locked(cur, outbox_events)
             return result
 
     def execute_paper_fill(
@@ -146,12 +130,12 @@ class ExecutionRepository:
         execution_record_base: Optional[Dict] = None,
         outbox_events: Optional[Iterable[Dict]] = None,
     ) -> Dict:
-        with self.transaction() as conn:
-            order = conn.execute(
+        with self.transaction() as cur:
+            order = cur.execute(
                 """
                 SELECT remaining_amount, status
                 FROM active_orders
-                WHERE intent_id = ?
+                WHERE intent_id = %s
                 """,
                 (intent_id,),
             ).fetchone()
@@ -180,7 +164,7 @@ class ExecutionRepository:
             if not result.get("success"):
                 return result
 
-            intent_state = self._update_intent_fill_locked(conn, intent_id, amount_to_fill)
+            intent_state = self._update_intent_fill_locked(cur, intent_id, amount_to_fill)
             result["intent_id"] = intent_id
             result["filled_notional_usd"] = amount_to_fill
             result["intent_status"] = intent_state["status"]
@@ -203,7 +187,7 @@ class ExecutionRepository:
                 )
                 result["execution_outbox_enqueued"] = True
                 result["execution_outbox_event_id"] = event_id
-            self._enqueue_outbox_events_locked(conn, outbox_events)
+            self._enqueue_outbox_events_locked(cur, outbox_events)
             return result
 
     def apply_tp1(
@@ -213,8 +197,8 @@ class ExecutionRepository:
         *,
         outbox_events: Optional[Iterable[Dict]] = None,
     ) -> Dict:
-        with self.transaction() as conn:
-            pos = self._get_open_position_locked(conn, position_id)
+        with self.transaction() as cur:
+            pos = self._get_open_position_locked(cur, position_id)
             if not pos:
                 return {"success": False, "error": "Position not found"}
 
@@ -226,7 +210,7 @@ class ExecutionRepository:
                 return {"success": False, "error": "TP1 is not available"}
 
             fraction = max(0.0, min(tp1_exit_pct / 100.0, 0.99))
-            close_result = self._close_position_fraction_locked(conn, pos, current_price, fraction)
+            close_result = self._close_position_fraction_locked(cur, pos, current_price, fraction)
             self._apply_tp1_followup_locked(
                 conn,
                 position_id=position_id,
@@ -238,7 +222,7 @@ class ExecutionRepository:
             close_result["tp1_exit_pct"] = tp1_exit_pct
             close_result["next_tp_price"] = (tp2 if tp2 > 0 else 0.0)
             close_result["new_sl_price"] = float(pos["entry_price"])
-            self._enqueue_outbox_events_locked(conn, outbox_events)
+            self._enqueue_outbox_events_locked(cur, outbox_events)
             return close_result
 
     def close_position_fraction(
@@ -249,14 +233,14 @@ class ExecutionRepository:
         *,
         outbox_events: Optional[Iterable[Dict]] = None,
     ) -> Dict:
-        with self.transaction() as conn:
-            pos = self._get_open_position_locked(conn, position_id)
+        with self.transaction() as cur:
+            pos = self._get_open_position_locked(cur, position_id)
             if not pos:
                 return {"success": False, "error": "Position not found"}
 
-            result = self._close_position_fraction_locked(conn, pos, current_price, fraction)
+            result = self._close_position_fraction_locked(cur, pos, current_price, fraction)
             result["success"] = True
-            self._enqueue_outbox_events_locked(conn, outbox_events)
+            self._enqueue_outbox_events_locked(cur, outbox_events)
             return result
 
     def liquidate_position(
@@ -265,16 +249,16 @@ class ExecutionRepository:
         *,
         outbox_events: Optional[Iterable[Dict]] = None,
     ) -> Dict:
-        with self.transaction() as conn:
-            pos = self._get_open_position_locked(conn, position_id)
+        with self.transaction() as cur:
+            pos = self._get_open_position_locked(cur, position_id)
             if not pos:
                 return {"success": False, "error": "Position not found"}
             now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                "UPDATE paper_positions SET is_open = 0, updated_at = ? WHERE position_id = ?",
+            cur.execute(
+                "UPDATE paper_positions SET is_open = 0, updated_at = %s WHERE position_id = %s",
                 (now, position_id),
             )
-            self._enqueue_outbox_events_locked(conn, outbox_events)
+            self._enqueue_outbox_events_locked(cur, outbox_events)
             return {"success": True, "position_id": position_id}
 
     def update_position_sl(
@@ -284,31 +268,31 @@ class ExecutionRepository:
         *,
         outbox_events: Optional[Iterable[Dict]] = None,
     ) -> Dict:
-        with self.transaction() as conn:
-            pos = self._get_open_position_locked(conn, position_id)
+        with self.transaction() as cur:
+            pos = self._get_open_position_locked(cur, position_id)
             if not pos:
                 return {"success": False, "error": "Position not found"}
             now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
-                "UPDATE paper_positions SET sl_price = ?, updated_at = ? WHERE position_id = ?",
+            cur.execute(
+                "UPDATE paper_positions SET sl_price = %s, updated_at = %s WHERE position_id = %s",
                 (sl_price, now, position_id),
             )
-            self._enqueue_outbox_events_locked(conn, outbox_events)
+            self._enqueue_outbox_events_locked(cur, outbox_events)
             return {"success": True, "new_sl": sl_price}
 
     def adjust_wallet_balance(self, exchange: str, delta: float) -> Dict:
-        with self.transaction() as conn:
+        with self.transaction() as cur:
             now = datetime.now(timezone.utc).isoformat()
             if delta >= 0:
-                self._credit_wallet_locked(conn, exchange, float(delta), now)
+                self._credit_wallet_locked(cur, exchange, float(delta), now)
             else:
-                self._debit_wallet_locked(conn, exchange, abs(float(delta)), now)
+                self._debit_wallet_locked(cur, exchange, abs(float(delta)), now)
             return {"success": True, "exchange": exchange.lower(), "delta": float(delta)}
 
     def apply_funding_fees(self, symbol_funding_rates: dict, current_prices: dict) -> List[Dict]:
         applied: List[Dict] = []
-        with self.transaction() as conn:
-            rows = conn.execute("SELECT * FROM paper_positions WHERE is_open = 1").fetchall()
+        with self.transaction() as cur:
+            rows = cur.execute("SELECT * FROM paper_positions WHERE is_open = 1").fetchall()
             now = datetime.now(timezone.utc).isoformat()
             for pos in rows:
                 symbol = str(pos["symbol"])
@@ -325,7 +309,7 @@ class ExecutionRepository:
                 exchange = str(pos["exchange"])
                 notional = size * float(price)
                 fee = notional * rate if side == "LONG" else notional * -rate
-                self._debit_wallet_locked(conn, exchange, fee, now)
+                self._debit_wallet_locked(cur, exchange, fee, now)
                 applied.append(
                     {
                         "exchange": exchange,
@@ -338,15 +322,15 @@ class ExecutionRepository:
         return applied
 
     def set_system_config(self, key: str, value: str) -> Dict:
-        with self.transaction() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)",
+        with self.transaction() as cur:
+            cur.execute(
+                "INSERT INTO system_config (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 (str(key), str(value)),
             )
             return {"success": True, "key": str(key), "value": str(value)}
 
     def enqueue_outbox_event(self, event_type: str, payload: Dict, *, idempotency_key: Optional[str] = None) -> Dict:
-        with self.transaction() as conn:
+        with self.transaction() as cur:
             event_id, deduped = self._enqueue_outbox_event_locked(
                 conn,
                 event_type,
@@ -367,9 +351,9 @@ class ExecutionRepository:
           - Process crashes → record stays in PROCESSING; after stale_after_seconds
                               claim_pending_outbox_events re-claims it and handler logs orphan alert
         """
-        with self.transaction() as conn:
-            existing = conn.execute(
-                "SELECT event_id FROM execution_outbox WHERE idempotency_key = ? LIMIT 1",
+        with self.transaction() as cur:
+            existing = cur.execute(
+                "SELECT event_id FROM execution_outbox WHERE idempotency_key = %s LIMIT 1",
                 (idempotency_key,),
             ).fetchone()
             if existing:
@@ -377,14 +361,14 @@ class ExecutionRepository:
 
             event_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
+            cur.execute(
                 """
                 INSERT INTO execution_outbox
                 (event_id, event_type, idempotency_key, payload_json,
                  status, attempts, last_error, processing_started_at,
                  created_at, updated_at, published_at)
-                VALUES (?, 'live_trade_preflight', ?, ?, 'PROCESSING', 1,
-                        NULL, ?, ?, ?, NULL)
+                VALUES (%s, 'live_trade_preflight', %s, %s, 'PROCESSING', 1,
+                        NULL, %s, %s, %s, NULL)
                 """,
                 (
                     event_id,
@@ -398,20 +382,20 @@ class ExecutionRepository:
             return event_id
 
     def claim_pending_outbox_events(self, limit: int = 50, stale_after_seconds: int = 300) -> List[Dict]:
-        with self.transaction() as conn:
+        with self.transaction() as cur:
             now = datetime.now(timezone.utc)
             stale_before = datetime.fromtimestamp(
                 now.timestamp() - max(int(stale_after_seconds), 0),
                 tz=timezone.utc,
             ).isoformat()
-            rows = conn.execute(
+            rows = cur.execute(
                 """
                 SELECT event_id, event_type, idempotency_key, payload_json, attempts, last_error, created_at
                 FROM execution_outbox
                 WHERE status = 'PENDING'
-                   OR (status = 'PROCESSING' AND processing_started_at IS NOT NULL AND processing_started_at <= ?)
+                   OR (status = 'PROCESSING' AND processing_started_at IS NOT NULL AND processing_started_at <= %s)
                 ORDER BY created_at ASC
-                LIMIT ?
+                LIMIT %s
                 """,
                 (stale_before, int(limit)),
             ).fetchall()
@@ -421,47 +405,47 @@ class ExecutionRepository:
 
             claim_time = now.isoformat()
             for row in claimed:
-                conn.execute(
+                cur.execute(
                     """
                     UPDATE execution_outbox
                     SET status = 'PROCESSING',
                         attempts = attempts + 1,
-                        processing_started_at = ?,
-                        updated_at = ?
-                    WHERE event_id = ?
+                        processing_started_at = %s,
+                        updated_at = %s
+                    WHERE event_id = %s
                     """,
                     (claim_time, claim_time, row["event_id"]),
                 )
             return claimed
 
     def mark_outbox_event_published(self, event_id: str) -> Dict:
-        with self.transaction() as conn:
+        with self.transaction() as cur:
             now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
+            cur.execute(
                 """
                 UPDATE execution_outbox
                 SET status = 'SENT',
-                    published_at = ?,
-                    updated_at = ?,
+                    published_at = %s,
+                    updated_at = %s,
                     last_error = NULL,
                     processing_started_at = NULL
-                WHERE event_id = ?
+                WHERE event_id = %s
                 """,
                 (now, now, event_id),
             )
             return {"success": True, "event_id": event_id}
 
     def mark_outbox_event_failed(self, event_id: str, error: str) -> Dict:
-        with self.transaction() as conn:
+        with self.transaction() as cur:
             now = datetime.now(timezone.utc).isoformat()
-            conn.execute(
+            cur.execute(
                 """
                 UPDATE execution_outbox
                 SET status = 'PENDING',
-                    last_error = ?,
-                    updated_at = ?,
+                    last_error = %s,
+                    updated_at = %s,
                     processing_started_at = NULL
-                WHERE event_id = ?
+                WHERE event_id = %s
                 """,
                 (str(error), now, event_id),
             )
@@ -472,7 +456,7 @@ class ExecutionRepository:
         with _WRITE_LOCK:
             try:
                 conn = _get_connection()
-                row = conn.execute(
+                row = cur.execute(
                     "SELECT created_at FROM execution_outbox WHERE status = 'PENDING' "
                     "ORDER BY created_at ASC LIMIT 1"
                 ).fetchone()
@@ -485,35 +469,35 @@ class ExecutionRepository:
                 return 0.0
 
     def update_intent_status(self, intent_id: str, new_status: str) -> Dict:
-        with self.transaction() as conn:
-            conn.execute(
-                "UPDATE active_orders SET status = ? WHERE intent_id = ?",
+        with self.transaction() as cur:
+            cur.execute(
+                "UPDATE active_orders SET status = %s WHERE intent_id = %s",
                 (new_status, intent_id),
             )
             return {"success": True, "intent_id": intent_id, "status": new_status}
 
     def update_order_fill(self, intent_id: str, filled_chunk: float) -> Dict:
-        with self.transaction() as conn:
-            state = self._update_intent_fill_locked(conn, intent_id, filled_chunk)
+        with self.transaction() as cur:
+            state = self._update_intent_fill_locked(cur, intent_id, filled_chunk)
             state["success"] = True
             state["intent_id"] = intent_id
             return state
 
     def flush_expired_intents(self, now_iso: Optional[str] = None) -> Dict:
         cutoff = now_iso or datetime.now(timezone.utc).isoformat()
-        with self.transaction() as conn:
-            cursor = conn.execute("DELETE FROM active_orders WHERE expires_at < ?", (cutoff,))
+        with self.transaction() as cur:
+            cursor = cur.execute("DELETE FROM active_orders WHERE expires_at < %s", (cutoff,))
             return {"success": True, "deleted": int(cursor.rowcount or 0), "cutoff": cutoff}
 
-    def _insert_intent_locked(self, conn: sqlite3.Connection, spec: Dict) -> str:
+    def _insert_intent_locked(self, cur, spec: Dict) -> str:
         symbol = str(spec["symbol"])
         exchange = str(spec["exchange"])
-        existing = conn.execute(
+        existing = cur.execute(
             """
             SELECT intent_id
             FROM active_orders
-            WHERE symbol = ?
-              AND exchange = ?
+            WHERE symbol = %s
+              AND exchange = %s
               AND status IN ('PENDING', 'ACTIVE')
             ORDER BY created_at DESC
             LIMIT 1
@@ -527,14 +511,14 @@ class ExecutionRepository:
         now = datetime.now(timezone.utc)
         ttl_hours = int(spec.get("ttl_hours", 24) or 24)
         expires = datetime.fromtimestamp(now.timestamp() + (ttl_hours * 3600), tz=timezone.utc)
-        conn.execute(
+        cur.execute(
             """
             INSERT INTO active_orders
             (intent_id, symbol, direction, execution_style,
              total_target_amount, remaining_amount, exchange,
              created_at, expires_at, leverage, tp_price, sl_price, tp2_price, tp1_exit_pct,
              playbook_id, source_decision, strategy_version, trigger_reason, thesis_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 intent_id,
@@ -562,7 +546,7 @@ class ExecutionRepository:
 
     def _open_paper_position_locked(
         self,
-        conn: sqlite3.Connection,
+        cur,
         *,
         exchange: str,
         symbol: str,
@@ -586,7 +570,7 @@ class ExecutionRepository:
         penalty = (raw_price * slippage_pct) if direction == "LONG" else -(raw_price * slippage_pct)
         filled_price = raw_price + penalty
 
-        wallet = self._get_wallet_balance_locked(conn, exchange)
+        wallet = self._get_wallet_balance_locked(cur, exchange)
         required_margin = float(amount_usd) / max(float(leverage or 1.0), 1.0)
         entry_fee = float(amount_usd) * FEE_PCT
         if (required_margin + entry_fee) > wallet:
@@ -616,7 +600,7 @@ class ExecutionRepository:
             tp2_price=tp2_price,
             tp1_exit_pct=tp1_exit_pct,
         )
-        self._debit_wallet_locked(conn, exchange, required_margin + entry_fee, now)
+        self._debit_wallet_locked(cur, exchange, required_margin + entry_fee, now)
         return {
             "success": True,
             "order_id": pos_id,
@@ -629,7 +613,7 @@ class ExecutionRepository:
 
     def _insert_position_locked(
         self,
-        conn: sqlite3.Connection,
+        cur,
         *,
         position_id: str,
         exchange: str,
@@ -644,12 +628,12 @@ class ExecutionRepository:
         tp2_price: float,
         tp1_exit_pct: float,
     ) -> None:
-        conn.execute(
+        cur.execute(
             """
             INSERT INTO paper_positions
             (position_id, exchange, symbol, side, size, entry_price,
              leverage, is_open, created_at, updated_at, tp_price, sl_price, tp2_price, tp1_done, tp1_exit_pct)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, 0, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, 1, %s, %s, %s, %s, %s, 0, %s)
             """,
             (
                 position_id,
@@ -668,42 +652,42 @@ class ExecutionRepository:
             ),
         )
 
-    def _debit_wallet_locked(self, conn: sqlite3.Connection, exchange: str, delta: float, now: str) -> None:
-        conn.execute(
-            "UPDATE paper_wallets SET balance = balance - ?, updated_at = ? WHERE exchange = ?",
+    def _debit_wallet_locked(self, cur, exchange: str, delta: float, now: str) -> None:
+        cur.execute(
+            "UPDATE paper_wallets SET balance = balance - %s, updated_at = %s WHERE exchange = %s",
             (delta, now, exchange.lower()),
         )
 
-    def _credit_wallet_locked(self, conn: sqlite3.Connection, exchange: str, delta: float, now: str) -> None:
-        conn.execute(
-            "UPDATE paper_wallets SET balance = balance + ?, updated_at = ? WHERE exchange = ?",
+    def _credit_wallet_locked(self, cur, exchange: str, delta: float, now: str) -> None:
+        cur.execute(
+            "UPDATE paper_wallets SET balance = balance + %s, updated_at = %s WHERE exchange = %s",
             (delta, now, exchange.lower()),
         )
 
-    def _get_wallet_balance_locked(self, conn: sqlite3.Connection, exchange: str) -> float:
-        row = conn.execute(
-            "SELECT balance FROM paper_wallets WHERE exchange = ?",
+    def _get_wallet_balance_locked(self, cur, exchange: str) -> float:
+        row = cur.execute(
+            "SELECT balance FROM paper_wallets WHERE exchange = %s",
             (exchange.lower(),),
         ).fetchone()
         return float(row["balance"]) if row else 0.0
 
-    def _update_intent_fill_locked(self, conn: sqlite3.Connection, intent_id: str, filled_chunk: float) -> Dict:
-        conn.execute(
+    def _update_intent_fill_locked(self, cur, intent_id: str, filled_chunk: float) -> Dict:
+        cur.execute(
             """
             UPDATE active_orders
-            SET filled_amount = filled_amount + ?,
-                remaining_amount = MAX(remaining_amount - ?, 0),
+            SET filled_amount = filled_amount + %s,
+                remaining_amount = MAX(remaining_amount - %s, 0),
                 status = CASE
-                    WHEN remaining_amount - ? <= 0.0001 THEN 'COMPLETED'
+                    WHEN remaining_amount - %s <= 0.0001 THEN 'COMPLETED'
                     ELSE 'ACTIVE'
                 END
-            WHERE intent_id = ?
+            WHERE intent_id = %s
               AND status IN ('PENDING', 'ACTIVE')
             """,
             (filled_chunk, filled_chunk, filled_chunk, intent_id),
         )
-        row = conn.execute(
-            "SELECT remaining_amount, status FROM active_orders WHERE intent_id = ?",
+        row = cur.execute(
+            "SELECT remaining_amount, status FROM active_orders WHERE intent_id = %s",
             (intent_id,),
         ).fetchone()
         if not row:
@@ -713,15 +697,15 @@ class ExecutionRepository:
             "status": str(row["status"]),
         }
 
-    def _get_open_position_locked(self, conn: sqlite3.Connection, position_id: str):
-        return conn.execute(
-            "SELECT * FROM paper_positions WHERE is_open = 1 AND position_id = ?",
+    def _get_open_position_locked(self, cur, position_id: str):
+        return cur.execute(
+            "SELECT * FROM paper_positions WHERE is_open = 1 AND position_id = %s",
             (position_id,),
         ).fetchone()
 
     def _close_position_fraction_locked(
         self,
-        conn: sqlite3.Connection,
+        cur,
         pos: sqlite3.Row,
         current_price: float,
         fraction: float,
@@ -747,17 +731,17 @@ class ExecutionRepository:
         now = datetime.now(timezone.utc).isoformat()
 
         if close_fraction >= 0.99:
-            conn.execute(
-                "UPDATE paper_positions SET is_open = 0, updated_at = ? WHERE position_id = ?",
+            cur.execute(
+                "UPDATE paper_positions SET is_open = 0, updated_at = %s WHERE position_id = %s",
                 (now, pos["position_id"]),
             )
         else:
-            conn.execute(
-                "UPDATE paper_positions SET size = size - ?, updated_at = ? WHERE position_id = ?",
+            cur.execute(
+                "UPDATE paper_positions SET size = size - %s, updated_at = %s WHERE position_id = %s",
                 (close_size, now, pos["position_id"]),
             )
 
-        self._credit_wallet_locked(conn, exchange, returned, now)
+        self._credit_wallet_locked(cur, exchange, returned, now)
         return {
             "position_id": str(pos["position_id"]),
             "exchange": exchange,
@@ -772,28 +756,28 @@ class ExecutionRepository:
 
     def _apply_tp1_followup_locked(
         self,
-        conn: sqlite3.Connection,
+        cur,
         *,
         position_id: str,
         entry_price: float,
         next_tp: float,
     ) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
+        cur.execute(
             """
             UPDATE paper_positions
             SET tp1_done = 1,
-                tp_price = ?,
-                sl_price = ?,
-                updated_at = ?
-            WHERE position_id = ?
+                tp_price = %s,
+                sl_price = %s,
+                updated_at = %s
+            WHERE position_id = %s
             """,
             (next_tp, entry_price, now, position_id),
         )
 
     def _enqueue_outbox_events_locked(
         self,
-        conn: sqlite3.Connection,
+        cur,
         outbox_events: Optional[Iterable[Dict]],
     ) -> List[str]:
         event_ids: List[str] = []
@@ -803,24 +787,24 @@ class ExecutionRepository:
             event_type = str(spec["event_type"])
             payload = dict(spec.get("payload") or {})
             idempotency_key = spec.get("idempotency_key")
-            event_id, _ = self._enqueue_outbox_event_locked(conn, event_type, payload, idempotency_key=idempotency_key)
+            event_id, _ = self._enqueue_outbox_event_locked(cur, event_type, payload, idempotency_key=idempotency_key)
             event_ids.append(event_id)
         return event_ids
 
     def _enqueue_outbox_event_locked(
         self,
-        conn: sqlite3.Connection,
+        cur,
         event_type: str,
         payload: Dict,
         *,
         idempotency_key: Optional[str] = None,
     ) -> tuple[str, bool]:
         if idempotency_key:
-            existing = conn.execute(
+            existing = cur.execute(
                 """
                 SELECT event_id
                 FROM execution_outbox
-                WHERE idempotency_key = ?
+                WHERE idempotency_key = %s
                 LIMIT 1
                 """,
                 (str(idempotency_key),),
@@ -830,11 +814,11 @@ class ExecutionRepository:
 
         event_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
+        cur.execute(
             """
             INSERT INTO execution_outbox
             (event_id, event_type, idempotency_key, payload_json, status, attempts, last_error, processing_started_at, created_at, updated_at, published_at)
-            VALUES (?, ?, ?, ?, 'PENDING', 0, NULL, NULL, ?, ?, NULL)
+            VALUES (%s, %s, %s, %s, 'PENDING', 0, NULL, NULL, %s, %s, NULL)
             """,
             (
                 event_id,

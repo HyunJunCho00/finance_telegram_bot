@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     SUPABASE_URL_TEXT: str = ""
     SUPABASE_KEY_TEXT: str = ""
 
+    # ===== OMS Execution & Caching =====
+    EXECUTION_DB_URL: str = ""
+    REDIS_URL: str = ""
+
     # ===== Direct AI API Keys (Multi-LLM) =====
     ANTHROPIC_API_KEY: str = ""
     OPENAI_API_KEY: str = ""
@@ -468,6 +472,8 @@ class SecretManager:
             "SUPABASE_KEY_QUANT",
             "SUPABASE_URL_TEXT",
             "SUPABASE_KEY_TEXT",
+            "EXECUTION_DB_URL",
+            "REDIS_URL",
             "ANTHROPIC_API_KEY",
             "OPENAI_API_KEY",
             "VOYAGE_API_KEY",

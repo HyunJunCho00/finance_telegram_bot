@@ -15,6 +15,7 @@ if [[ -z "$PROJECT_ID" || "$PROJECT_ID" == "(unset)" || "$PROJECT_ID" == "your-g
 fi
 
 ENV_FILE="${1:-.env}"
+MODE="${2:-skip}"  # "skip" = 기존 시크릿 건너뜀 (기본값), "update" = 기존 시크릿도 업데이트
 
 if [[ "$ENV_FILE" == ".env.example" ]]; then
   echo "ERROR: Refusing to upload secrets from .env.example."
@@ -31,8 +32,20 @@ fi
 SECRET_KEYS=(
   SUPABASE_URL
   SUPABASE_KEY
+  SUPABASE_URL_TEXT
+  SUPABASE_KEY_TEXT
+  SUPABASE_URL_QUANT
+  SUPABASE_KEY_QUANT
   ANTHROPIC_API_KEY
   OPENAI_API_KEY
+  GEMINI_API_KEY
+  GEMINI_API_KEY_JUDGE
+  GEMINI_API_KEY_VLM
+  GROQ_API_KEY
+  CEREBRAS_API_KEY
+  OPEN_ROUTER_API_KEY
+  CLOUDFLARE_ACCOUNT_ID
+  CLOUDFLARE_AI_API_KEY
   BINANCE_API_KEY
   BINANCE_API_SECRET
   UPBIT_ACCESS_KEY
@@ -45,6 +58,7 @@ SECRET_KEYS=(
   PERPLEXITY_API_KEY
   FRED_API_KEY
   NEO4J_URI
+  NEO4J_USERNAME
   NEO4J_PASSWORD
   MILVUS_URI
   MILVUS_TOKEN
@@ -76,26 +90,16 @@ extract_env_value() {
 upsert_secret() {
   local key="$1"
   local value="$2"
+  local mode="${3:-skip}"  # "skip" or "update"
 
   if gcloud secrets describe "$key" --project "$PROJECT_ID" >/dev/null 2>&1; then
-    printf "%s" "$value" | gcloud secrets versions add "$key" \
-      --project "$PROJECT_ID" \
-      --data-file=- >/dev/null
-    echo "Updated secret version: $key"
-
-    # Disable all previously ENABLED versions (keep only the latest)
-    local old_versions
-    old_versions="$(gcloud secrets versions list "$key" \
-      --project "$PROJECT_ID" \
-      --filter="state=ENABLED" \
-      --format="value(name)" \
-      --sort-by="~createTime" 2>/dev/null | tail -n +2)"
-    if [[ -n "$old_versions" ]]; then
-      while IFS= read -r ver; do
-        gcloud secrets versions disable "$ver" --secret="$key" \
-          --project "$PROJECT_ID" >/dev/null 2>&1 && \
-          echo "  Disabled old version: $ver"
-      done <<< "$old_versions"
+    if [[ "$mode" == "update" ]]; then
+      printf "%s" "$value" | gcloud secrets versions add "$key" \
+        --project "$PROJECT_ID" \
+        --data-file=- >/dev/null
+      echo "Updated secret: $key"
+    else
+      echo "Skipped existing secret: $key"
     fi
   else
     printf "%s" "$value" | gcloud secrets create "$key" \
@@ -113,7 +117,7 @@ echo "Creating/updating secrets from $ENV_FILE"
 for key in "${SECRET_KEYS[@]}"; do
   value="$(extract_env_value "$key" "$ENV_FILE")"
   if [[ -n "$value" ]]; then
-    upsert_secret "$key" "$value"
+    upsert_secret "$key" "$value" "$MODE"
   else
     echo "Skipped empty value: $key"
   fi
