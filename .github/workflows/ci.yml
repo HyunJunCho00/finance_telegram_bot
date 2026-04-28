@@ -84,8 +84,8 @@ jobs:
     - name: 'Deploy via SSH IAP Tunneling'
       uses: 'google-github-actions/ssh-compute@v1'
       with:
-        instance_name: 'crypto-trading-vm'
-        zone: 'asia-southeast1-a'
+        instance_name: 'crypto-trading-vm-new'
+        zone: 'asia-southeast1-b'
         project_id: '${{ secrets.GCP_PROJECT_ID }}'
         ssh_private_key: '${{ secrets.SERVER_SSH_KEY }}'
         use_iap: true
