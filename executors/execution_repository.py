@@ -77,7 +77,7 @@ class ExecutionRepository:
     ) -> Dict:
         with self.transaction() as cur:
             result = self._open_paper_position_locked(
-                conn,
+                cur,
                 exchange=exchange,
                 symbol=symbol,
                 direction=direction,
@@ -102,7 +102,7 @@ class ExecutionRepository:
                         notional=amount_usd,
                     )
                     event_id, _ = self._enqueue_outbox_event_locked(
-                        conn,
+                        cur,
                         "trade_execution_record",
                         payload,
                         idempotency_key=f"trade_execution:{result['order_id']}",
@@ -148,7 +148,7 @@ class ExecutionRepository:
                 return {"success": False, "error": f"Intent already fully filled: {intent_id}"}
 
             result = self._open_paper_position_locked(
-                conn,
+                cur,
                 exchange=exchange,
                 symbol=symbol,
                 direction=direction,
@@ -180,7 +180,7 @@ class ExecutionRepository:
                     notional=amount_to_fill,
                 )
                 event_id, _ = self._enqueue_outbox_event_locked(
-                    conn,
+                    cur,
                     "trade_execution_record",
                     payload,
                     idempotency_key=f"trade_execution:{result['order_id']}",
@@ -212,7 +212,7 @@ class ExecutionRepository:
             fraction = max(0.0, min(tp1_exit_pct / 100.0, 0.99))
             close_result = self._close_position_fraction_locked(cur, pos, current_price, fraction)
             self._apply_tp1_followup_locked(
-                conn,
+                cur,
                 position_id=position_id,
                 entry_price=float(pos["entry_price"]),
                 next_tp=(tp2 if tp2 > 0 else 0.0),
@@ -332,7 +332,7 @@ class ExecutionRepository:
     def enqueue_outbox_event(self, event_type: str, payload: Dict, *, idempotency_key: Optional[str] = None) -> Dict:
         with self.transaction() as cur:
             event_id, deduped = self._enqueue_outbox_event_locked(
-                conn,
+                cur,
                 event_type,
                 payload,
                 idempotency_key=idempotency_key,
@@ -453,9 +453,8 @@ class ExecutionRepository:
 
     def get_oldest_pending_outbox_age_seconds(self) -> float:
         """Return age in seconds of the oldest PENDING outbox event, 0.0 if none."""
-        with _WRITE_LOCK:
-            try:
-                conn = _get_connection()
+        try:
+            with self.transaction() as cur:
                 row = cur.execute(
                     "SELECT created_at FROM execution_outbox WHERE status = 'PENDING' "
                     "ORDER BY created_at ASC LIMIT 1"
@@ -465,8 +464,8 @@ class ExecutionRepository:
                 created = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
                 now = datetime.now(timezone.utc)
                 return max(0.0, (now - created).total_seconds())
-            except Exception:
-                return 0.0
+        except Exception:
+            return 0.0
 
     def update_intent_status(self, intent_id: str, new_status: str) -> Dict:
         with self.transaction() as cur:
@@ -586,7 +585,7 @@ class ExecutionRepository:
         pos_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         self._insert_position_locked(
-            conn,
+            cur,
             position_id=pos_id,
             exchange=exchange,
             symbol=symbol,
@@ -706,7 +705,7 @@ class ExecutionRepository:
     def _close_position_fraction_locked(
         self,
         cur,
-        pos: sqlite3.Row,
+        pos,
         current_price: float,
         fraction: float,
     ) -> Dict:
