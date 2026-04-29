@@ -88,17 +88,4 @@ jobs:
         zone: 'asia-southeast1-b'
         project_id: '${{ secrets.GCP_PROJECT_ID }}'
         ssh_private_key: '${{ secrets.SERVER_SSH_KEY }}'
-        command: |
-          # 서버 내 봇 폴더로 이동
-          cd /opt/app
-          
-          # Git 권한 방어 (루트/사용자 모두)
-          git config --global --add safe.directory /opt/app
-          
-          # 최신 코드 깃허브에서 땡겨오기
-          git pull origin main
-          
-          # Blue-Green 무중단 교체 스크립트 실행 (Docker 기반)
-          export AUTO_PROMOTE=1
-          export PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}
-          bash deploy/blue_green_switch.sh
+        command: "git -C /opt/app config --global --add safe.directory /opt/app && git -C /opt/app pull origin main && PROJECT_ID=${{ secrets.GCP_PROJECT_ID }} bash /opt/app/deploy/ci_deploy.sh"
