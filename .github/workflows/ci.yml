@@ -81,11 +81,24 @@ jobs:
     - name: 'Set up Cloud SDK'
       uses: 'google-github-actions/setup-gcloud@v2'
 
+    - name: 'Write SSH private key'
+      env:
+        SSH_PRIVATE_KEY: ${{ secrets.SERVER_SSH_KEY }}
+      run: |
+        mkdir -p ~/.ssh
+        echo "$SSH_PRIVATE_KEY" > ~/.ssh/google_compute_engine
+        chmod 600 ~/.ssh/google_compute_engine
+        ssh-keygen -y -f ~/.ssh/google_compute_engine > ~/.ssh/google_compute_engine.pub
+
     - name: 'Deploy via SSH IAP Tunneling'
-      uses: 'google-github-actions/ssh-compute@v1'
-      with:
-        instance_name: 'crypto-trading-vm-new'
-        zone: 'asia-southeast1-b'
-        project_id: '${{ secrets.GCP_PROJECT_ID }}'
-        ssh_private_key: '${{ secrets.SERVER_SSH_KEY }}'
-        command: "git -C /opt/app config --global --add safe.directory /opt/app && git -C /opt/app pull origin main && PROJECT_ID=${{ secrets.GCP_PROJECT_ID }} bash /opt/app/deploy/ci_deploy.sh"
+      env:
+        GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      run: |
+        gcloud compute ssh crypto-trading-vm-new \
+          --zone=asia-southeast1-b \
+          --project="$GCP_PROJECT_ID" \
+          --tunnel-through-iap \
+          --quiet \
+          --ssh-key-file=~/.ssh/google_compute_engine \
+          --ssh-flag="-o StrictHostKeyChecking=no" \
+          --command="cd /opt/app && git config --global --add safe.directory /opt/app && git pull origin main && export PROJECT_ID=$GCP_PROJECT_ID && bash deploy/ci_deploy.sh"
