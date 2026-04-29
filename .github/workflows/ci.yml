@@ -88,7 +88,6 @@ jobs:
         zone: 'asia-southeast1-b'
         project_id: '${{ secrets.GCP_PROJECT_ID }}'
         ssh_private_key: '${{ secrets.SERVER_SSH_KEY }}'
-        flags: '--tunnel-through-iap'
         command: |
           # 서버 내 봇 폴더로 이동
           cd /opt/app
