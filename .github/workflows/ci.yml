@@ -101,4 +101,4 @@ jobs:
           --quiet \
           --ssh-key-file=~/.ssh/google_compute_engine \
           --ssh-flag="-o StrictHostKeyChecking=no" \
-          --command="cd /opt/app && git config --global --add safe.directory /opt/app && git pull origin main && export PROJECT_ID=$GCP_PROJECT_ID && bash deploy/ci_deploy.sh"
+          --command="sudo git config --global --add safe.directory /opt/app && sudo git -C /opt/app pull origin main && export PROJECT_ID=$GCP_PROJECT_ID && sudo -E bash /opt/app/deploy/ci_deploy.sh"
