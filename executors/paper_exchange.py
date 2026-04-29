@@ -1,12 +1,10 @@
 from typing import Dict, List
-import sqlite3
-import threading
 from datetime import datetime, timezone
 
 from loguru import logger
+from psycopg2.extras import RealDictCursor
 
-from config.local_state import DB_PATH
-from executors.execution_repository import FEE_PCT, execution_repository, _WRITE_LOCK, _get_connection
+from executors.execution_repository import FEE_PCT, execution_repository, _get_pool
 from executors.outbox_dispatcher import outbox_dispatcher
 
 
@@ -15,22 +13,29 @@ class PaperExchangeEngine:
     Paper trading state manager.
     DB writes go through execution_repository so position changes and outbox events
     can commit atomically.
-    Reads use the shared thread-local connection from execution_repository directly.
+    Reads use a connection from the shared PostgreSQL pool.
     """
 
     def _fetch_one(self, query: str, params: tuple = ()):
-        with _WRITE_LOCK:
-            conn = _get_connection()
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            return cursor.fetchone()
+        pool = _get_pool()
+        conn = pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, params)
+                row = cur.fetchone()
+                return dict(row) if row else None
+        finally:
+            pool.putconn(conn)
 
     def _fetch_all(self, query: str, params: tuple = ()) -> List[Dict]:
-        with _WRITE_LOCK:
-            conn = _get_connection()
-            cursor = conn.cursor()
-            cursor.execute(query, params)
-            return [dict(row) for row in cursor.fetchall()]
+        pool = _get_pool()
+        conn = pool.getconn()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, params)
+                return [dict(row) for row in cur.fetchall()]
+        finally:
+            pool.putconn(conn)
 
     def _queue_notification(self, message: str, idempotency_key: str) -> Dict:
         return {
@@ -47,7 +52,7 @@ class PaperExchangeEngine:
 
     def get_wallet_balance(self, exchange: str) -> float:
         row = self._fetch_one(
-            "SELECT balance FROM paper_wallets WHERE exchange = ?",
+            "SELECT balance FROM paper_wallets WHERE exchange = %s",
             (exchange.lower(),),
         )
         return row["balance"] if row else 0.0
@@ -58,11 +63,11 @@ class PaperExchangeEngine:
         return result
 
     def get_open_positions(self) -> List[Dict]:
-        return self._fetch_all("SELECT * FROM paper_positions WHERE is_open = 1")
+        return self._fetch_all("SELECT * FROM paper_positions WHERE is_open = TRUE")
 
     def get_open_position(self, position_id: str) -> Dict | None:
         row = self._fetch_one(
-            "SELECT * FROM paper_positions WHERE is_open = 1 AND position_id = ?",
+            "SELECT * FROM paper_positions WHERE is_open = TRUE AND position_id = %s",
             (position_id,),
         )
         return dict(row) if row else None
@@ -157,7 +162,7 @@ class PaperExchangeEngine:
 
     def check_tp_sl(self, current_prices: dict):
         positions = self._fetch_all(
-            "SELECT * FROM paper_positions WHERE is_open = 1 AND (tp_price > 0 OR sl_price > 0)"
+            "SELECT * FROM paper_positions WHERE is_open = TRUE AND (tp_price > 0 OR sl_price > 0)"
         )
         for pos in positions:
             symbol = pos["symbol"]
