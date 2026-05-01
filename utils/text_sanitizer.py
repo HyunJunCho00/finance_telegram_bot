@@ -29,4 +29,9 @@ def clean_telegram_text(text: str) -> str:
 
 
 def looks_english_dominant(text: str) -> bool:
-    sample = str(text or " \).strip()
+    sample = str(text or "").strip()
+    if not sample:
+        return False
+    hangul_count = len(re.findall(r"[-힣]", sample))
+    latin_count = len(re.findall(r"[A-Za-z]", sample))
+    return latin_count >= 40 and latin_count > max(10, hangul_count * 2)
