@@ -6,6 +6,10 @@ x-bot-service: &bot-service
   image: finance-bot:latest
   volumes:
     - /opt/app/data:/app/data
+  environment:
+    - GOOGLE_APPLICATION_CREDENTIALS=/app/data/sa-key.json
+    - PROJECT_ID=mcpknu-493907
+    - GCE_METADATA_HOST=169.254.169.254
   logging:
     driver: "json-file"
     options:
