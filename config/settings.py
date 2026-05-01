@@ -548,7 +548,7 @@ def get_settings() -> Settings:
             try:
                 import urllib.request
                 req = urllib.request.Request(
-                    "http://metadata.google.internal/computeMetadata/v1/project/project-id",
+                    "http://169.254.169.254/computeMetadata/v1/project/project-id",
                     headers={"Metadata-Flavor": "Google"}
                 )
                 with urllib.request.urlopen(req, timeout=2) as resp:

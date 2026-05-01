@@ -26,3 +26,7 @@ def clean_telegram_text(text: str) -> str:
     cleaned = re.sub(r' +', ' ', cleaned)
 
     return cleaned.strip()
+
+
+def looks_english_dominant(text: str) -> bool:
+    sample = str(text or " \).strip()
