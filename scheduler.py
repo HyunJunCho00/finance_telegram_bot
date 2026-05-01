@@ -228,14 +228,21 @@ def job_1min_tick():
         "microstructure": microstructure_collector.run,
         "volatility":     volatility_monitor.run,
     }
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(fn): name for name, fn in tasks.items()}
-        for future in as_completed(futures):
+    pool = ThreadPoolExecutor(max_workers=4)
+    futures = {pool.submit(fn): name for name, fn in tasks.items()}
+    try:
+        for future in as_completed(futures, timeout=55):
             name = futures[future]
             try:
-                future.result()
+                future.result(timeout=1)
             except Exception as e:
                 logger.error(f"{name} collection error: {e}")
+    except TimeoutError:
+        for future, name in futures.items():
+            if not future.done():
+                logger.error(f"{name} collection timed out after 55s")
+    finally:
+        pool.shutdown(wait=False)
 
 def job_1min_execution():
     """V5: Process Orders, V7: Check Margin Calls + TP/SL"""
