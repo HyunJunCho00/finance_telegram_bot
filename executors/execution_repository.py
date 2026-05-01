@@ -485,8 +485,8 @@ class ExecutionRepository:
     def flush_expired_intents(self, now_iso: Optional[str] = None) -> Dict:
         cutoff = now_iso or datetime.now(timezone.utc).isoformat()
         with self.transaction() as cur:
-            cursor = cur.execute("DELETE FROM active_orders WHERE expires_at < %s", (cutoff,))
-            return {"success": True, "deleted": int(cursor.rowcount or 0), "cutoff": cutoff}
+            cur.execute("DELETE FROM active_orders WHERE expires_at < %s", (cutoff,))
+            return {"success": True, "deleted": int(cur.rowcount or 0), "cutoff": cutoff}
 
     def _insert_intent_locked(self, cur, spec: Dict) -> str:
         symbol = str(spec["symbol"])

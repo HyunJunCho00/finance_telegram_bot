@@ -556,8 +556,16 @@ def get_settings() -> Settings:
             except Exception:
                 pass
 
+        if not project_id:
+            return Settings()
+
+        import concurrent.futures as _cf_sm
         sm = SecretManager(project_id)
-        secrets = sm.load_all_secrets()
+        try:
+            with _cf_sm.ThreadPoolExecutor(max_workers=1) as _pool:
+                secrets = _pool.submit(sm.load_all_secrets).result(timeout=20)
+        except Exception:
+            secrets = {}
         # Filter out empty strings so Pydantic uses field defaults instead of failing validation
         secrets = {k: v for k, v in secrets.items() if v != ""}
 
