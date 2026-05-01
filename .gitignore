@@ -1,3 +1,5 @@
+deploy/fix_docker_dns.sh
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

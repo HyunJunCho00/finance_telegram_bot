@@ -101,4 +101,6 @@ jobs:
           --quiet \
           --ssh-key-file=~/.ssh/google_compute_engine \
           --ssh-flag="-o StrictHostKeyChecking=no" \
+          --ssh-flag="-o ServerAliveInterval=30" \
+          --ssh-flag="-o ServerAliveCountMax=20" \
           --command="sudo git config --global --add safe.directory /opt/app && sudo git -C /opt/app pull origin main && export PROJECT_ID=$GCP_PROJECT_ID && sudo -E bash /opt/app/deploy/ci_deploy.sh"

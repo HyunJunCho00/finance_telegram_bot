@@ -50,7 +50,7 @@ if [ "$answer" != "${answer#[Yy]}" ] ;then
     # 3. 🔵 (CRITICAL) Blue 실행기를 먼저 가장 안전하게 종료 (단순 kill 아님)
     echo "🛑 Sending SIGTERM to Blue Executor to finish pending orders..."
     # execution_main.py는 SIGTERM 수신 시, 진행중인 의도(Intent)를 마무리하고 종료해야 함
-    docker stop --time 60 tgbot-blue-executor
+    docker stop --timeout 60 tgbot-blue-executor
     
     echo "🛑 Stopping Blue Brain..."
     docker stop tgbot-blue-brain
