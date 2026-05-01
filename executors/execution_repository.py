@@ -292,7 +292,8 @@ class ExecutionRepository:
     def apply_funding_fees(self, symbol_funding_rates: dict, current_prices: dict) -> List[Dict]:
         applied: List[Dict] = []
         with self.transaction() as cur:
-            rows = cur.execute("SELECT * FROM paper_positions WHERE is_open = 1").fetchall()
+            cur.execute("SELECT * FROM paper_positions WHERE is_open = 1")
+            rows = cur.fetchall()
             now = datetime.now(timezone.utc).isoformat()
             for pos in rows:
                 symbol = str(pos["symbol"])
@@ -388,7 +389,7 @@ class ExecutionRepository:
                 now.timestamp() - max(int(stale_after_seconds), 0),
                 tz=timezone.utc,
             ).isoformat()
-            rows = cur.execute(
+            cur.execute(
                 """
                 SELECT event_id, event_type, idempotency_key, payload_json, attempts, last_error, created_at
                 FROM execution_outbox
@@ -398,7 +399,8 @@ class ExecutionRepository:
                 LIMIT %s
                 """,
                 (stale_before, int(limit)),
-            ).fetchall()
+            )
+            rows = cur.fetchall()
             claimed = [dict(row) for row in rows]
             if not claimed:
                 return []
