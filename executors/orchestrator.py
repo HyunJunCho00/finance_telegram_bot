@@ -446,7 +446,7 @@ def node_collect_data(state: AnalysisState) -> dict:
         try:
             from executors.paper_exchange import paper_engine
             pos = paper_engine._fetch_all(
-                "SELECT * FROM paper_positions WHERE is_open = 1 AND symbol = ?", (symbol,)
+                "SELECT * FROM paper_positions WHERE is_open = 1 AND symbol = %s", (symbol,)
             )
             if pos:
                 open_position_text = "\n".join([f"[{p['exchange']}] {p['side']} {p['size']:.4f} coins @ ${p['entry_price']:.2f}" for p in pos])
