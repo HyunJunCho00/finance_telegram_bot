@@ -1,5 +1,9 @@
 """Cloud Run Job entrypoint.
 
+# /app/cloud_jobs/ 에서 실행될 때 /app 을 path에 추가
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
 실행 방법:
   JOB_NAME=etf_flow python cloud_jobs/entrypoint.py
 
@@ -28,7 +32,7 @@ import sys
 
 from loguru import logger
 
-JOB_NAME = os.environ.get("JOB_NAME", "").strip()
+JOB_NAME = os.environ.get("JOB_NAME", "").strip().replace("-", "_")  # market-status → market_status
 JOB_SYMBOL = os.environ.get("JOB_SYMBOL", "").strip().upper()  # daily_precision용
 
 if not JOB_NAME:

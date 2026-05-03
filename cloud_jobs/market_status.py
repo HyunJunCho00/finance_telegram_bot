@@ -1,4 +1,6 @@
 """Market status job — scheduler.py와 Cloud Run 양쪽에서 공유되는 로직."""
+import sys, os as _os
+sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), ".."))
 from __future__ import annotations
 
 import hashlib
