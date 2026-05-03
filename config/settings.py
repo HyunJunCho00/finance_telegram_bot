@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import model_validator
 from functools import lru_cache
 from typing import List
 from enum import Enum
@@ -37,7 +38,7 @@ class Settings(BaseSettings):
     )
 
     PROJECT_ID: str = ""
-    REGION: str = "asia-northeast3"          # VM 인프라 리전 (서울)
+    REGION: str = "asia-southeast1"           # VM 인프라 리전 (싱가포르)
     VERTEX_REGION: str = "global"            # 모델 호출 리전 (Gemini + Claude)
     VERTEX_REGION_GEMINI: str = "global"     # Gemini 전용 (하위호환)
 
@@ -133,8 +134,9 @@ class Settings(BaseSettings):
     DUNE_MAX_QUERIES_PER_RUN: int = 5
     DUNE_PRIORITY_QUERY_IDS: List[int] = [6638261, 3378085, 21689, 4319, 3383110]
 
-    # Optional low-cost long-term archive on GCS
-    ENABLE_GCS_ARCHIVE: bool = False
+    # GCS long-term archive (parquet)
+    # GCS_ARCHIVE_BUCKET: 계정마다 다르므로 Secret Manager에서 주입
+    ENABLE_GCS_ARCHIVE: bool = True
     GCS_ARCHIVE_BUCKET: str = ""
 
     # Coin Metrics Community API (daily on-chain regime overlay)
@@ -348,11 +350,11 @@ class Settings(BaseSettings):
     # ===== Data Retention (days) =====
     # PostgreSQL(Supabase): 통계용 데이터만 보존 (30일)
     # --------------- Neo4j/Milvus / (cleanup ) ---------------
-    RETENTION_MARKET_DATA_DAYS: int = 30
-    RETENTION_TELEGRAM_DAYS: int = 20  # 원본 텍스트 (Neo4j/Milvus에도 장됨)
-    RETENTION_MARKET_STATUS_DAYS: int = 30  # market_status_events 보존 기간
-    RETENTION_REPORTS_DAYS: int = 365  # AI 리포트 (영구히 깝게)
-    RETENTION_CVD_DAYS: int = 30
+    RETENTION_MARKET_DATA_DAYS: int = 7   # Supabase hot tier — 로컬 parquet/GCS가 long-term 담당
+    RETENTION_TELEGRAM_DAYS: int = 14  # 원본 텍스트 (Neo4j/Milvus에도 저장됨)
+    RETENTION_MARKET_STATUS_DAYS: int = 14
+    RETENTION_REPORTS_DAYS: int = 365  # AI 리포트는 길게
+    RETENTION_CVD_DAYS: int = 7
     RETENTION_EXECUTIONS_DAYS: int = 365
     RETENTION_EVALUATION_DAYS: int = 365
     RETENTION_EVALUATION_COMPONENT_DAYS: int = 180
@@ -449,6 +451,17 @@ class Settings(BaseSettings):
     def data_lookback_hours(self) -> int:
         """보조 데이터(funding, CVD, liquidations) 조회 기간 — Swing 6개월."""
         return 4380   # 6개월 (6 * 30 * 24)
+
+    @model_validator(mode="after")
+    def _derive_gcs_bucket(self) -> "Settings":
+        """GCS_ARCHIVE_BUCKET 미설정 시 PROJECT_ID에서 자동 유도.
+
+        새 GCP 계정으로 이전해도 설정 변경 없이 버킷 이름이 자동으로 달라짐.
+        버킷은 각 계정에서 직접 생성 필요: gsutil mb gs://{PROJECT_ID}-crypto-archive
+        """
+        if not self.GCS_ARCHIVE_BUCKET and self.PROJECT_ID:
+            self.GCS_ARCHIVE_BUCKET = f"{self.PROJECT_ID}-crypto-archive"
+        return self
 
 
 class SecretManager:

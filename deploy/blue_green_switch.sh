@@ -17,9 +17,16 @@ if docker image inspect finance-bot:latest &>/dev/null; then
     docker tag finance-bot:latest finance-bot:previous
 fi
 
-# 2. 새 버전 이미지 빌드
-echo "🔨 Building new Docker image..."
-docker build -t finance-bot:latest .
+# 2. 이미지 준비: CI가 DEPLOY_IMAGE를 넘기면 pull, 아니면 로컬 빌드 (수동 배포 폴백)
+if [ -n "${DEPLOY_IMAGE:-}" ]; then
+    echo "📥 Pulling image from Artifact Registry: $DEPLOY_IMAGE"
+    gcloud auth configure-docker asia-southeast1-docker.pkg.dev --quiet
+    docker pull "$DEPLOY_IMAGE"
+    docker tag "$DEPLOY_IMAGE" finance-bot:latest
+else
+    echo "🔨 No DEPLOY_IMAGE set — building locally (manual deploy fallback)..."
+    docker build -t finance-bot:latest .
+fi
 
 # 2. 🟢 먼저 그린 환경(Shadow)을 띄워 로직 무결성을 확인합니다 (Paper Trading 모드)
 echo "🟢 Spinning up Green Environment in Shadow(Paper) mode..."

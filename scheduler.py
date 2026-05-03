@@ -16,25 +16,17 @@ from collectors.microstructure_collector import microstructure_collector
 from collectors.macro_collector import macro_collector
 from collectors.deribit_collector import deribit_collector
 from collectors.fear_greed_collector import fear_greed_collector
-from collectors.crypto_news_collector import collector as news_collector
 from collectors.coinmetrics_collector import coinmetrics_collector
-from collectors.etf_flow_collector import etf_flow_collector
-from collectors.stablecoin_collector import stablecoin_collector
-from collectors.coinglass_collector import coinglass_collector
 from executors.orchestrator import orchestrator
-from evaluators.feedback_generator import feedback_generator
-from evaluators.evaluation_rollup import evaluation_rollup_service
 from processors.light_rag import light_rag
 from processors.gcs_archive import gcs_archive_exporter
 from processors.math_engine import math_engine
 from processors.gcs_parquet import gcs_parquet_store
-from agents.market_monitor_agent import market_monitor_agent
 from tools.evaluate_market_status_pressure import run_evaluation as run_pressure_signal_evaluation
 from config import scheduler_config
 from config.settings import settings, TradingMode
 from config.database import db
 from executors.order_manager import execution_desk
-from executors.evaluator_daemon import EvaluatorDaemon
 from executors.paper_exchange import paper_engine
 from executors.cascade_warning_engine import cascade_warning_engine
 from loguru import logger
@@ -42,14 +34,12 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
-import base64
 import re
 import time as _time
 from datetime import datetime, timezone, timedelta
-from processors.market_snapshot_builder import build_mode_technical_snapshot, detect_technical_events
-from processors.playbook_service import get_recent_market_regime, get_latest_playbook_snapshot
 from utils.text_sanitizer import looks_english_dominant
 from utils.math_utils import project_trendline_price, pct_change, distance_pct
+from utils.json_utils import extract_json_object
 
 # ── Prometheus 메트릭 ──────────────────────────────────────────────────────────
 try:
@@ -71,6 +61,10 @@ except Exception:
 
 _daily_precision_prepare_lock = threading.Lock()
 _daily_precision_prepare_bucket = ""
+
+# Persistent thread pool for 1-minute data collection tick.
+# Avoids thread creation/teardown overhead on every firing.
+_TICK_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="tick")
 
 # ── 프로세스 분리 모드 플래그 ────────────────────────────────────────────────
 # True  → execution_main.py를 별도 프로세스로 실행 중
@@ -228,8 +222,7 @@ def job_1min_tick():
         "microstructure": microstructure_collector.run,
         "volatility":     volatility_monitor.run,
     }
-    pool = ThreadPoolExecutor(max_workers=4)
-    futures = {pool.submit(fn): name for name, fn in tasks.items()}
+    futures = {_TICK_POOL.submit(fn): name for name, fn in tasks.items()}
     try:
         for future in as_completed(futures, timeout=55):
             name = futures[future]
@@ -241,8 +234,6 @@ def job_1min_tick():
         for future, name in futures.items():
             if not future.done():
                 logger.error(f"{name} collection timed out after 55s")
-    finally:
-        pool.shutdown(wait=False)
 
 def job_1min_execution():
     """V5: Process Orders, V7: Check Margin Calls + TP/SL"""
@@ -279,15 +270,6 @@ def job_liquidation_cascade_monitor():
     except Exception as e:
         logger.error(f"Liquidation cascade monitor job error: {e}")
 
-
-def job_15min_dune():
-    """Collect cadence-aware Dune snapshots and persist to DB."""
-    if dune_collector is None:
-        return
-    try:
-        dune_collector.run_due_queries(limit=200, offset=0)
-    except Exception as e:
-        logger.error(f"15-minute Dune job error: {e}")
 
 
 def job_1hour_deribit():
@@ -343,615 +325,16 @@ def job_daily_coinmetrics():
         logger.error(f"Coin Metrics daily job error: {e}")
 
 
-def job_daily_etf_flow():
-    """Scrape Farside Investors for daily BTC/ETH ETF net flow data."""
-    try:
-        etf_flow_collector.run()
-    except Exception as e:
-        logger.error(f"ETF flow collection job error: {e}")
 
-
-def job_daily_stablecoin():
-    """Fetch USDT/USDC circulating supply from DefiLlama (free)."""
-    try:
-        stablecoin_collector.run()
-    except Exception as e:
-        logger.error(f"Stablecoin collection job error: {e}")
-
-
-def job_4hour_coinglass():
-    """Fetch Binance Futures LSR + OI (public API, no key required)."""
-    try:
-        coinglass_collector.run()
-    except Exception as e:
-        logger.error(f"Binance positioning collection job error: {e}")
+from cloud_jobs.market_status import run_market_status
 
 
 def job_routine_market_status():
-    """V13.3: Routine Market Status check (Free-First) with Multi-Coin & Telegram Intel."""
-    try:
-        logger.info("Running routine market status check (Free-First)")
-
-        def _parse_reference_source(source_tag: str) -> tuple[str, str]:
-            raw = str(source_tag or "").strip()
-            if raw.startswith("[") and raw.endswith("]"):
-                raw = raw[1:-1].strip()
-            if " - " in raw:
-                source_name, source_ref = raw.split(" - ", 1)
-                return source_name.strip() or "Unknown", source_ref.strip()
-            return raw or "Unknown", ""
-
-        def _build_reference_message(selected_news: list[dict]) -> str:
-            lines = []
-            for idx, item in enumerate(selected_news[:6], start=1):
-                headline = str(item.get("headline") or f"뉴스 {idx}").strip()
-                lines.append(f"{idx}. {headline}")
-
-                raw_sources = item.get("sources", [])
-                if not isinstance(raw_sources, list):
-                    raw_sources = [raw_sources]
-
-                seen_sources = set()
-                for raw_source in raw_sources:
-                    source_name, source_ref = _parse_reference_source(raw_source)
-                    dedupe_key = (source_name, source_ref)
-                    if dedupe_key in seen_sources:
-                        continue
-                    seen_sources.add(dedupe_key)
-
-                    if source_ref:
-                        lines.append(f"{source_name} : {source_ref}")
-                    else:
-                        lines.append(source_name)
-
-                if idx < min(len(selected_news), 6):
-                    lines.append("")
-
-            return "\n".join(lines).strip()
-
-        def _get_target_chat_id() -> str:
-            try:
-                from config.local_state import state_manager
-                return state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
-            except Exception:
-                return settings.TELEGRAM_CHAT_ID
-
-        indicators = {}
-        for symbol in settings.trading_symbols:
-            indicators[symbol] = {}
-            # Price
-            try:
-                df = db.get_latest_market_data(symbol, limit=1)
-                if not df.empty and "close" in df.columns:
-                    indicators[symbol]["price"] = float(df["close"].iloc[-1])
-            except Exception:
-                pass
-
-            # Funding Rate
-            try:
-                f_df = gcs_parquet_store.get_funding_history_parquet(symbol, limit=1)
-                if not f_df.empty and "funding_rate" in f_df.columns:
-                    indicators[symbol]["funding_rate"] = float(f_df["funding_rate"].iloc[-1])
-            except Exception:
-                pass
-
-            # Volatility
-            indicators[symbol]["volatility"] = volatility_monitor.calculate_price_change(symbol)
-            swing_snapshot = build_mode_technical_snapshot(symbol, TradingMode.SWING)
-            latest_regime = get_recent_market_regime(symbol)
-            indicators[symbol]["market_regime"] = latest_regime
-            indicators[symbol]["technical_snapshot"] = {
-                "swing": swing_snapshot,
-                "realtime_pressure": swing_snapshot.get("realtime_pressure") or {},
-                "events": detect_technical_events(
-                    symbol=symbol,
-                    swing=swing_snapshot,
-                    position=swing_snapshot,  # POSITION 모드 제거됨 — swing으로 대체
-                    funding=indicators[symbol].get("funding_rate"),
-                    volatility=indicators[symbol].get("volatility"),
-                    regime=latest_regime,
-                ),
-            }
-            indicators[symbol]["playbook_snapshot"] = get_latest_playbook_snapshot(symbol)
-            try:
-                onchain = gcs_parquet_store.get_latest_row("onchain", symbol)
-                if onchain:
-                    indicators[symbol]["onchain_snapshot"] = {
-                        "risk_bias": onchain.get("risk_bias"),
-                        "bias_score": onchain.get("bias_score"),
-                        "regime_flags": onchain.get("regime_flags", {}),
-                        "is_stale": onchain.get("is_stale"),
-                    }
-            except Exception:
-                pass
-            try:
-                db.insert_market_status_event({
-                    "symbol": symbol,
-                    "regime": latest_regime,
-                    "price": indicators[symbol].get("price"),
-                    "funding_rate": indicators[symbol].get("funding_rate"),
-                    "volatility": indicators[symbol].get("volatility"),
-                    "technical_snapshot": indicators[symbol]["technical_snapshot"],
-                })
-            except Exception as e:
-                logger.warning(f"market_status_events insert skipped for {symbol}: {e}")
-                
-        # News Intel (Last 1 hour): Telegram + external crypto news synthesized by LLM
-        telegram_intel = "최근 1시간 내 주요 뉴스 없음"
-        _news_synthesis_timeout_s = 90  # hard cap: skip news if AI calls hang
-        final_payload: dict = {}  # populated by synthesis thread when successful
-        try:
-            from agents.ai_router import ai_client
-            import time as _time
-
-            tg_messages = gcs_parquet_store.get_recent_telegram_messages_parquet(hours=1) or []
-            tg_items = []
-            for msg in tg_messages[:20]:
-                tg_items.append({
-                    "source_type": "telegram",
-                    "source": msg.get("channel", "telegram"),
-                    "text": str(msg.get("text", "")),
-                    "timestamp": msg.get("timestamp") or msg.get("created_at", ""),
-                })
-
-            ext_raw = news_collector.fetch_news(
-                categories=["bitcoin", "ethereum", "macro", "trading", "institutional", "defi"],
-                limit=4,
-                lang="en",
-            ) or []
-            ext_items = []
-            seen_links = set()
-            for a in ext_raw:
-                link = a.get("link", "")
-                if not link or link in seen_links:
-                    continue
-                seen_links.add(link)
-                ext_items.append({
-                    "source_type": "external",
-                    "source": a.get("source", "unknown"),
-                    "title": str(a.get("title", "")),
-                    "description": str(a.get("description", "")),
-                    "url": link,
-                })
-                if len(ext_items) >= 12:
-                    break
-
-            if tg_items or ext_items:
-                logger.info(
-                    f"Routine news synthesis inputs: telegram={len(tg_items)} external={len(ext_items)}"
-                )
-
-                # ── AI synthesis in a thread with hard timeout so a hung provider
-                #    doesn't block market summary delivery ──────────────────────
-                _synthesis_result: dict = {"intel": None, "payload": None}
-
-                def _run_news_synthesis() -> None:
-                    def _extract_json_object(raw: str) -> dict:
-                        if not raw:
-                            return {}
-                        raw = raw.strip()
-                        try:
-                            obj = json.loads(raw)
-                            return obj if isinstance(obj, dict) else {}
-                        except Exception:
-                            pass
-                        start = raw.find("{")
-                        if start < 0:
-                            return {}
-                        depth = 0
-                        in_string = False
-                        escape = False
-                        for i in range(start, len(raw)):
-                            ch = raw[i]
-                            if escape:
-                                escape = False
-                                continue
-                            if ch == "\\":
-                                escape = True
-                                continue
-                            if ch == '"':
-                                in_string = not in_string
-                                continue
-                            if in_string:
-                                continue
-                            if ch == "{":
-                                depth += 1
-                            elif ch == "}":
-                                depth -= 1
-                                if depth == 0:
-                                    block = raw[start:i + 1]
-                                    try:
-                                        obj = json.loads(block)
-                                        return obj if isinstance(obj, dict) else {}
-                                    except Exception:
-                                        return {}
-                        return {}
-
-                    _payload = {
-                        "telegram_messages": tg_items,
-                        "external_news": ext_items,
-                        "utc_now": datetime.now(timezone.utc).isoformat(),
-                    }
-                    cluster_prompt = (
-                        "Select high-impact crypto news from the input and merge duplicates.\n"
-                        "Return STRICT JSON only with this schema:\n"
-                        "{\n"
-                        "  \"selected\": [\n"
-                        "    {\n"
-                        "      \"headline\": \"short title\",\n"
-                        "      \"claim\": \"single factual claim\",\n"
-                        "      \"sources\": [\"[source - url_or_telegram]\"],\n"
-                        "      \"impact\": 1-5,\n"
-                        "      \"why\": \"one short reason\"\n"
-                        "    }\n"
-                        "  ]\n"
-                        "}\n"
-                        "Rules:\n"
-                        "- Keep at most 6 items.\n"
-                        "- Merge duplicate events and union their sources.\n"
-                        "- Use only provided evidence. No fabrication."
-                    )
-                    cluster_raw = ai_client.generate_response(
-                        system_prompt="You are a strict JSON market-news selector.",
-                        user_message=f"{cluster_prompt}\n\nINPUT_JSON:\n{json.dumps(_payload, ensure_ascii=False)}",
-                        temperature=0.1,
-                        max_tokens=800,
-                        role="news_cluster",
-                    ) or ""
-
-                    cluster_obj = _extract_json_object(cluster_raw)
-                    selected_items = cluster_obj.get("selected", []) if isinstance(cluster_obj, dict) else []
-                    if not isinstance(selected_items, list):
-                        selected_items = []
-                    if not selected_items:
-                        selected_items = (ext_items[:4] + tg_items[:2])[:6]
-
-                    normalized_items = []
-                    for item in selected_items[:6]:
-                        if not isinstance(item, dict):
-                            continue
-                        headline = str(
-                            item.get("headline")
-                            or item.get("title")
-                            or item.get("source")
-                            or "Untitled"
-                        ).strip()
-                        claim = str(
-                            item.get("claim")
-                            or item.get("description")
-                            or item.get("text")
-                            or headline
-                        ).strip()
-                        why = str(item.get("why") or "").strip()
-                        impact = item.get("impact", 3)
-                        try:
-                            impact = int(impact)
-                        except Exception:
-                            impact = 3
-                        sources = item.get("sources", [])
-                        if not isinstance(sources, list) or not sources:
-                            source_name = str(item.get("source", "unknown")).strip() or "unknown"
-                            source_ref = "telegram"
-                            if item.get("url"):
-                                source_ref = str(item.get("url", "")).strip()
-                            sources = [f"[{source_name} - {source_ref}]"]
-                        else:
-                            sources = [str(src).strip() for src in sources if str(src).strip()]
-                        normalized_items.append({
-                            "headline": headline,
-                            "claim": claim,
-                            "impact": max(1, min(5, impact)),
-                            "why": why,
-                            "sources": sources[:4],
-                        })
-
-                    if not normalized_items:
-                        normalized_items = [{
-                            "headline": "최근 1시간 주요 뉴스 없음",
-                            "claim": "유의미한 신규 이벤트 확인되 않았습니다.",
-                            "impact": 1,
-                            "why": "",
-                            "sources": [],
-                        }]
-
-                    _time.sleep(1.2)
-
-                    _final_payload = {
-                        "selected_news": normalized_items[:6],
-                        "utc_now": datetime.now(timezone.utc).isoformat(),
-                    }
-                    final_prompt = (
-                        "Write a concise Korean market briefing based ONLY on selected_news.\n"
-                        "Output plain text only, under 220 words.\n"
-                        "Summarize the top 6 items as short numbered lines.\n"
-                        "Do NOT include raw URLs or long source tags in the summary body.\n"
-                        "Keep each line focused on event + likely market implication.\n"
-                        "If signals conflict, mention the conflict clearly.\n"
-                        "The final sentence MUST end with a full stop."
-                    )
-                    _intel = ai_client.generate_response(
-                        system_prompt="You are a crypto market briefing writer. No markdown fences.",
-                        user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}",
-                        temperature=0.2,
-                        max_tokens=600,
-                        role="news_brief_final",
-                    ) or ""
-
-                    bad_ending = ("에서", "및", "또는", "-", ":", "(", "[", "{", "/", ",")
-                    if not _intel.strip() or _intel.strip().endswith(bad_ending):
-                        logger.warning("news_brief_final returned empty/partial text, retrying once.")
-                        _time.sleep(1.0)
-                        _intel = ai_client.generate_response(
-                            system_prompt="You are a crypto market briefing writer. No markdown fences.",
-                            user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}",
-                            temperature=0.1,
-                            max_tokens=600,
-                            role="news_brief_final",
-                        ) or "최근 1시간 내 주요 뉴스 없음"
-                    if looks_english_dominant(_intel):
-                        logger.warning("news_brief_final returned English-dominant output, rewriting into Korean.")
-                        korean_rewrite_prompt = (
-                            "Rewrite the briefing into natural Korean.\n"
-                            "Output plain text only.\n"
-                            "Keep numbered lines.\n"
-                            "Do not include English lead-in sentences.\n"
-                            "Preserve only factual meaning from the source text."
-                        )
-                        rewritten = ai_client.generate_response(
-                            system_prompt="You are a Korean crypto market editor. Output Korean only.",
-                            user_message=(
-                                f"{korean_rewrite_prompt}\n\n"
-                                f"SOURCE_TEXT:\n{_intel}\n\n"
-                                f"REFERENCE_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}"
-                            ),
-                            temperature=0.1,
-                            max_tokens=600,
-                            role="news_summarize",
-                        ) or _intel
-                        if rewritten.strip():
-                            _intel = rewritten
-
-                    _synthesis_result["intel"] = _intel
-                    _synthesis_result["payload"] = _final_payload
-
-                import concurrent.futures as _cf_news
-                try:
-                    with _cf_news.ThreadPoolExecutor(max_workers=1) as _news_pool:
-                        _news_fut = _news_pool.submit(_run_news_synthesis)
-                        _news_fut.result(timeout=_news_synthesis_timeout_s)
-                    if _synthesis_result["intel"]:
-                        telegram_intel = _synthesis_result["intel"]
-                        final_payload = _synthesis_result["payload"]
-                except _cf_news.TimeoutError:
-                    logger.warning(
-                        f"News synthesis timed out after {_news_synthesis_timeout_s}s "
-                        "— skipping news briefing, market summary will still be sent"
-                    )
-                except Exception as _se:
-                    logger.warning(f"News synthesis thread error: {_se}")
-            else:
-                telegram_intel = "최근 1시간 내 주요 뉴스 없음"
-        except Exception as e:
-            logger.warning(f"Failed to synthesize market news intel: {e}")
-            
-        indicators["TELEGRAM_INTEL"] = telegram_intel
-
-        # [FEATURE-3] Split reports for better readability
-        from executors.execution_repository import execution_repository
-        from executors.outbox_dispatcher import outbox_dispatcher
-        import hashlib
-
-        target_chat_id = _get_target_chat_id()
-
-        # idempotency_key에 UTC hour를 포함 → 매 시간마다 새로운 key로 재발송 보장
-        _now_utc = datetime.now(timezone.utc)
-        _hour_bucket = _now_utc.strftime("%Y%m%d%H")  # e.g. "2026031421"
-
-        # Message 1: News Briefing (only if news exists)
-        if telegram_intel and "주요 뉴스 없음" not in telegram_intel:
-            news_header = "<b>📰 최근 1시간 뉴스 브리핑 (Synthesized)</b>"
-            try:
-                execution_repository.enqueue_outbox_event(
-                    "telegram_message",
-                    {"chat_id": target_chat_id, "text": f"{news_header}\n\n{telegram_intel}", "parse_mode": "HTML"},
-                    idempotency_key=f"telegram:routine_news:{_hour_bucket}:"
-                    + hashlib.sha256(f"{news_header}\n\n{telegram_intel}".encode("utf-8")).hexdigest()[:16],
-                )
-            except Exception as e:
-                logger.warning(f"Routine news briefing enqueue failed: {e}")
-
-            try:
-                import html
-                refs_text = _build_reference_message(final_payload.get("selected_news", [])[:6])
-                refs_header = "<b> - 최근 1시간 뉴스 참고 링크</b>"
-                execution_repository.enqueue_outbox_event(
-                    "telegram_message",
-                    {
-                        "chat_id": target_chat_id,
-                        "text": f"{refs_header}\n\n{html.escape(refs_text)}",
-                        "parse_mode": "HTML",
-                    },
-                    idempotency_key=f"telegram:routine_news_refs:{_hour_bucket}:"
-                    + hashlib.sha256(f"{refs_header}\n\n{refs_text}".encode("utf-8")).hexdigest()[:16],
-                )
-            except Exception as e:
-                logger.warning(f"Routine news reference enqueue failed: {e}")
-
-        # Message 2: Market Status Summary — 심볼별로 분리 발송 (4096자 초과 방지)
-        for symbol in settings.trading_symbols:
-            symbol_indicators = {
-                symbol: indicators.get(symbol, {}),
-                "TELEGRAM_INTEL": indicators.get("TELEGRAM_INTEL"),
-            }
-            market_header = f"<b>📊 {symbol} 시장 지표 업데이트</b>"
-            summary = None
-            try:
-                summary = market_monitor_agent.summarize_current_status(symbol_indicators)
-                logger.success(f"Market Summary Generated [{symbol}]:\n{summary}")
-            except Exception as e:
-                logger.warning(f"Market summary generation failed [{symbol}]: {e}")
-
-            # AI 실패 시 최소 지표 fallback — 항상 뭔가는 보냄
-            if not summary:
-                ind = indicators.get(symbol, {})
-                price = ind.get("price")
-                funding = ind.get("funding_rate")
-                vol = ind.get("volatility")
-                regime = ind.get("market_regime", "UNKNOWN")
-                summary = (
-                    f"가격: {price:.2f} USDT\n" if isinstance(price, float) else ""
-                ) + (
-                    f"펀딩비: {funding:.4%}\n" if isinstance(funding, float) else ""
-                ) + (
-                    f"변동성(24h): {vol:.2f}%\n" if isinstance(vol, float) else ""
-                ) + f"레짐: {regime}"
-
-            try:
-                execution_repository.enqueue_outbox_event(
-                    "telegram_message",
-                    {"chat_id": target_chat_id, "text": f"{market_header}\n\n{summary}", "parse_mode": "HTML"},
-                    idempotency_key=f"telegram:routine_market_summary:{symbol}:{_hour_bucket}:"
-                    + hashlib.sha256(f"{market_header}\n\n{summary}".encode("utf-8")).hexdigest()[:16],
-                )
-            except Exception as e:
-                logger.warning(f"Routine market status enqueue failed [{symbol}]: {e}")
-
-    except Exception as e:
-        logger.error(f"Routine market status job error: {e}")
-    finally:
-        # 큐에 쌓인 메시지는 중간 실패와 무관하게 항상 발송 시도
-        try:
-            from executors.outbox_dispatcher import outbox_dispatcher as _dispatcher
-            result = _dispatcher.publish_pending(limit=20)
-            if result.get("published", 0) or result.get("failed", 0):
-                logger.info(f"Outbox flush: published={result.get('published', 0)} failed={result.get('failed', 0)}")
-        except Exception as e:
-            logger.warning(f"Outbox flush (finally) failed: {e}")
+    run_market_status()
 
 
-def job_hourly_swing_charts():
-    """Hourly Swing + Position chart push for BTC/ETH to Telegram."""
-    try:
-        from bot.telegram_bot import trading_bot
-        from config.local_state import state_manager
-        if not trading_bot:
-            logger.warning("Hourly swing chart skipped: trading_bot unavailable")
-            return
-
-        from mcp_server.tools import mcp_tools
-        from executors.outbox_dispatcher import outbox_dispatcher as _dispatcher
-        target_chat_id = state_manager.get_telegram_chat_id(settings.TELEGRAM_CHAT_ID) or settings.TELEGRAM_CHAT_ID
-
-        target_symbols = [s for s in settings.trading_symbols if s in ("BTCUSDT", "ETHUSDT")]
-        if not target_symbols:
-            target_symbols = settings.trading_symbols[:2]
-
-        lane_profiles = [
-            ("swing", settings.SWING_HISTORY_MONTHS, "SWING", ["4h", "1d", "1w"]),
-        ]
-
-        for symbol in target_symbols:
-            for lane, lookback_months, lane_label, allowed_timeframes in lane_profiles:
-                try:
-                    result = mcp_tools.get_chart_images(symbol, lane=lane)
-                    if not isinstance(result, dict) or "charts" not in result:
-                        logger.warning(
-                            f"Hourly {lane} chart failed for {symbol}: "
-                            f"{result.get('error') if isinstance(result, dict) else 'unknown error'}"
-                        )
-                        continue
-
-                    all_charts = result.get("charts", []) or []
-                    charts = [
-                        chart for chart in all_charts
-                        if str(chart.get("timeframe", "")).lower() in allowed_timeframes
-                    ]
-                    if all_charts and not charts:
-                        generated_tfs = [c.get("timeframe") for c in all_charts]
-                        logger.warning(
-                            f"Hourly {lane} chart for {symbol}: generated {generated_tfs} "
-                            f"but none match allowed {allowed_timeframes} — skipping send"
-                        )
-                    total = len(charts)
-                    for idx, chart in enumerate(charts, start=1):
-                        chart_bytes = base64.b64decode(chart["chart_base64"])
-                        tf = str(chart.get("timeframe", "4h")).upper()
-                        caption = (
-                            f" - <b>{symbol} {lane_label} 차트 (정기 1시간)</b>\n"
-                            f"Lane: <code>{lane}</code>\n"
-                            f"Timeframe: <code>{tf}</code>\n"
-                            f"Panel: <code>{idx}/{total}</code>\n"
-                            f"Lookback: <code>{lookback_months}M</code>"
-                        )
-                        _dispatcher._run_async(trading_bot.send_photo, target_chat_id, chart_bytes, caption)
-                except Exception as e:
-                    logger.warning(f"Hourly {lane} chart send failed for {symbol}: {e}")
-    except Exception as e:
-        logger.error(f"Hourly swing charts job error: {e}")
 
 
-def job_24hour_evaluation():
-    try:
-        logger.info("Running 24-hour evaluation job")
-        feedback_generator.run_feedback_cycle()
-    except Exception as e:
-        logger.error(f"24-hour evaluation job error: {e}")
-
-
-def job_daily_evaluation_rollup():
-    try:
-        logger.info("Running daily evaluation rollup job")
-        result = evaluation_rollup_service.run_daily_rollup(lookback_days=3)
-        logger.info(f"Daily evaluation rollup result: {result}")
-    except Exception as e:
-        logger.error(f"Daily evaluation rollup job error: {e}")
-
-def job_1hour_evaluation():
-    """V6: Self-Healing RAG evaluation of completed trades."""
-    try:
-        logger.info("Running 1-hour episodic memory evaluation")
-        daemon = EvaluatorDaemon()
-        daemon.evaluate_recent_trades()
-    except Exception as e:
-        logger.error(f"1-hour evaluation job error: {e}")
-
-def job_1hour_telegram():
-    """Batch stored Telegram messages into LightRAG every 1 hour (Real-time listener handles collection)."""
-    _t0 = _time.perf_counter()
-    try:
-        if _should_defer_heavy_job("1-hour Telegram job"):
-            return
-        logger.info("Running 1-hour Telegram batching job")
-
-        # 1. Synthesize and ingest to LightRAG
-        from processors.telegram_batcher import telegram_batcher
-        telegram_batcher.process_and_ingest(lookback_hours=1)
-
-        # 3. Truth Engine: Triangulate corroborated claims via Perplexity (Web)
-        from config.local_state import state_manager
-        if state_manager.is_analysis_enabled():
-            light_rag.run_triangulation_worker(limit=3)
-        else:
-            logger.info("Triangulation worker skipped (AI analysis disabled)")
-        if _SCHED_PROM:
-            SCHED_JOB_RESULTS.labels(job="telegram_batch", result="success").inc()
-    except Exception as e:
-        logger.error(f"1-hour Telegram job error: {e}")
-        if _SCHED_PROM:
-            SCHED_JOB_RESULTS.labels(job="telegram_batch", result="error").inc()
-    finally:
-        if _SCHED_PROM:
-            SCHED_JOB_DURATION.labels(job="telegram_batch").observe(_time.perf_counter() - _t0)
-
-def job_1hour_crypto_news():
-    """Fetch Free Crypto News API and ingest to LightRAG every 1 hour."""
-    try:
-        if _should_defer_heavy_job("1-hour Crypto News API job"):
-            return
-        logger.info("Running 1-hour Crypto News API fetch job")
-        news_collector.fetch_and_ingest()
-    except Exception as e:
-        logger.error(f"1-hour Crypto News API job error: {e}")
 
 
 def job_outbox_drain():
@@ -1073,29 +456,6 @@ def job_daily_precision_prepare_shared() -> None:
         job_daily_coinmetrics()
         macro_collector.run()
         _daily_precision_prepare_bucket = bucket
-
-
-def job_daily_precision():
-    """Daily UTC serial: BTC POSITION -> ETH POSITION.
-    Runs high-quality analysis once per symbol and persists dual-lane playbooks.
-    """
-    _t0 = _time.perf_counter()
-    try:
-        from config.local_state import state_manager
-        if not state_manager.is_analysis_enabled():
-            logger.info("Daily precision skipped (analysis disabled)")
-            return
-        job_daily_precision_prepare_shared()
-        orchestrator.run_daily_playbook()
-        if _SCHED_PROM:
-            SCHED_JOB_RESULTS.labels(job="daily_precision", result="success").inc()
-    except Exception as e:
-        logger.error(f"Daily precision job error: {e}")
-        if _SCHED_PROM:
-            SCHED_JOB_RESULTS.labels(job="daily_precision", result="error").inc()
-    finally:
-        if _SCHED_PROM:
-            SCHED_JOB_DURATION.labels(job="daily_precision").observe(_time.perf_counter() - _t0)
 
 
 def job_daily_precision_symbol(symbol: str):
@@ -1288,14 +648,6 @@ def main():
         )
         
         scheduler_config.scheduler.add_job(
-            job_15min_dune,
-            'interval',
-            minutes=15,
-            id='job_15min_dune',
-            max_instances=1
-        )
-
-        scheduler_config.scheduler.add_job(
             job_1hour_deribit,
             CronTrigger(minute=0),
             id='job_1hour_deribit',
@@ -1313,34 +665,6 @@ def main():
             job_daily_coinmetrics,
             CronTrigger(hour=3, minute=12),
             id='job_daily_coinmetrics',
-            max_instances=1
-        )
-
-        scheduler_config.scheduler.add_job(
-            job_daily_etf_flow,
-            CronTrigger(hour=6, minute=0),
-            id='job_daily_etf_flow',
-            max_instances=1
-        )
-
-        scheduler_config.scheduler.add_job(
-            job_daily_stablecoin,
-            CronTrigger(hour=6, minute=15),
-            id='job_daily_stablecoin',
-            max_instances=1
-        )
-
-        scheduler_config.scheduler.add_job(
-            job_4hour_coinglass,
-            CronTrigger(hour='0,4,8,12,16,20', minute=30),
-            id='job_4hour_coinglass',
-            max_instances=1
-        )
-
-        scheduler_config.scheduler.add_job(
-            job_1hour_crypto_news,
-            CronTrigger(minute=10),
-            id='job_1hour_crypto_news',
             max_instances=1
         )
 
@@ -1396,13 +720,6 @@ def main():
             )
 
         scheduler_config.scheduler.add_job(
-            job_1hour_telegram,
-            CronTrigger(minute=5),
-            id='job_1hour_telegram',
-            max_instances=1
-        )
-
-        scheduler_config.scheduler.add_job(
             job_outbox_drain,
             'interval',
             minutes=5,
@@ -1417,71 +734,11 @@ def main():
             max_instances=1,
         )
 
-        daily_gap_minutes = max(0, int(getattr(settings, "DAILY_PRECISION_SYMBOL_GAP_MINUTES", 10)))
-        for symbol_index, symbol in enumerate(settings.trading_symbols):
-            slot_offset = symbol_index * daily_gap_minutes
-            for hour, minute in _daily_precision_schedule_slots_utc(offset_minutes=slot_offset):
-                scheduler_config.scheduler.add_job(
-                    lambda _symbol=symbol: job_daily_precision_symbol(_symbol),
-                    CronTrigger(hour=hour, minute=minute),
-                    id=f"job_daily_precision_{symbol.lower()}_{hour:02d}{minute:02d}",
-                    max_instances=1,
-                )
-
         scheduler_config.scheduler.add_job(
             job_snapshot_refresh_fast,
             CronTrigger(minute='*/15'),
             id='job_snapshot_refresh_fast',
             max_instances=1,
-        )
-
-        scheduler_config.scheduler.add_job(
-            job_snapshot_refresh_narrative,
-            CronTrigger(minute='2,32'),
-            id='job_snapshot_refresh_narrative',
-            max_instances=1,
-        )
-
-        scheduler_config.scheduler.add_job(
-            job_hourly_monitor,
-            CronTrigger(minute=15),
-            id='job_hourly_monitor',
-            max_instances=1,
-        )
-
-        scheduler_config.scheduler.add_job(
-            job_routine_market_status,
-            CronTrigger(minute=20),
-            id='job_market_status',
-            max_instances=1,
-        )
-
-        scheduler_config.scheduler.add_job(
-            job_hourly_swing_charts,
-            CronTrigger(minute=22),
-            id='job_hourly_swing_charts',
-            max_instances=1,
-        )
-
-        scheduler_config.scheduler.add_job(
-            job_24hour_evaluation,
-            CronTrigger(hour=0, minute=30),
-            id='job_24hour_evaluation',
-            max_instances=1
-        )
-
-        scheduler_config.scheduler.add_job(
-            job_daily_evaluation_rollup,
-            CronTrigger(hour=0, minute=40),
-            id='job_daily_evaluation_rollup',
-            max_instances=1
-        )
-        
-        scheduler_config.scheduler.add_job(
-            job_1hour_evaluation,
-            CronTrigger(minute=45),
-            id='job_1hour_evaluation',
-            max_instances=1
         )
 
         try:
@@ -1513,7 +770,7 @@ def main():
     scheduler_config.scheduler.start()
     logger.info("Scheduler started.")
     logger.info(
-        f"Cadence(UTC): daily_precision={_daily_precision_all_labels_utc()} | snapshot_fast=hh:*/5 | "
+        f"Cadence(UTC): daily_precision={_daily_precision_all_labels_utc()} | snapshot_fast=hh:*/15 | "
         "snapshot_narrative=hh:02,32 | telegram_batch=hh:05 | crypto_news=hh:10 | hourly_monitor=hh:15 | market_status=hh:20 | daily_rollup=00:40 | "
         "hourly_eval=hh:45 | gcs_archive=01:00 | safe_cleanup=01:20 | higher_tf_refresh=02:00"
     )
@@ -1550,23 +807,44 @@ def main():
         except Exception as e:
             logger.warning(f"Parquet cache bootstrap failed (non-fatal): {e}")
 
-    _initial_collectors = [
+    # Phase 1: independent HTTP collectors — run in parallel
+    _parallel_collectors = [
         ("Price + Funding + Microstructure", lambda: (collector.run(), funding_collector.run(), microstructure_collector.run())),
         ("Volatility", lambda: volatility_monitor.run()),
         ("Deribit", lambda: deribit_collector.run()),
         ("Fear & Greed", lambda: fear_greed_collector.run()),
         ("Coin Metrics", lambda: job_daily_coinmetrics()),
+    ]
+    with ThreadPoolExecutor(max_workers=len(_parallel_collectors), thread_name_prefix="boot") as _boot_pool:
+        _boot_futures = {_boot_pool.submit(fn): name for name, fn in _parallel_collectors}
+        for _fut in as_completed(_boot_futures, timeout=120):
+            _name = _boot_futures[_fut]
+            try:
+                _fut.result(timeout=1)
+                logger.info(f"  [OK] {_name} collected")
+            except Exception as e:
+                logger.warning(f"  [WARN] {_name} collection failed (non-fatal): {e}")
+
+    # Phase 2: sequential — each depends on phase 1 data
+    for name, fn in [
         ("Parquet cache bootstrap", _bootstrap_missing_parquet_cache),
         ("Snapshot prewarm", lambda: job_snapshot_refresh_fast()),
         ("Pressure signal evaluation", lambda: job_pressure_signal_evaluation()),
-        ("Telegram catch-up (24h)", _startup_telegram_catchup),
-    ]
-    for name, fn in _initial_collectors:
+    ]:
         try:
             fn()
-            logger.info(f"  [OK] {name} collected")
+            logger.info(f"  [OK] {name}")
         except Exception as e:
-            logger.warning(f"  [WARN] {name} collection failed (non-fatal): {e}")
+            logger.warning(f"  [WARN] {name} failed (non-fatal): {e}")
+
+    # Phase 3: Telegram catch-up has an internal 30s sleep — run in background
+    # so the main thread completes startup immediately
+    threading.Thread(
+        target=_startup_telegram_catchup,
+        name="startup-telegram-catchup",
+        daemon=True,
+    ).start()
+    logger.info("  [OK] Telegram catch-up started in background")
 
     # Main thread: keep alive + graceful shutdown
     try:
