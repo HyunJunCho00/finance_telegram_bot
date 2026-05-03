@@ -94,31 +94,14 @@ jobs:
           done
 
   # ── VM 배포 ───────────────────────────────────────────────────────────────
-  # docker build를 VM에서 하지 않고 Artifact Registry 이미지를 pull
+  # self-hosted runner가 VM에서 직접 실행 → IAP/SSH 불필요
   deploy-vm:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, crypto-vm]
     needs: build-push
     steps:
       - uses: actions/checkout@v4
-      - uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_SA_KEY }}
-      - uses: google-github-actions/setup-gcloud@v2
-      - name: Write SSH key
+      - name: Deploy on VM
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/google_compute_engine
-          chmod 600 ~/.ssh/google_compute_engine
-          ssh-keygen -y -f ~/.ssh/google_compute_engine > ~/.ssh/google_compute_engine.pub
-      - name: Deploy via IAP
-        run: |
-          IMAGE=${{ env.IMAGE_BASE }}:${{ github.sha }}
-          gcloud compute ssh ${{ secrets.VM_NAME }} \
-            --zone=${{ secrets.VM_ZONE }} \
-            --project=${{ env.PROJECT_ID }} \
-            --tunnel-through-iap \
-            --quiet \
-            --ssh-key-file=~/.ssh/google_compute_engine \
-            --ssh-flag="-o StrictHostKeyChecking=no" \
-            --ssh-flag="-o ConnectTimeout=30" \
-            --command="sudo git -C /opt/app pull origin main && DEPLOY_IMAGE=$IMAGE sudo -E bash /opt/app/deploy/ci_deploy.sh"
+          DEPLOY_IMAGE=${{ env.IMAGE_BASE }}:${{ github.sha }}
+          sudo git -C /opt/app pull origin main
+          DEPLOY_IMAGE=$DEPLOY_IMAGE sudo -E bash /opt/app/deploy/ci_deploy.sh
