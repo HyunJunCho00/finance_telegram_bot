@@ -49,7 +49,8 @@ class OutboxDispatcher:
         for row in rows:
             event_id = str(row["event_id"])
             try:
-                payload = json.loads(row["payload_json"])
+                raw = row["payload_json"]
+                payload = raw if isinstance(raw, dict) else json.loads(raw)
                 self._publish_event(str(row["event_type"]), payload)
                 execution_repository.mark_outbox_event_published(event_id)
                 published += 1
