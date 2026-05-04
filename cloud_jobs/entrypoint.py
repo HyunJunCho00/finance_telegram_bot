@@ -155,6 +155,31 @@ try:
         from executors.orchestrator import orchestrator
         orchestrator.run_daily_playbook_for_symbol(JOB_SYMBOL, TradingMode.SWING)
 
+    # ── 유틸리티 잡 ────────────────────────────────────────────────────────────
+
+    elif JOB_NAME == "refresh_higher_tf":
+        from config.settings import settings
+        from processors.gcs_parquet import gcs_parquet_store
+        import pandas as pd
+
+        for symbol in settings.trading_symbols:
+            logger.info(f"[refresh_higher_tf] {symbol} 시작")
+            df_1m = gcs_parquet_store.load_ohlcv("1m", symbol, months_back=66)  # 2020~현재
+            if df_1m is None or df_1m.empty:
+                logger.error(f"[refresh_higher_tf] {symbol}: 1m 데이터 없음")
+                continue
+            df_1m["timestamp"] = pd.to_datetime(df_1m["timestamp"], utc=True, errors="coerce")
+            df_1m = df_1m.dropna(subset=["timestamp"]).set_index("timestamp")
+            ohlcv_cols = [c for c in ("open", "high", "low", "close", "volume") if c in df_1m.columns]
+            df_1m = df_1m[ohlcv_cols].astype(float)
+            agg = {c: ("first" if c == "open" else "max" if c == "high" else "min" if c == "low" else "last" if c == "close" else "sum") for c in ohlcv_cols}
+            for tf, rule in [("4h", "4h"), ("1d", "1D"), ("1w", "1W-MON")]:
+                resampled = df_1m.resample(rule, label="left", closed="left").agg(agg).dropna().reset_index()
+                resampled["symbol"] = symbol
+                result = gcs_parquet_store.archive_resampled_ohlcv(tf, symbol, resampled)
+                logger.info(f"[refresh_higher_tf] {symbol} {tf}: {result}")
+            logger.info(f"[refresh_higher_tf] {symbol} 완료")
+
     # ── 평가 잡 ────────────────────────────────────────────────────────────────
 
     elif JOB_NAME == "evaluation":

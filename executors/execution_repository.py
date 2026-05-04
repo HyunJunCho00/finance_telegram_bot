@@ -131,14 +131,15 @@ class ExecutionRepository:
         outbox_events: Optional[Iterable[Dict]] = None,
     ) -> Dict:
         with self.transaction() as cur:
-            order = cur.execute(
+            cur.execute(
                 """
                 SELECT remaining_amount, status
                 FROM active_orders
                 WHERE intent_id = %s
                 """,
                 (intent_id,),
-            ).fetchone()
+            )
+            order = cur.fetchone()
             if not order or order["status"] not in ("PENDING", "ACTIVE"):
                 return {"success": False, "error": f"Intent not executable: {intent_id}"}
 
@@ -353,10 +354,11 @@ class ExecutionRepository:
                               claim_pending_outbox_events re-claims it and handler logs orphan alert
         """
         with self.transaction() as cur:
-            existing = cur.execute(
+            cur.execute(
                 "SELECT event_id FROM execution_outbox WHERE idempotency_key = %s LIMIT 1",
                 (idempotency_key,),
-            ).fetchone()
+            )
+            existing = cur.fetchone()
             if existing:
                 return str(existing["event_id"])
 
@@ -457,10 +459,11 @@ class ExecutionRepository:
         """Return age in seconds of the oldest PENDING outbox event, 0.0 if none."""
         try:
             with self.transaction() as cur:
-                row = cur.execute(
+                cur.execute(
                     "SELECT created_at FROM execution_outbox WHERE status = 'PENDING' "
                     "ORDER BY created_at ASC LIMIT 1"
-                ).fetchone()
+                )
+                row = cur.fetchone()
                 if not row:
                     return 0.0
                 created = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
@@ -493,7 +496,7 @@ class ExecutionRepository:
     def _insert_intent_locked(self, cur, spec: Dict) -> str:
         symbol = str(spec["symbol"])
         exchange = str(spec["exchange"])
-        existing = cur.execute(
+        cur.execute(
             """
             SELECT intent_id
             FROM active_orders
@@ -504,7 +507,8 @@ class ExecutionRepository:
             LIMIT 1
             """,
             (symbol, exchange),
-        ).fetchone()
+        )
+        existing = cur.fetchone()
         if existing:
             raise DuplicateActiveIntentError(symbol, exchange, existing["intent_id"])
 
@@ -666,10 +670,11 @@ class ExecutionRepository:
         )
 
     def _get_wallet_balance_locked(self, cur, exchange: str) -> float:
-        row = cur.execute(
+        cur.execute(
             "SELECT balance FROM paper_wallets WHERE exchange = %s",
             (exchange.lower(),),
-        ).fetchone()
+        )
+        row = cur.fetchone()
         return float(row["balance"]) if row else 0.0
 
     def _update_intent_fill_locked(self, cur, intent_id: str, filled_chunk: float) -> Dict:
@@ -687,10 +692,11 @@ class ExecutionRepository:
             """,
             (filled_chunk, filled_chunk, filled_chunk, intent_id),
         )
-        row = cur.execute(
+        cur.execute(
             "SELECT remaining_amount, status FROM active_orders WHERE intent_id = %s",
             (intent_id,),
-        ).fetchone()
+        )
+        row = cur.fetchone()
         if not row:
             raise RuntimeError(f"Intent disappeared during fill: {intent_id}")
         return {
@@ -699,10 +705,11 @@ class ExecutionRepository:
         }
 
     def _get_open_position_locked(self, cur, position_id: str):
-        return cur.execute(
+        cur.execute(
             "SELECT * FROM paper_positions WHERE is_open = 1 AND position_id = %s",
             (position_id,),
-        ).fetchone()
+        )
+        return cur.fetchone()
 
     def _close_position_fraction_locked(
         self,
@@ -801,7 +808,7 @@ class ExecutionRepository:
         idempotency_key: Optional[str] = None,
     ) -> tuple[str, bool]:
         if idempotency_key:
-            existing = cur.execute(
+            cur.execute(
                 """
                 SELECT event_id
                 FROM execution_outbox
@@ -809,7 +816,8 @@ class ExecutionRepository:
                 LIMIT 1
                 """,
                 (str(idempotency_key),),
-            ).fetchone()
+            )
+            existing = cur.fetchone()
             if existing:
                 return str(existing["event_id"]), True
 
