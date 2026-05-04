@@ -97,6 +97,8 @@ gcloud compute ssh "$INSTANCE_NAME" \
     sudo apt-get install -y python3.11 python3.11-venv python3.11-dev python3-pip
 
     echo '=== 코드 클론 ==='
+    sudo mkdir -p /opt/app
+    sudo chown $(whoami):$(whoami) /opt/app
     git clone ${REPO_URL} /opt/app
     cd /opt/app
 
