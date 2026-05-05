@@ -153,6 +153,7 @@ def _synthesize_news_intel(
             "      \"claim\": \"single factual claim\",\n"
             "      \"sources\": [\"[source - url_or_telegram]\"],\n"
             "      \"impact\": 1-5,\n"
+            "      \"already_priced_in\": true/false,\n"
             "      \"why\": \"one short reason\"\n"
             "    }\n"
             "  ]\n"
@@ -160,7 +161,9 @@ def _synthesize_news_intel(
             "Rules:\n"
             "- Keep at most 6 items.\n"
             "- Merge duplicate events and union their sources.\n"
-            "- Use only provided evidence. No fabrication."
+            "- Use only provided evidence. No fabrication.\n"
+            "- already_priced_in=true if the event is widely known, repeated, or already reflected in recent price action.\n"
+            "- already_priced_in=false if the event is a genuine surprise or structural first-time development."
         )
         cluster_raw = ai_client.generate_response(
             system_prompt="You are a strict JSON market-news selector.",
@@ -188,6 +191,7 @@ def _synthesize_news_intel(
                 item.get("claim") or item.get("description") or item.get("text") or headline
             ).strip()
             why = str(item.get("why") or "").strip()
+            already_priced_in = bool(item.get("already_priced_in", False))
             impact = item.get("impact", 3)
             try:
                 impact = int(impact)
@@ -204,6 +208,7 @@ def _synthesize_news_intel(
                 "headline": headline,
                 "claim": claim,
                 "impact": max(1, min(5, impact)),
+                "already_priced_in": already_priced_in,
                 "why": why,
                 "sources": sources[:4],
             })
@@ -219,24 +224,36 @@ def _synthesize_news_intel(
 
         _t.sleep(1.2)
 
+        _now = datetime.now(timezone.utc)
         _final_payload = {
             "selected_news": normalized_items[:6],
-            "utc_now": datetime.now(timezone.utc).isoformat(),
+            "utc_now": _now.isoformat(),
         }
+        # Sort: already_priced_in=False first, then by impact desc
+        display_items = sorted(
+            normalized_items[:6],
+            key=lambda x: (x.get("already_priced_in", False), -x.get("impact", 3)),
+        )
         final_prompt = (
             "Write a concise Korean market briefing based ONLY on selected_news.\n"
-            "Output plain text only, under 220 words.\n"
-            "Summarize the top 6 items as short numbered lines.\n"
-            "Do NOT include raw URLs or long source tags in the summary body.\n"
+            "Output plain text only.\n"
+            "Write numbered lines for items with impact >= 3 only (skip lower impact).\n"
+            "Items where already_priced_in=true should be labeled '(선반영)' at the end of the line.\n"
+            "Each line MUST be under 60 Korean characters.\n"
             "Keep each line focused on event + likely market implication.\n"
+            "Do NOT include raw URLs or source tags.\n"
             "If signals conflict, mention the conflict clearly.\n"
-            "The final sentence MUST end with a full stop."
+            "The final line MUST end with a full stop."
         )
+        _display_payload = {
+            "selected_news": display_items,
+            "utc_now": _final_payload["utc_now"],
+        }
         _intel = ai_client.generate_response(
             system_prompt="You are a crypto market briefing writer. No markdown fences.",
-            user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}",
+            user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(_display_payload, ensure_ascii=False)}",
             temperature=0.2,
-            max_tokens=600,
+            max_tokens=900,
             role="news_brief_final",
         ) or ""
 
@@ -246,9 +263,9 @@ def _synthesize_news_intel(
             _t.sleep(1.0)
             _intel = ai_client.generate_response(
                 system_prompt="You are a crypto market briefing writer. No markdown fences.",
-                user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}",
+                user_message=f"{final_prompt}\n\nINPUT_JSON:\n{json.dumps(_display_payload, ensure_ascii=False)}",
                 temperature=0.1,
-                max_tokens=600,
+                max_tokens=900,
                 role="news_brief_final",
             ) or "최근 1시간 내 주요 뉴스 없음"
 
@@ -262,14 +279,20 @@ def _synthesize_news_intel(
                     "Do not include English lead-in sentences.\n"
                     "Preserve only factual meaning from the source text.\n\n"
                     f"SOURCE_TEXT:\n{_intel}\n\n"
-                    f"REFERENCE_JSON:\n{json.dumps(_final_payload, ensure_ascii=False)}"
+                    f"REFERENCE_JSON:\n{json.dumps(_display_payload, ensure_ascii=False)}"
                 ),
                 temperature=0.1,
-                max_tokens=600,
+                max_tokens=900,
                 role="news_summarize",
             ) or _intel
             if rewritten.strip():
                 _intel = rewritten
+
+        # 3순위: impact 예측값 로깅 (calibration 데이터 축적)
+        try:
+            db.log_news_impact_predictions(normalized_items[:6], _now)
+        except Exception as _log_err:
+            logger.warning(f"news_impact_predictions logging skipped: {_log_err}")
 
         _synthesis_result["intel"] = _intel
         _synthesis_result["payload"] = _final_payload

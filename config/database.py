@@ -762,6 +762,36 @@ class DatabaseClient:
             .eq("id", event_id)\
             .execute()
 
+# --------------------- News Impact Logging -------------------
+
+    @reconnect_on_error
+    def log_news_impact_predictions(self, items: list, predicted_at: "datetime") -> None:
+        """뉴스 임팩트 예측값 저장. calibration을 위해 predicted_at 시점 가격도 함께 저장."""
+        if not items:
+            return
+        from config.settings import settings
+        rows = []
+        prices: dict = {}
+        for sym in settings.trading_symbols:
+            try:
+                df = self.get_latest_market_data(sym, limit=1)
+                if not df.empty and "close" in df.columns:
+                    prices[sym] = float(df["close"].iloc[-1])
+            except Exception:
+                pass
+        for item in items:
+            rows.append({
+                "predicted_at": predicted_at.isoformat(),
+                "headline": str(item.get("headline", ""))[:200],
+                "claim": str(item.get("claim", ""))[:500],
+                "impact_score": int(item.get("impact", 3)),
+                "already_priced_in": bool(item.get("already_priced_in", False)),
+                "why": str(item.get("why", ""))[:300],
+                "btc_price_at_time": prices.get("BTCUSDT"),
+                "eth_price_at_time": prices.get("ETHUSDT"),
+            })
+        self.client_text.table("news_impact_log").insert(rows).execute()
+
 # --------------------- Evaluation Storage -------------------
 
     @staticmethod
