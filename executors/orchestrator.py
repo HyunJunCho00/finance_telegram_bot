@@ -1690,7 +1690,6 @@ def node_generate_chart(state: AnalysisState) -> dict:
     # Load higher TF data from GCS
     df_4h, df_1d, df_1w = None, None, None
     try:
-        from processors.gcs_parquet import gcs_parquet_store
         if gcs_parquet_store.enabled:
             m_back = settings.history_lookback_months_for_mode(mode)
             df_4h = gcs_parquet_store.load_ohlcv("4h", symbol, months_back=m_back)
@@ -1742,7 +1741,6 @@ def node_generate_chart(state: AnalysisState) -> dict:
                     funding_df = funding_df.loc[:, ~funding_df.columns.duplicated()].reset_index(drop=True)
                 
                 # Merge with GCS historical funding for long-term charts
-                from processors.gcs_parquet import gcs_parquet_store
                 if gcs_parquet_store.enabled:
                     m_back = settings.history_lookback_months_for_mode(mode)
                     hist_fnd = gcs_parquet_store.load_timeseries("funding", symbol, months_back=m_back)
@@ -3034,7 +3032,7 @@ class Orchestrator:
                         f"| decision=<code>{decision}</code> | report_id=<code>{report_id}</code>"
                     )
                     if error:
-                        safe_error = error[:240].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                        safe_error = error[-600:].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
                         line += f"\n  error: <code>{safe_error}</code>"
                     lines.append(line)
 
@@ -3573,13 +3571,15 @@ class Orchestrator:
                 "finished_at": datetime.now(timezone.utc).isoformat(),
             })
             return result
-        except Exception:
-            import traceback
+        except Exception as _exc:
+            import traceback as _tb
 
+            _exc_line = f"{type(_exc).__name__}: {_exc}"
+            _frames = _tb.format_exc(limit=6)
             result.update({
                 "status": "FAILED",
                 "finished_at": datetime.now(timezone.utc).isoformat(),
-                "error": traceback.format_exc(limit=4),
+                "error": f"{_exc_line}\n{_frames}",
             })
             logger.exception(f"Daily playbook error {symbol}/{mode.value}")
             return result
