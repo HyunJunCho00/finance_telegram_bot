@@ -159,6 +159,8 @@ cython_debug/
 *.pfx
 credentials.json
 service-account-key.json
+sa-key.json
+*-sa-key.json
 *.session
 *.session-journal
 telegram_session*
@@ -218,3 +220,4 @@ tests
 scratch/
 deploy/GITHUB_SECRETS_SETUP.md
 PORTFOLIO_OMS.md
+SECURITY.md
