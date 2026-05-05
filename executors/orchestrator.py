@@ -3026,10 +3026,12 @@ class Orchestrator:
                     st = str(item.get("status", "UNKNOWN") or "UNKNOWN").upper()
                     report_id = str(item.get("report_id", "") or "-")
                     decision = str(item.get("decision", "") or "-")
+                    run_id = str(item.get("run_id", "") or "-")
                     error = str(item.get("error", "") or "").strip()
                     line = (
                         f"- <b>{sym} {mode_str}</b> | status=<code>{st}</code> "
                         f"| decision=<code>{decision}</code> | report_id=<code>{report_id}</code>"
+                        f" | run_id=<code>{run_id}</code>"
                     )
                     if error:
                         safe_error = error[-600:].replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
@@ -3482,6 +3484,8 @@ class Orchestrator:
 
 
     def _execute_daily_playbook_for_symbol(self, symbol: str, mode: TradingMode) -> Dict:
+        import uuid
+        run_id = uuid.uuid4().hex[:8]
         symbol_started_at = datetime.now(timezone.utc).isoformat()
         result = {
             "symbol": symbol,
@@ -3491,10 +3495,11 @@ class Orchestrator:
             "decision": "",
             "started_at": symbol_started_at,
             "finished_at": symbol_started_at,
+            "run_id": run_id,
         }
         use_snapshot_hot_path = bool(getattr(settings, "ENABLE_SNAPSHOT_HOT_PATH_DAILY", True))
         try:
-            logger.info(f"[Daily] {symbol} {mode.value.upper()} starting...")
+            logger.info(f"[Daily] {symbol} {mode.value.upper()} starting... run_id={run_id}")
             _clear_symbol_mode_caches(symbol, mode)
 
             if use_snapshot_hot_path:
@@ -3557,7 +3562,7 @@ class Orchestrator:
                 "final_decision": playbook_decision,
                 "daily_dual_plan": playbook_dual_plan,
             })
-            logger.info(f"[Daily] {symbol} {mode.value.upper()} done.")
+            logger.info(f"[Daily] {symbol} {mode.value.upper()} done. run_id={run_id}")
             report_id = ""
             if isinstance(report_payload, dict):
                 report_id = str(report_payload.get("report_id") or report_payload.get("id") or "")
@@ -3581,7 +3586,7 @@ class Orchestrator:
                 "finished_at": datetime.now(timezone.utc).isoformat(),
                 "error": f"{_exc_line}\n{_frames}",
             })
-            logger.exception(f"Daily playbook error {symbol}/{mode.value}")
+            logger.exception(f"Daily playbook error {symbol}/{mode.value} run_id={run_id}")
             return result
 
     def run_daily_playbook_for_symbol(self, symbol: str, mode: TradingMode = TradingMode.SWING) -> Dict:
