@@ -29,6 +29,29 @@ jobs:
           pip install -r requirements.txt
           python -c "from config.settings import settings; print('Settings OK')"
 
+  # ── 스모크 & 통합 테스트 ────────────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt pytest
+      - name: Smoke & integration tests (no external deps)
+        env:
+          USE_SECRET_MANAGER: "false"
+          TELEGRAM_BOT_TOKEN: "dummy"
+          TELEGRAM_CHAT_ID: "0"
+          BINANCE_API_KEY: "dummy"
+          BINANCE_API_SECRET: "dummy"
+          GEMINI_API_KEY: "dummy"
+          ANTHROPIC_API_KEY: "dummy"
+          DATABASE_URL: "postgresql://dummy:dummy@localhost/dummy"
+        run: pytest ci_tests/test_smoke.py ci_tests/test_pipeline_integration.py -v --timeout=60
+
   # ── 보안 스캔 ──────────────────────────────────────────────────────────────
   security-scan:
     runs-on: ubuntu-latest
@@ -46,7 +69,7 @@ jobs:
   # ── Docker 빌드 & Artifact Registry 푸시 ──────────────────────────────────
   build-push:
     runs-on: ubuntu-latest
-    needs: lint
+    needs: [lint, test]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     outputs:
       image: ${{ env.IMAGE_BASE }}:${{ github.sha }}
