@@ -432,8 +432,10 @@ Rules:
         narrative_context: str = "",
         onchain_context: str = "",
         atr_anchor: Optional[Dict] = None,
+        lite: bool = False,
     ) -> Dict:
         active_orders = active_orders or []  # Guard against mutable default
+        _judge_role = "judge_lite" if lite else "judge"
         mode_str = mode.value.upper()
         mode_rules = self.SWING_RULES if mode == TradingMode.SWING else self.POSITION_RULES
         # Wait, format() evaluates all curly braces. self.DEBATE_APPENDIX contains raw JSON templates!
@@ -494,7 +496,7 @@ Rules:
                 max_tokens=2000,
                 chart_image_b64=chart_image_b64,
                 use_premium=True,
-                role="judge",
+                role=_judge_role,
             )
 
             decision = self._parse_decision(response)
@@ -521,7 +523,7 @@ Rules:
             logger.error(f"Judge agent error: {e}")
             return self._default_decision(f"Judge agent error: {e}")
 
-    def make_decision_from_snapshot(self, snapshot: Dict) -> Dict:
+    def make_decision_from_snapshot(self, snapshot: Dict, lite: bool = False) -> Dict:
         snapshot = snapshot or {}
         return self.make_decision(
             market_data_compact=str(snapshot.get("market_data_compact", "") or ""),
@@ -553,6 +555,7 @@ Rules:
                 )
             ),
             onchain_context=str(snapshot.get("onchain_context", "") or ""),
+            lite=lite,
         )
 
     def validate_trigger_against_playbook(self, snapshot: Dict, playbook_context: Optional[Dict]) -> Dict:

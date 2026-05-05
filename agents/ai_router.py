@@ -371,6 +371,7 @@ class AIClient:
         role = (role or "general").lower()
         role_map = {
             "judge": ("gemini_judge", settings.MODEL_JUDGE, settings.MAX_INPUT_CHARS_JUDGE),
+            "judge_lite": ("gemini_judge", settings.MODEL_JUDGE_FALLBACK, settings.MAX_INPUT_CHARS_JUDGE),
             "self_correction": ("gemini_judge", settings.MODEL_SELF_CORRECTION, settings.MAX_INPUT_CHARS_SELF_CORRECTION),
             "vlm_geometric": ("gemini_vlm", settings.MODEL_VLM_GEOMETRIC, getattr(settings, "MAX_INPUT_CHARS_VLM_GEOMETRIC", 15000)),
             "vlm_analysis": ("gemini_vlm", settings.MODEL_VLM_GEOMETRIC, 15000),
@@ -408,7 +409,7 @@ class AIClient:
     def _is_critical_role(self, role: str) -> bool:
         # meta_regime은 critical에서 제외: regime 분류 실패 시 Groq까지만 fallback하고
         # RANGE_BOUND 기본값으로 degrade. Gemini Pro RPD 낭비 방지.
-        return role in ["judge", "risk_eval", "self_correction"]
+        return role in ["judge", "judge_lite", "risk_eval", "self_correction"]
 
     def _role_importance_tier(self, role: str) -> str:
         role = (role or "").lower()
@@ -971,12 +972,12 @@ class AIClient:
         Falls back silently to a standard call if the model/quota does not support caching.
         """
         import hashlib
-
         cache_key = hashlib.md5(f"{model_id}:{system_prompt}".encode()).hexdigest()
         cache_ttl = 7200  # 2 hours in seconds
         now = time.time()
+        db_key = f"gemini_cache:{cache_key}"
 
-        # Look up existing valid cache
+        # 1) in-memory hit (hot path)
         cache_name: Optional[str] = None
         with self._gemini_cache_lock:
             entry = self._gemini_system_caches.get(cache_key)
@@ -985,7 +986,22 @@ class AIClient:
                 if now - stored_ts < cache_ttl:
                     cache_name = stored_name
 
-        # Create a new cache if we don't have one
+        # 2) DB hit (cross-container reuse — survives Cloud Run cold starts)
+        if cache_name is None:
+            try:
+                from config.local_state import state_manager as _sm
+                stored = _sm.get_system_config(db_key)
+                if stored and ":" in stored:
+                    stored_name, stored_ts_str = stored.rsplit(":", 1)
+                    if now - float(stored_ts_str) < cache_ttl:
+                        cache_name = stored_name
+                        with self._gemini_cache_lock:
+                            self._gemini_system_caches[cache_key] = (cache_name, float(stored_ts_str))
+                        logger.debug(f"Gemini context cache restored from DB for {model_id}: {cache_name[:24]}…")
+            except Exception:
+                pass
+
+        # 3) Create a new cache and persist
         if cache_name is None:
             try:
                 cache = client.caches.create(
@@ -998,6 +1014,11 @@ class AIClient:
                 cache_name = cache.name
                 with self._gemini_cache_lock:
                     self._gemini_system_caches[cache_key] = (cache_name, now)
+                try:
+                    from config.local_state import state_manager as _sm
+                    _sm.set_system_config(db_key, f"{cache_name}:{now}")
+                except Exception:
+                    pass
                 logger.info(f"Gemini context cache created for {model_id}: {cache_name[:24]}…")
             except Exception as exc:
                 logger.debug(f"Gemini context caching unavailable ({exc}); using standard call")

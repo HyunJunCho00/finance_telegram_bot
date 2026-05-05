@@ -225,11 +225,16 @@ def run_snapshot_analysis_hot_path(
         bundle = agent_state_store.load_bundle(symbol, mode.value)
 
     snapshot = _build_snapshot_for_judge(bundle)
+    gate_passed = bool(
+        (snapshot.get("blackboard", {}).get("confluence_score") or {}).get("gate_passed", True)
+    )
     judge_started = time.perf_counter()
     if playbook_context:
         decision = judge_agent.validate_trigger_against_playbook(snapshot, playbook_context)
     else:
-        decision = judge_agent.make_decision_from_snapshot(snapshot)
+        decision = judge_agent.make_decision_from_snapshot(snapshot, lite=not gate_passed)
+    if not gate_passed:
+        logger.info(f"Judge lite mode (gate=CLOSED): routing to MODEL_JUDGE_FALLBACK")
     judge_latency_ms = (time.perf_counter() - judge_started) * 1000.0
     policy_started = time.perf_counter()
     final_decision = risk_policy_engine.apply(decision, bundle, playbook_context=playbook_context)
