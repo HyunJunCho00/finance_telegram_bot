@@ -39,7 +39,7 @@ jobs:
         with:
           python-version: '3.11'
           cache: 'pip'
-      - run: pip install -r requirements.txt pytest
+      - run: pip install -r requirements.txt pytest pytest-timeout
       - name: Smoke & integration tests (no external deps)
         env:
           USE_SECRET_MANAGER: "false"
