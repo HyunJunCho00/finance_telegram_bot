@@ -41,15 +41,6 @@ jobs:
           cache: 'pip'
       - run: pip install -r requirements.txt pytest pytest-timeout
       - name: Smoke & integration tests (no external deps)
-        env:
-          USE_SECRET_MANAGER: "false"
-          TELEGRAM_BOT_TOKEN: "dummy"
-          TELEGRAM_CHAT_ID: "0"
-          BINANCE_API_KEY: "dummy"
-          BINANCE_API_SECRET: "dummy"
-          GEMINI_API_KEY: "dummy"
-          ANTHROPIC_API_KEY: "dummy"
-          DATABASE_URL: "postgresql://dummy:dummy@localhost/dummy"
         run: pytest ci_tests/test_smoke.py ci_tests/test_pipeline_integration.py -v --timeout=60
 
   # ── 보안 스캔 ──────────────────────────────────────────────────────────────
