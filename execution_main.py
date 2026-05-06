@@ -167,6 +167,9 @@ def job_1min_execution() -> None:
                     pass
             paper_engine.check_liquidations(prices)
             paper_engine.check_tp_sl(prices)
+        else:
+            from scripts.monitor_stop_to_be import check_and_update_stop_to_be
+            check_and_update_stop_to_be()
 
         _update_position_gauge(prices if settings.PAPER_TRADING_MODE else None)
     except Exception as e:

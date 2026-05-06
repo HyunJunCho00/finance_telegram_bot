@@ -256,6 +256,9 @@ def job_1min_execution():
             paper_engine.check_liquidations(prices)
             # [FIX CRITICAL-2] Actually call check_tp_sl  - was implemented but never invoked
             paper_engine.check_tp_sl(prices)
+        else:
+            from scripts.monitor_stop_to_be import check_and_update_stop_to_be
+            check_and_update_stop_to_be()
             
     except Exception as e:
         logger.error(f"1-minute execution job error: {e}")

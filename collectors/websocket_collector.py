@@ -226,6 +226,11 @@ class WebSocketCollector:
                 # Liquidation event
                 order = payload.get("o", {})
                 symbol = order.get("s", "")  # e.g. "BTCUSDT"
+                
+                # [FIX] Filter only tracked symbols to prevent Supabase insert errors & DB bloat
+                if not symbol or symbol.lower() not in SYMBOLS:
+                    return
+                    
                 side = order.get("S", "")  # "BUY" or "SELL"
                 qty = float(order.get("q", 0))
                 price = float(order.get("p", 0))

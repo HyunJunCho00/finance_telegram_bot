@@ -1,13 +1,12 @@
 #!/bin/bash
 # ==============================================================================
-# 기관급 배포 스크립트 (Institutional Grade Deployment Switch)
+# 배포 스크립트 (Institutional Grade Deployment Switch)
 # ==============================================================================
 # 
 # 일반 웹 서버(NGINX)는 포트만 스위칭하지만, 
 # 트레이딩 봇은 "중복 주문(Double Execution)"을 방지하는 것이 최우선입니다.
 # 
-# 이 스크립트의 철학:
-# "두 개의 실행기(Executor)가 한 순간이라도 라이브 모드로 동시 실행되어서는 안 된다."
+
 
 echo "🚀 Starting Graceful Deployment Process..."
 

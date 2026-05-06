@@ -366,7 +366,7 @@ class TradeExecutor:
                 )
 
                 if exchange == 'binance':
-                    result = self._execute_binance(symbol, side, amount, leverage, tp_price=tp_price, sl_price=sl_price)
+                    result = self._execute_binance(symbol, side, amount, leverage, tp_price=tp_price, sl_price=sl_price, tp2_price=tp2_price, tp1_exit_pct=tp1_exit_pct)
                 elif exchange == 'binance_spot':
                     result = self._execute_binance_spot(symbol, side, amount)
                 elif exchange == 'upbit':
@@ -545,6 +545,8 @@ class TradeExecutor:
         leverage: int,
         tp_price: float = 0.0,
         sl_price: float = 0.0,
+        tp2_price: float = 0.0,
+        tp1_exit_pct: float = 50.0,
     ) -> Dict:
         """
         amount: USD notional. Converted to coin quantity internally before sending to Binance.
@@ -625,15 +627,31 @@ class TradeExecutor:
             bracket_ids: Dict[str, str] = {}
             if tp_price > 0:
                 try:
+                    tp1_qty = filled_qty
+                    if tp2_price > 0 and 0 < tp1_exit_pct < 100:
+                        tp1_qty = round(filled_qty * (tp1_exit_pct / 100.0), 3)
+                        tp2_qty = round(filled_qty - tp1_qty, 3)
+                        
+                        if tp2_qty > 0:
+                            tp2_order = self.binance.create_order(
+                                symbol=symbol,
+                                type='TAKE_PROFIT_MARKET',
+                                side=close_side,
+                                amount=tp2_qty,
+                                params={'stopPrice': tp2_price, 'reduceOnly': True},
+                            )
+                            bracket_ids['tp2_order_id'] = str(tp2_order.get('id') or '')
+                            logger.info(f"[Bracket] TP2 registered at {tp2_price} (qty={tp2_qty}) → {bracket_ids['tp2_order_id']}")
+
                     tp_order = self.binance.create_order(
                         symbol=symbol,
                         type='TAKE_PROFIT_MARKET',
                         side=close_side,
-                        amount=filled_qty,
+                        amount=tp1_qty,
                         params={'stopPrice': tp_price, 'reduceOnly': True},
                     )
                     bracket_ids['tp_order_id'] = str(tp_order.get('id') or '')
-                    logger.info(f"[Bracket] TP registered at {tp_price} → {bracket_ids['tp_order_id']}")
+                    logger.info(f"[Bracket] TP1 registered at {tp_price} (qty={tp1_qty}) → {bracket_ids['tp_order_id']}")
                 except Exception as e:
                     logger.warning(f"[Bracket] TP order failed (non-blocking): {e}")
 
