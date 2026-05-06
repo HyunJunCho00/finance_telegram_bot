@@ -22,6 +22,8 @@ if [ -n "${DEPLOY_IMAGE:-}" ]; then
     gcloud auth configure-docker asia-southeast1-docker.pkg.dev --quiet
     docker pull "$DEPLOY_IMAGE"
     docker tag "$DEPLOY_IMAGE" finance-bot:latest
+    # [최적화] 원본 SHA 태그를 삭제해야 나중에 찌꺼기 이미지로 분류되어 자동 청소(Prune)의 대상이 됩니다.
+    docker rmi "$DEPLOY_IMAGE" || true
 else
     echo "🔨 No DEPLOY_IMAGE set — building locally (manual deploy fallback)..."
     docker build -t finance-bot:latest .
@@ -69,7 +71,10 @@ if [ "$answer" != "${answer#[Yy]}" ] ;then
     echo "🟦 Spinning up NEW Blue Environment..."
     docker compose up -d blue-brain blue-executor
     
-    echo "🎉 Deployment Successful! New code is now Live."
+    echo "🌐 Automatically updating Shared Services (Collectors & Listener)..."
+    docker compose up -d shared-data shared-listener shared-bot
+    
+    echo "🎉 Deployment Successful! New code is now Live on ALL environments."
     
     echo "🧹 Automatically cleaning up unused Docker cache to save disk space..."
     docker builder prune -f > /dev/null 2>&1
