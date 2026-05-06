@@ -200,7 +200,9 @@ class WebSocketCollector:
         self.whale_buffer = WhaleBuffer()
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._last_message_time: float = 0.0  # epoch, for staleness detection
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._last_message_time: float = 0.0
+        self._started_at: float = 0.0
 
     def _build_ws_url(self) -> str:
         """Combined stream URL for all symbols + liquidation."""
@@ -317,16 +319,21 @@ class WebSocketCollector:
                 logger.info(f"WebSocket connecting to {len(SYMBOLS)} streams + liquidation...")
                 async with websockets.connect(
                     url,
-                    ping_interval=30,
+                    ping_interval=20,
                     ping_timeout=10,
                     close_timeout=5,
-                    max_size=2**20,  # 1MB max message
+                    max_size=2**20,
+                    extra_headers={"User-Agent": "python-websockets"},
                 ) as ws:
                     logger.info("WebSocket connected successfully")
                     self._last_message_time = time.time()
+                    msg_count = 0
                     async for message in ws:
                         if not self._running:
                             break
+                        msg_count += 1
+                        if msg_count == 1:
+                            logger.info("WebSocket receiving data (first message OK)")
                         await self._handle_message(message)
 
             except asyncio.CancelledError:
@@ -366,11 +373,13 @@ class WebSocketCollector:
         def _run():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            self._loop = loop
             try:
                 loop.run_until_complete(self._run_async())
             except Exception as e:
                 logger.error(f"WebSocket background thread error: {e}")
             finally:
+                self._loop = None
                 loop.close()
 
         self._running = True
@@ -381,11 +390,17 @@ class WebSocketCollector:
         logger.info("WebSocket collector started in background thread")
 
     def stop(self):
-        """Stop the WebSocket collector."""
+        """Stop the WebSocket collector.
+        Cancels the asyncio event loop so _flush_to_db sleep is interrupted immediately."""
         self._running = False
+        loop = self._loop
+        if loop and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
         if self._thread:
-            self._thread.join(timeout=10)
-            logger.info("WebSocket collector stopped")
+            self._thread.join(timeout=5)
+        self._thread = None
+        self._loop = None
+        logger.info("WebSocket collector stopped")
 
 
 # Singleton
