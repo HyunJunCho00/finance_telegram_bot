@@ -358,10 +358,17 @@ class WebSocketCollector:
     async def _run_async(self):
         """Run both the listener and the flusher concurrently."""
         self._running = True
-        await asyncio.gather(
-            self._connect_and_listen(),
-            self._flush_to_db(),
-        )
+        tasks = [
+            asyncio.ensure_future(self._connect_and_listen()),
+            asyncio.ensure_future(self._flush_to_db()),
+        ]
+        self._tasks = tasks
+        try:
+            await asyncio.gather(*tasks)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._tasks = []
 
     def start_background(self):
         """Start WebSocket collector in a background thread."""
@@ -384,17 +391,18 @@ class WebSocketCollector:
         self._running = True
         self._started_at = time.time()
         self._last_message_time = 0.0
+        self._tasks = []
         self._thread = threading.Thread(target=_run, daemon=True, name="ws-collector")
         self._thread.start()
         logger.info("WebSocket collector started in background thread")
 
     def stop(self):
-        """Stop the WebSocket collector.
-        Cancels the asyncio event loop so _flush_to_db sleep is interrupted immediately."""
+        """Stop the WebSocket collector by cancelling asyncio tasks."""
         self._running = False
         loop = self._loop
         if loop and loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
+            for task in list(getattr(self, '_tasks', [])):
+                loop.call_soon_threadsafe(task.cancel)
         if self._thread:
             self._thread.join(timeout=5)
         self._thread = None
