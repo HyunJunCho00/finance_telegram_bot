@@ -323,7 +323,6 @@ class WebSocketCollector:
                     ping_timeout=10,
                     close_timeout=5,
                     max_size=2**20,
-                    extra_headers={"User-Agent": "python-websockets"},
                 ) as ws:
                     logger.info("WebSocket connected successfully")
                     self._last_message_time = time.time()
