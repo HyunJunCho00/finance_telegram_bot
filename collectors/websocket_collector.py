@@ -327,13 +327,19 @@ class WebSocketCollector:
                     logger.info("WebSocket connected successfully")
                     self._last_message_time = time.time()
                     msg_count = 0
-                    async for message in ws:
-                        if not self._running:
+                    while self._running:
+                        try:
+                            message = await asyncio.wait_for(ws.recv(), timeout=30)
+                            msg_count += 1
+                            if msg_count == 1:
+                                logger.info("WebSocket receiving data (first message OK)")
+                            self._last_message_time = time.time()
+                            await self._handle_message(message)
+                        except asyncio.TimeoutError:
+                            logger.warning("WebSocket recv timeout (30s) — no data from Binance, reconnecting...")
                             break
-                        msg_count += 1
-                        if msg_count == 1:
-                            logger.info("WebSocket receiving data (first message OK)")
-                        await self._handle_message(message)
+                        except asyncio.CancelledError:
+                            raise
 
             except asyncio.CancelledError:
                 # 태스크 취소 시 루프 유지 — 재연결 시도
