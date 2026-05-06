@@ -70,6 +70,10 @@ if [ "$answer" != "${answer#[Yy]}" ] ;then
     docker compose up -d blue-brain blue-executor
     
     echo "🎉 Deployment Successful! New code is now Live."
+    
+    echo "🧹 Automatically cleaning up unused Docker cache to save disk space..."
+    docker builder prune -f > /dev/null 2>&1
+    docker image prune -f > /dev/null 2>&1
 else
     echo "Deployment aborted. Green shadow node will remain running for observation."
     echo "To stop it manually: docker compose --profile shadow down"

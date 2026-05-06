@@ -186,6 +186,8 @@ class PriceCollector:
 
         rows: List[Dict] = []
         while current_since <= now_ms:
+            import time
+            time.sleep(0.2)  # [FIX] Prevent Binance 429 Rate Limit during heavy backfill
             batch = self.fetch_binance_ohlcv_with_cvd(
                 symbol, timeframe='1m', limit=1000, since_ms=current_since
             )
@@ -233,6 +235,8 @@ class PriceCollector:
 
         rows: List[Dict] = []
         while current_since <= now_ms:
+            import time
+            time.sleep(0.2)  # [FIX] Prevent Upbit 429 Rate Limit during heavy backfill
             batch = self.fetch_upbit_ohlcv(
                 symbol, timeframe='1m', limit=200, since_ms=current_since
             )

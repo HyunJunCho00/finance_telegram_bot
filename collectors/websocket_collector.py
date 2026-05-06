@@ -324,27 +324,22 @@ class WebSocketCollector:
                 logger.info(f"WebSocket connecting to {len(SYMBOLS)} streams + liquidation...")
                 async with websockets.connect(
                     url,
-                    ping_interval=20,
-                    ping_timeout=10,
+                    ping_interval=None,  # 바이낸스 서버가 보내는 Ping에만 응답하도록 변경 (클라이언트 핑 끄기)
+                    ping_timeout=None,
                     close_timeout=5,
                     max_size=2**20,
                 ) as ws:
                     logger.info("WebSocket connected successfully")
                     self._last_message_time = time.time()
                     msg_count = 0
-                    while self._running:
-                        try:
-                            message = await asyncio.wait_for(ws.recv(), timeout=30)
-                            msg_count += 1
-                            if msg_count == 1:
-                                logger.info("WebSocket receiving data (first message OK)")
-                            self._last_message_time = time.time()
-                            await self._handle_message(message)
-                        except asyncio.TimeoutError:
-                            logger.warning("WebSocket recv timeout (30s) — no data from Binance, reconnecting...")
+                    async for message in ws:
+                        if not self._running:
                             break
-                        except asyncio.CancelledError:
-                            raise
+                        msg_count += 1
+                        if msg_count == 1:
+                            logger.info("WebSocket receiving data (first message OK)")
+                        self._last_message_time = time.time()
+                        await self._handle_message(message)
 
             except asyncio.CancelledError:
                 # 태스크 취소 시 루프 유지 — 재연결 시도
