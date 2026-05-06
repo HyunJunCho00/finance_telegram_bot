@@ -39,8 +39,8 @@ class Settings(BaseSettings):
 
     PROJECT_ID: str = ""
     REGION: str = "asia-southeast1"           # VM 인프라 리전 (싱가포르)
-    VERTEX_REGION: str = "global"            # 모델 호출 리전 (Gemini + Claude)
-    VERTEX_REGION_GEMINI: str = "global"     # Gemini 전용 (하위호환)
+    VERTEX_REGION: str = "us-central1"            # 모델 호출 리전 (Gemini + Claude)
+    VERTEX_REGION_GEMINI: str = "us-central1"     # Gemini 전용 (하위호환)
 
     SUPABASE_URL: str = ""        # 하위 호환용 (단일 프로젝트 시절)
     SUPABASE_KEY: str = ""
@@ -190,16 +190,16 @@ class Settings(BaseSettings):
     STATS_MAX_DERIBIT_STALE_HOURS: float = 6.0
 
     # ===== AI Models (role API model single policy table) =====
-    MODEL_ENDPOINT: str = "gemini-3.1-pro-preview"
+    MODEL_ENDPOINT: str = "gemini-2.5-pro"
 
     # 1. judge Google AI Studio Project A
-    MODEL_JUDGE: str = "gemini-3.1-pro-preview"
-    MODEL_JUDGE_FALLBACK: str = "gemini-3-flash-preview"
-    MODEL_SELF_CORRECTION: str = "gemini-3.1-pro-preview"
+    MODEL_JUDGE: str = "gemini-2.5-pro"
+    MODEL_JUDGE_FALLBACK: str = "gemini-2.5-flash"
+    MODEL_SELF_CORRECTION: str = "gemini-2.5-pro"
 
     # 2. vlm_geometric / vlm_telegram_chart -- Lightweight Flash for Vision efficiency
-    MODEL_VLM_GEOMETRIC: str = "gemini-3-flash-preview"
-    MODEL_VLM_TELEGRAM_CHART: str = "gemini-3-flash-preview"
+    MODEL_VLM_GEOMETRIC: str = "gemini-2.5-flash"
+    MODEL_VLM_TELEGRAM_CHART: str = "gemini-2.5-flash"
 
     # 3. meta_regime Cerebras
     MODEL_META_REGIME: str = "qwen-3-235b-a22b-instruct-2507"
@@ -298,7 +298,7 @@ class Settings(BaseSettings):
     MODEL_CLAUDE_STANDBY: str = "claude-sonnet-4-6"
 
     # 10. Chat model
-    MODEL_CHAT: str = "gemini-3-flash-preview"
+    MODEL_CHAT: str = "gemini-2.5-flash"
     # Soft input caps (character-based) to improve token efficiency
     MAX_INPUT_CHARS_MACRO: int = 15000
     MAX_INPUT_CHARS_JUDGE: int = 25000

@@ -248,14 +248,16 @@ class AIClient:
         vertex_location = getattr(settings, "VERTEX_REGION_GEMINI", "") or settings.vertex_region or "global"
 
         def _make_gemini(key: str):
-            if key:
-                return genai.Client(api_key=key)
+
             if can_use_vertex:
                 return genai.Client(
                     vertexai=True,
                     project=settings.PROJECT_ID,
                     location=vertex_location,
                 )
+            # 일단은 API_KEY 사용 금지
+            # if key:
+            #     return genai.Client(api_key=key)
             return None
 
         self._gemini_default = _make_gemini(default_key)
