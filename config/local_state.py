@@ -221,7 +221,12 @@ class LocalStateManager:
             return False
 
     def get_system_config(self, key: str, default: str = "") -> str:
-        """Generic getter for the system_config table."""
+        """Generic getter for the system_config table. Reads from Postgres (via execution_repository)
+        so Cloud Run Job containers (ephemeral SQLite) see the same values written by set_system_config."""
+        try:
+            return execution_repository.get_system_config(str(key), default)
+        except Exception:
+            pass
         with self._lock:
             cursor = self.conn.cursor()
             cursor.execute("SELECT value FROM system_config WHERE key = ?", (key,))

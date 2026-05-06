@@ -277,6 +277,13 @@ class DeribitCollector:
                 except Exception as e:
                     logger.debug(f"[LocalCache] deribit local write skipped: {e}")
 
+                # ── 2순위: Supabase (fetch_stats_context의 staleness 체크 대상) ──
+                try:
+                    from config.database import db
+                    db.upsert_deribit_data(data)
+                except Exception as e:
+                    logger.debug(f"[Supabase] deribit upsert skipped: {e}")
+
                 logger.info(
                     f"Deribit {currency}: DVOL={data.get('dvol')} "
                     f"PCR_OI={data.get('pcr_oi')} "

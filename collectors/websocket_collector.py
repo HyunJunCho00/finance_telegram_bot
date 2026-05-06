@@ -200,6 +200,7 @@ class WebSocketCollector:
         self.whale_buffer = WhaleBuffer()
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._last_message_time: float = 0.0  # epoch, for staleness detection
 
     def _build_ws_url(self) -> str:
         """Combined stream URL for all symbols + liquidation."""
@@ -211,6 +212,7 @@ class WebSocketCollector:
 
     async def _handle_message(self, message: str):
         """Parse and route incoming WebSocket messages."""
+        self._last_message_time = time.time()
         try:
             data = json.loads(message)
 
@@ -321,17 +323,31 @@ class WebSocketCollector:
                     max_size=2**20,  # 1MB max message
                 ) as ws:
                     logger.info("WebSocket connected successfully")
+                    self._last_message_time = time.time()
                     async for message in ws:
                         if not self._running:
                             break
                         await self._handle_message(message)
 
+            except asyncio.CancelledError:
+                # 태스크 취소 시 루프 유지 — 재연결 시도
+                logger.warning("WebSocket task cancelled, retrying in 5s...")
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    break  # 진짜 종료 신호
             except websockets.ConnectionClosedError as e:
                 logger.warning(f"WebSocket connection closed: {e}. Reconnecting in 5s...")
-                await asyncio.sleep(5)
+                try:
+                    await asyncio.sleep(5)
+                except asyncio.CancelledError:
+                    break
             except Exception as e:
                 logger.error(f"WebSocket error: {e}. Reconnecting in 10s...")
-                await asyncio.sleep(10)
+                try:
+                    await asyncio.sleep(10)
+                except asyncio.CancelledError:
+                    break
 
     async def _run_async(self):
         """Run both the listener and the flusher concurrently."""

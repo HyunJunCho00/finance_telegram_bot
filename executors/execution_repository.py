@@ -323,6 +323,17 @@ class ExecutionRepository:
                 )
         return applied
 
+    def get_system_config(self, key: str, default: str = "") -> str:
+        try:
+            with self.transaction() as cur:
+                cur.execute("SELECT value FROM system_config WHERE key = %s", (str(key),))
+                row = cur.fetchone()
+                if row:
+                    return str(row[0])
+        except Exception:
+            pass
+        return default
+
     def set_system_config(self, key: str, value: str) -> Dict:
         with self.transaction() as cur:
             cur.execute(

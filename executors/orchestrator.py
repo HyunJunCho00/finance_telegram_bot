@@ -3723,6 +3723,28 @@ class Orchestrator:
                                 logger.warning(f"[Monitor] {symbol} daily entry cap ({DAILY_MAX_ENTRIES}) reached, skipping.")
                                 continue
 
+                            # Confluence gate pre-check (no LLM): mirrors judge's first hard gate.
+                            # Judge MUST output HOLD when gate_passed=False, so skip full analysis early.
+                            try:
+                                from executors.agent_state_store import agent_state_store as _ass
+                                _bundle = _ass.load_bundle(symbol, mode.value)
+                                _chart = ((_bundle.get("agents") or {}).get("chart_prep_agent") or {}).get("payload") or {}
+                                _gate_passed = bool((_chart.get("confluence_score") or {}).get("gate_passed", True))
+                                if not _gate_passed:
+                                    _gate_score = (_chart.get("confluence_score") or {}).get("score", 0)
+                                    logger.info(
+                                        f"[Monitor] {symbol}/{mode.value} confluence gate CLOSED "
+                                        f"(score={_gate_score}/3) — skipping full analysis (judge would HOLD)"
+                                    )
+                                    result["status"] = "WATCH"
+                                    result["reasoning"] = (
+                                        f"{result.get('reasoning', '')} 컨플루언스 게이트 미충족 ({_gate_score}/3) — 분석 스킵"
+                                    ).strip()
+                                    lane_results[mode.value.upper()] = result
+                                    continue
+                            except Exception as _cg_err:
+                                logger.debug(f"[Monitor] Confluence pre-check skipped: {_cg_err}")
+
                             veto_gate = market_monitor_agent.lightweight_veto_check(symbol, mode.value, result)
                             result["llm_veto_gate"] = veto_gate
                             if veto_gate.get("action") == "VETO":

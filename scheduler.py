@@ -576,14 +576,25 @@ def main():
     except Exception as e:
         logger.warning(f"WebSocket collector unavailable: {e}")
 
-    # [FIX] WebSocket thread health check  - every 5 minutes
+    # WebSocket thread health check — every 5 minutes
+    # Detects both: (1) thread death, (2) alive but no messages for >10 min (stuck connection)
     def job_5m_ws_health_check():
+        import time as _time
         try:
             from collectors.websocket_collector import websocket_collector
-            if hasattr(websocket_collector, '_thread'):
-                if not websocket_collector._thread.is_alive():
-                    logger.warning("WebSocket thread died  - restarting...")
-                    websocket_collector.start_background()
+            thread = getattr(websocket_collector, '_thread', None)
+            last_msg = getattr(websocket_collector, '_last_message_time', 0.0)
+            silent_secs = _time.time() - last_msg if last_msg else float('inf')
+
+            thread_dead = thread is None or not thread.is_alive()
+            # 10분 이상 메시지 없으면 연결이 끊긴 것으로 간주
+            silent_too_long = silent_secs > 600 and last_msg > 0
+
+            if thread_dead or silent_too_long:
+                reason = "thread dead" if thread_dead else f"no messages for {silent_secs/60:.1f}min"
+                logger.warning(f"WebSocket collector unhealthy ({reason}) — restarting...")
+                websocket_collector.stop()
+                websocket_collector.start_background()
         except Exception as e:
             logger.error(f"WS health check error: {e}")
 
