@@ -374,6 +374,8 @@ class WebSocketCollector:
                 loop.close()
 
         self._running = True
+        self._started_at = time.time()
+        self._last_message_time = 0.0
         self._thread = threading.Thread(target=_run, daemon=True, name="ws-collector")
         self._thread.start()
         logger.info("WebSocket collector started in background thread")

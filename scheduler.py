@@ -587,8 +587,12 @@ def main():
             silent_secs = _time.time() - last_msg if last_msg else float('inf')
 
             thread_dead = thread is None or not thread.is_alive()
-            # 10분 이상 메시지 없으면 연결이 끊긴 것으로 간주
-            silent_too_long = silent_secs > 600 and last_msg > 0
+            # 연결 후 10분 이상 메시지 없으면 끊긴 것으로 간주
+            # last_msg=0은 한 번도 수신 못한 경우 → 시작 후 5분 초과 시 재시작
+            if last_msg == 0.0:
+                started = getattr(websocket_collector, '_started_at', _time.time())
+                silent_secs = _time.time() - started
+            silent_too_long = silent_secs > 300  # 5분 이상 메시지 없으면 재시작
 
             if thread_dead or silent_too_long:
                 reason = "thread dead" if thread_dead else f"no messages for {silent_secs/60:.1f}min"
