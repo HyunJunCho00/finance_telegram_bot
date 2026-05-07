@@ -56,6 +56,21 @@ class ExecutionRepository:
         with self.transaction() as cur:
             for spec in specs:
                 created_ids.append(self._insert_intent_locked(cur, spec))
+
+        # ── Redis Pub/Sub: 신규 intent 생성 즉시 execution_main에 알림 ────────────
+        # fire-and-forget: Redis 장애가 주문 흐름을 절대 차단하지 않는다.
+        # execution_main이 subscribe하여 즉시 process_intents()를 실행한다.
+        try:
+            from utils.redis_client import redis_client
+            if redis_client.enabled:
+                import json as _json
+                redis_client.client.publish(
+                    "exec:new_intent",
+                    _json.dumps({"intent_ids": created_ids}),
+                )
+        except Exception:
+            pass  # Redis 없어도 1분 fallback 스케줄러가 처리
+
         return created_ids
 
     def open_paper_position(

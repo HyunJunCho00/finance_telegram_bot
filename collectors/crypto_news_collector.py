@@ -135,6 +135,30 @@ class CryptoNewsCollector:
         conn.close()
         return new_articles
 
+    def fetch_news(self, categories: List[str] = None, limit: int = 10, lang: str = "en") -> List[Dict]:
+        """Query recent articles from SQLite, filtered by tag categories. Returns list with link/source/title/description keys."""
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            rows = conn.execute(
+                "SELECT title, url, source, summary, tags FROM articles ORDER BY published_at DESC LIMIT 200"
+            ).fetchall()
+        finally:
+            conn.close()
+
+        results = []
+        for title, url, source, summary, tags_json in rows:
+            if len(results) >= limit:
+                break
+            if categories:
+                try:
+                    tags = json.loads(tags_json or "[]")
+                except Exception:
+                    tags = []
+                if not any(t in categories for t in tags):
+                    continue
+            results.append({"link": url, "source": source, "title": title, "description": summary or ""})
+        return results
+
     def fetch_and_ingest(self, categories: List[str] = None):
         """기존 API를 완벽히 대체하는 메인 함수. cloud_jobs에서 1시간마다 호출됩니다."""
         logger.info("Fetching Crypto News via RSS Feeds...")

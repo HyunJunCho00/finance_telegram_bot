@@ -143,17 +143,30 @@ def _update_position_gauge(prices: dict[str, float] | None = None) -> None:
 
 # ── Jobs ────────────────────────────────────────────────────────────────────
 
+# process_intents()의 동시 실행 방지 (Redis 신호 + 1분 fallback이 겹칠 때)
+_intent_lock = threading.Lock()
+
+
+def _run_process_intents(trigger: str = "scheduler") -> None:
+    """process_intents()를 단일 실행 보장하며 호출하는 내부 헬퍼."""
+    if not _intent_lock.acquire(blocking=False):
+        logger.debug(f"[execution_main] process_intents 실행 중 — {trigger} 스킵")
+        return
+    try:
+        execution_desk.process_intents()
+    finally:
+        _intent_lock.release()
+
+
 def job_1min_execution() -> None:
-    """포지션 실행 + Paper TP/SL/청산 체크."""
+    """포지션 실행 + Paper TP/SL/청산 체크.
+
+    Redis 리스너가 살아있을 때는 신호를 이미 즉시 처리했을 가능성이 높지만,
+    Redis 장애 / 프로세스 재시작 직후의 누락 intent 처리를 위한 안전망 역할.
+    """
     start = time.perf_counter()
     try:
-        result = execution_desk.process_intents()
-        if _PROM_AVAILABLE:
-            if isinstance(result, dict):
-                ORDER_RESULTS.labels(result="success").inc(result.get("processed", 0))
-                ORDER_RESULTS.labels(result="skip").inc(result.get("skipped", 0))
-            else:
-                ORDER_RESULTS.labels(result="success").inc(1)
+        _run_process_intents(trigger="1min_fallback")
 
         if settings.PAPER_TRADING_MODE:
             from executors.trade_executor import trade_executor
@@ -223,6 +236,71 @@ def job_outbox_drain() -> None:
         logger.error(f"[execution_main] outbox drain error: {e}")
 
 
+# ── Redis Intent Listener ───────────────────────────────────────────────────
+
+def _start_redis_intent_listener() -> bool:
+    """Redis exec:new_intent 채널을 구독하는 백그라운드 데몬 스레드를 시작한다.
+
+    신호가 들어오면 _run_process_intents()를 즉시(~1ms) 호출한다.
+    Redis 연결이 없으면 False를 반환하고 1분 스케줄러만 작동한다.
+    """
+    try:
+        from utils.redis_client import redis_client
+        if not redis_client.enabled:
+            logger.warning("[execution_main] Redis 비활성화 — 1분 fallback 스케줄러만 사용")
+            return False
+    except Exception as e:
+        logger.warning(f"[execution_main] Redis 클라이언트 로드 실패: {e}")
+        return False
+
+    def _listener_loop() -> None:
+        import json as _json
+        backoff = 2.0
+        while True:
+            try:
+                # publish/subscribe 전용 연결 (get/set 연결과 분리)
+                pubsub = redis_client.client.pubsub(ignore_subscribe_messages=True)
+                pubsub.subscribe("exec:new_intent")
+                logger.info("[RedisListener] exec:new_intent 채널 구독 시작")
+                backoff = 2.0  # 연결 성공 시 백오프 리셋
+
+                for message in pubsub.listen():
+                    if message is None:
+                        continue
+                    if message.get("type") != "message":
+                        continue
+
+                    try:
+                        data = _json.loads(message["data"])
+                        intent_ids = data.get("intent_ids", [])
+                        logger.info(
+                            f"[RedisListener] 신규 intent 신호 수신 "
+                            f"({len(intent_ids)}건) → process_intents() 즉시 실행"
+                        )
+                    except Exception:
+                        logger.info("[RedisListener] intent 신호 수신 → process_intents() 즉시 실행")
+
+                    # 별도 스레드로 실행 — listener 루프를 블로킹하지 않는다
+                    threading.Thread(
+                        target=_run_process_intents,
+                        args=("redis_signal",),
+                        daemon=True,
+                    ).start()
+
+            except Exception as exc:
+                logger.warning(
+                    f"[RedisListener] 연결 끊김 ({exc}), "
+                    f"{backoff:.0f}s 후 재연결 (1분 fallback 스케줄러 활성 중)"
+                )
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 60.0)  # 최대 60초 백오프
+
+    t = threading.Thread(target=_listener_loop, name="redis-intent-listener", daemon=True)
+    t.start()
+    logger.info("[execution_main] Redis intent 리스너 시작 (채널: exec:new_intent)")
+    return True
+
+
 # ── Main ────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -250,7 +328,14 @@ def main() -> None:
         except Exception as e:
             logger.warning(f"Prometheus server failed to start: {e}")
 
-    # 1분 execution tick
+    # ── Redis Intent 리스너 시작 (실시간 주문 트리거) ──────────────────────
+    # 신호가 오면 즉시(~1ms) process_intents() 실행.
+    # Redis 비활성/장애 시 아래 1분 스케줄러(fallback)가 자동 대응.
+    redis_listener_active = _start_redis_intent_listener()
+
+    # 1분 execution tick (fallback 안전망)
+    # Redis 리스너 활성일 때: 누락 intent 복구 + TP/SL 체크 역할
+    # Redis 비활성일 때: 기존 방식 그대로 동작
     scheduler_config.scheduler.add_job(
         job_1min_execution,
         "interval",
@@ -277,7 +362,8 @@ def main() -> None:
     )
 
     scheduler_config.scheduler.start()
-    logger.info("Execution scheduler started.")
+    mode_label = "Redis Pub/Sub 실시간 + 1분 안전망" if redis_listener_active else "1분 스케줄러 fallback 전용"
+    logger.info(f"Execution scheduler started. 주문 실행 모드: {mode_label}")
 
     try:
         while True:
