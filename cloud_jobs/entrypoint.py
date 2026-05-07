@@ -119,7 +119,62 @@ try:
 
     elif JOB_NAME == "crypto_news":
         from collectors.crypto_news_collector import collector as news_collector
-        news_collector.fetch_and_ingest()
+        from cloud_jobs.market_status import _synthesize_news_intel, _build_reference_message
+        import requests as _req
+        from config.settings import settings as _s
+
+        new_articles = news_collector.fetch_and_ingest() or []
+
+        if not new_articles:
+            logger.info("[crypto_news] 신규 기사 없음 — 텔레그램 발송 스킵")
+        else:
+            # market_status와 동일한 형식으로 ext_items 구성
+            ext_items = [
+                {
+                    "source_type": "external",
+                    "source":      a.get("source", "unknown"),
+                    "title":       str(a.get("title", "")),
+                    "description": str(a.get("summary", "")),
+                    "url":         str(a.get("url", "")),
+                }
+                for a in new_articles[:12]
+            ]
+
+            # LLM 합성 (한국어 브리핑 + 참고 링크 payload)
+            intel, final_payload = _synthesize_news_intel([], ext_items, timeout_s=90)
+
+            def _tg_send(text: str) -> None:
+                """4096자 초과 시 분할 발송."""
+                limit = 4000
+                chunks = [text[i:i+limit] for i in range(0, len(text), limit)]
+                for chunk in chunks:
+                    _req.post(
+                        f"https://api.telegram.org/bot{_s.TELEGRAM_BOT_TOKEN}/sendMessage",
+                        json={
+                            "chat_id":                  _s.TELEGRAM_CHAT_ID,
+                            "text":                     chunk,
+                            "parse_mode":               "HTML",
+                            "disable_web_page_preview": True,
+                        },
+                        timeout=15,
+                    )
+
+            try:
+                if intel and "주요 뉴스 없음" not in intel:
+                    _tg_send(f"<b>📰 크립토 뉴스 브리핑</b>\n\n{intel}")
+                    logger.info(f"[crypto_news] 브리핑 발송 완료")
+
+                    refs_text = _build_reference_message(
+                        final_payload.get("selected_news", [])[:6]
+                    )
+                    if refs_text:
+                        _tg_send(f"<b>📌 뉴스 참고 링크</b>\n\n{refs_text}")
+                        logger.info(f"[crypto_news] 참고 링크 발송 완료")
+                else:
+                    logger.info("[crypto_news] LLM 합성 결과 없음 — 발송 스킵")
+            except Exception as _te:
+                logger.warning(f"[crypto_news] 텔레그램 발송 실패: {_te}")
+
 
     elif JOB_NAME == "market_status":
         from cloud_jobs.market_status import run_market_status

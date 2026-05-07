@@ -120,6 +120,7 @@ class CryptoNewsCollector:
                             new_articles.append({
                                 "source": source,
                                 "title": title,
+                                "url": link,
                                 "summary": summary,
                                 "tags": tags
                             })
@@ -195,6 +196,9 @@ class CryptoNewsCollector:
             )
         except Exception as e:
             logger.error(f"Error ingesting Crypto News into RAG: {e}")
+
+        # 새로 수집된 기사 반환 (entrypoint에서 텔레그램 발송에 사용)
+        return new_articles
 
 # 전역 인스턴스 노출 (entrypoint.py 에서 import collector 로 사용)
 collector = CryptoNewsCollector()
