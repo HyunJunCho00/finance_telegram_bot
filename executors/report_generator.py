@@ -449,75 +449,94 @@ class ReportGenerator:
 
     def format_detail_message(self, report: Dict, mode: TradingMode = TradingMode.SWING) -> str:
         decision = self._load_json_field(report.get("final_decision"), {})
-        reasoning = decision.get("reasoning", "N/A")
+        reasoning = decision.get("reasoning", {}) if isinstance(decision, dict) else {}
+        gate_assessment = decision.get("gate_assessment", {}) if isinstance(decision, dict) else {}
         onchain_context = str(report.get("onchain_context", "") or "").strip()
+        symbol = report.get("symbol", "?")
 
-        lines = [f"🔍 <b>DEEP ANALYSIS | {report['symbol']}</b>\n"]
+        def _block(title: str, text: str) -> str:
+            safe = self._escape_html(str(text or "").strip())
+            if not safe:
+                return ""
+            # 문장 단위 줄바꿈으로 가독성 향상
+            safe = safe.replace(". ", ".\n")
+            return f"<b>{title}</b>\n{safe}\n"
 
+        lines = [f"🔍 <b>DEEP ANALYSIS | {self._escape_html(symbol)}</b>"]
+        lines.append(f"<code>Mode: {mode.value.upper()}</code>\n")
+
+        # ── 1. Judge 핵심 판단 ───────────────────────────────────────────
+        final_logic = ""
         if isinstance(reasoning, dict):
-            reasoning_for_view = dict(reasoning)
-            if not reasoning_for_view.get("onchain") or reasoning_for_view.get("onchain") == "N/A":
-                fallback_onchain = self._extract_onchain_summary(onchain_context)
-                if fallback_onchain:
-                    reasoning_for_view["onchain"] = fallback_onchain
-            mapping = {
-                "technical": "📊 기술적 분석 (Technical)",
-                "onchain": "🔗 심층 온체인 분석 (On-chain)",
-                "derivatives": "⛓️ 파생상품 심리 (Derivatives)",
-                "experts": "🤖 전문 스웜 (Expert Swarm)",
-                "narrative": "🌐 시장 내러티브 (Narrative/News)",
-                "counter_scenario": "🚨 최악의 시나리오 (Risk)",
-            }
-            mapping["onchain"] = "On-chain Summary"
-            for key, title in mapping.items():
-                value = reasoning_for_view.get(key)
-                if value and value != "N/A":
-                    safe_value = self._escape_html(value)
-                    if len(safe_value) > 1500:
-                        safe_value = safe_value[:1497] + "..."
-                    safe_value = safe_value.replace(". ", ".\n\n")
-                    lines.append(f"<b>{title}:</b>\n<i>{safe_value}</i>\n")
-        else:
-            lines.append(f"<i>{self._escape_html(reasoning)}</i>")
+            final_logic = str(reasoning.get("final_logic", "") or "").strip()
+        elif reasoning:
+            final_logic = str(reasoning).strip()
 
+        if final_logic:
+            lines.append(_block("📋 Judge 종합 판단", final_logic))
+
+        # ── 2. Gate Assessment (Judge가 기준을 어떻게 평가했는지) ──────
+        if isinstance(gate_assessment, dict) and gate_assessment:
+            gate_lines = []
+            win_ok = gate_assessment.get("win_prob_ok")
+            rr_ok = gate_assessment.get("rr_ok")
+            ev_ok = gate_assessment.get("ev_ok")
+            self_passed = gate_assessment.get("self_passed")
+            gate_reason = str(gate_assessment.get("reasoning", "") or "").strip()
+
+            status_icon = "✅" if self_passed else "⚠️"
+            checks = []
+            if win_ok is not None:
+                checks.append(f"WinProb {'✅' if win_ok else '❌'}")
+            if rr_ok is not None:
+                checks.append(f"R/R {'✅' if rr_ok else '❌'}")
+            if ev_ok is not None:
+                checks.append(f"EV {'✅' if ev_ok else '❌'}")
+            if checks:
+                gate_lines.append(f"{status_icon} {' | '.join(checks)}")
+            if gate_reason:
+                gate_lines.append(self._escape_html(gate_reason).replace(". ", ".\n"))
+
+            if gate_lines:
+                lines.append(f"<b>🎯 Gate Assessment</b>")
+                lines.append("\n".join(gate_lines))
+                lines.append("")
+
+        # ── 3. 반대 시나리오 ────────────────────────────────────────────
+        counter = ""
+        if isinstance(reasoning, dict):
+            counter = str(reasoning.get("counter_scenario", "") or "").strip()
+        if counter and counter != "N/A":
+            lines.append(_block("🚨 반대 시나리오 (Risk)", counter))
+
+        # ── 4. 온체인 요약 (fallback) ────────────────────────────────────
+        onchain_val = reasoning.get("onchain", "") if isinstance(reasoning, dict) else ""
+        if not onchain_val or onchain_val == "N/A":
+            onchain_val = self._extract_onchain_summary(onchain_context)
+        if onchain_val and onchain_val != "N/A":
+            lines.append(_block("🔗 온체인 요약", onchain_val))
+
+        # ── 5. 시나리오 플랜 ─────────────────────────────────────────────
         scenario_plan = self._load_json_field(decision.get("scenario_plan"), {}) if isinstance(decision, dict) else {}
         if isinstance(scenario_plan, dict) and any(str(v or "").strip() for v in scenario_plan.values()):
-            lines.append("<b>Scenario Plan:</b>")
+            lines.append("<b>📌 시나리오 플랜</b>")
             scenario_mapping = [
                 ("primary_scenario", "Primary"),
                 ("alternate_scenario", "Alternate"),
-                ("trigger_to_enter", "Trigger"),
-                ("trigger_to_abort", "Abort"),
-                ("partial_tp_plan", "Partial TP"),
-                ("stop_to_be_rule", "Stop to BE"),
+                ("trigger_to_enter", "진입 트리거"),
+                ("trigger_to_abort", "중단 조건"),
+                ("partial_tp_plan", "분할 익절"),
+                ("stop_to_be_rule", "본절 이동"),
             ]
             for key, label in scenario_mapping:
-                value = scenario_plan.get(key)
+                value = str(scenario_plan.get(key) or "").strip()
                 if value:
-                    lines.append(f"- <b>{label}:</b> <i>{self._escape_html(value)}</i>")
+                    lines.append(f"  · <b>{label}:</b> <i>{self._escape_html(value)}</i>")
             lines.append("")
 
-        scenario_summary = self._load_json_field(decision.get("scenario_plan_summary"), {}) if isinstance(decision, dict) else {}
-        if isinstance(scenario_summary, dict) and scenario_summary:
-            lines.append("<b>Execution Setup:</b>")
-            lines.append(f"- Trigger: <code>{self._escape_html(scenario_summary.get('trigger', 'N/A'))}</code>")
-            lines.append(
-                f"- Entry Zone: <code>{self._fmt_price(scenario_summary.get('entry_zone_low'))}</code> ~ "
-                f"<code>{self._fmt_price(scenario_summary.get('entry_zone_high'))}</code>"
-            )
-            lines.append(
-                f"- Invalidation: <code>{self._fmt_price(scenario_summary.get('invalidation'))}</code> | "
-                f"TP1: <code>{self._fmt_price(scenario_summary.get('tp1'))}</code> | "
-                f"TP2: <code>{self._fmt_price(scenario_summary.get('tp2'))}</code>"
-            )
-            split_entry_plan = decision.get("split_entry_plan", []) if isinstance(decision, dict) else []
-            if isinstance(split_entry_plan, list) and split_entry_plan:
-                split_text = ", ".join(self._fmt_price(v) for v in split_entry_plan[:3])
-                lines.append(f"- Scale-ins: <code>{self._escape_html(split_text)}</code>")
-            if decision.get("breakeven_rule"):
-                lines.append(f"- BE Rule: <i>{self._escape_html(decision.get('breakeven_rule'))}</i>")
-            if decision.get("risk_manager_note"):
-                lines.append(f"- CRO Note: <i>{self._escape_html(decision.get('risk_manager_note'))}</i>")
+        # ── 6. 실행 설정 ──────────────────────────────────────────────────
+        if decision.get("risk_manager_note"):
+            lines.append(f"<b>CRO Note:</b> <i>{self._escape_html(decision.get('risk_manager_note'))}</i>")
 
         return "\n".join(lines)
 
@@ -571,7 +590,7 @@ class ReportGenerator:
         notification_context: str,
     ) -> Dict[str, Any]:
         summary_text = self._sanitize_html_for_telegram(self.format_summary_message(report, mode))
-        report_id = report.get("report_id") or report.get("id")
+        report_id = report.get("id")  # always use Supabase primary key so callback lookup matches
         payload: Dict[str, Any] = {
             "context": notification_context,
             "symbol": report.get("symbol"),

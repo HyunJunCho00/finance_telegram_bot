@@ -1038,18 +1038,13 @@ class TradingBot:
                 await query.message.reply_text(f"Error: {e}")
         elif data.startswith("detail_"):
             try:
-                report_id = data.split("_")[1]
-                # If report_id is not integer (UUID), we might need to adjust lookup
-                # Depending on how db.insert_ai_report returns the ID
-                
-                # Fetch report from DB
+                report_id = "_".join(data.split("_")[1:])
                 from config.database import db
                 report = None
-                
-                # Try lookup by created_at or ID if we have it
-                # For now, let's assume we can get it by newest for the symbol
-                # or better yet, search in the ai_reports table if report_id is the primary key.
-                response = db.client.table("ai_reports").select("*").eq("id", report_id).execute()
+
+                # ai_reports.id is the Supabase auto-generated primary key (UUID/int).
+                # _build_reply_markup always uses report.get("id"), so query by id column.
+                response = db.client_text.table("ai_reports").select("*").eq("id", report_id).execute()
                 if response.data:
                     report = response.data[0]
                 

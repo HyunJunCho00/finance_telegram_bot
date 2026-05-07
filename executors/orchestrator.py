@@ -1900,14 +1900,23 @@ def node_judge_agent(state: AnalysisState) -> dict:
 
     # Veto low-quality entries
     if direction in ("LONG", "SHORT"):
+        gate_assessment = decision.get("gate_assessment") or {}
+        gate_reasoning = str(gate_assessment.get("reasoning", "") or "")
+
         failed = []
+        # gate_assessment 누락 시 veto — Judge가 게이트를 검토하지 않은 것
+        if not gate_assessment or not gate_reasoning:
+            failed.append("gate_assessment 누락 (Judge 게이트 미검토)")
         if ev <= 0:
             failed.append(f"EV={ev:.2f}<=0")
         if win_prob_pct < min_win:
             failed.append(f"WinProb={win_prob_pct:.1f}%<{min_win:.1f}%")
         if rr < min_rr:
             failed.append(f"RR={rr:.2f}<{min_rr:.2f}")
+
         if failed:
+            if gate_reasoning:
+                logger.info(f"Judge gate_assessment (vetoed): {gate_reasoning[:200]}")
             logger.warning(f"Judge entry vetoed: {', '.join(failed)}")
             decision["decision"] = "HOLD"
             decision["allocation_pct"] = 0
@@ -1915,7 +1924,9 @@ def node_judge_agent(state: AnalysisState) -> dict:
             decision["reasoning"]["final_logic"] = (
                 f"[ENTRY VETO] {'; '.join(failed)}. " + decision["reasoning"].get("final_logic", "")
             )
-            decision["key_factors"].append("EV/RR/리스크 필터 미통과로 진입 거")
+            decision["key_factors"].append("EV/RR/리스크 필터 미통과로 진입 거부")
+        else:
+            logger.info(f"Judge gate passed — assessment: {gate_reasoning[:200]}")
 
     # Promote HOLD to small-size entry only when edge is mathematically strong
     direction = str(decision.get("decision", "HOLD")).upper()

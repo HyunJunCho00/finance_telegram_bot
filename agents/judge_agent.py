@@ -26,10 +26,18 @@ You receive ALL available data:
 8. Your previous decision (maintain consistency unless data clearly changed)
 9. Chart image (if provided) - Uses full history for indicators to prevent distortion. Visual window zooms: SWING (~6 months for trend clarity), POSITION (~5 years to capture previous ATHs and major historical resistance).
 
-YOUR JOB: Make a DRAFT trading decision. 
+YOUR JOB: Make a DRAFT trading decision.
 CRITICAL POLICY RULE: Human-defined policy engine has final authority. You must NOT rely on discretionary exceptions. If structure, stop, or reward/risk is unclear, prefer HOLD and explain why.
 CRITICAL V9 RULE: You MUST perform Falsifiability Analysis BEFORE your final decision. Identify the strongest evidence AGAINST your primary bias.
 If the Meta-Agent indicates a high-risk regime, you MUST demand higher confidence levels for any entry.
+
+CRITICAL GATE REASONING RULE:
+Your brief contains `execution_gates` — the minimum thresholds for trade execution.
+- You MUST reason about your decision against each gate criterion as part of your analysis.
+- Output `gate_assessment` with your evaluation of each criterion.
+- Even if a number is borderline, you may still conclude LONG/SHORT if your holistic analysis (structure, narrative, onchain, regime) provides sufficient confluence — but you MUST explicitly justify this in `gate_assessment.reasoning`.
+- If you cannot articulate why the setup clears the bar, output HOLD.
+- `gate_assessment` is MANDATORY for any LONG or SHORT decision. A missing or empty gate_assessment will cause your entry to be vetoed automatically.
 
 CRITICAL V10 RULE - PLAYBOOK GENERATION: 
 Regardless of your decision (even if HOLD), you MUST generate a `monitoring_playbook` that the Hourly Monitor can use. 
@@ -55,6 +63,13 @@ Output your decision as JSON (execution fields only — report narrative is gene
   "win_probability_pct": 0-100,
   "expected_profit_pct": float,
   "expected_loss_pct": float,
+  "gate_assessment": {{
+    "win_prob_ok": true | false,
+    "rr_ok": true | false,
+    "ev_ok": true | false,
+    "self_passed": true | false,
+    "reasoning": "각 기준 통과 여부와 근거. 경계선 수치라면 왜 종합적으로 진입 근거가 충분한지 또는 부족한지 명시 (Korean)"
+  }},
   "reasoning": {{
     "final_logic": "결정 근거 2-3문장 (Korean)",
     "counter_scenario": "가장 강한 반대 시나리오 1-2문장 (Korean)"
@@ -385,6 +400,12 @@ Rules:
         brief: Dict[str, Any] = {
             "symbol": symbol,
             "mode": mode.value.upper(),
+            "execution_gates": {
+                "min_win_prob_pct": float(getattr(settings, "JUDGE_MIN_WIN_PROB_PCT", 55.0)),
+                "min_rr": float(getattr(settings, "JUDGE_MIN_RR_FOR_ENTRY", 1.9)),
+                "min_ev_pct": float(getattr(settings, "JUDGE_MIN_EV_FOR_ENTRY_PCT", 0.20)),
+                "note": "LONG/SHORT 결정 시 gate_assessment에서 각 기준을 반드시 검토하세요. 경계선 수치라도 종합적 근거가 충분하면 진입 가능하나, 그 이유를 명시해야 합니다.",
+            },
             "structure_snapshot": self._summarize_lines(market_data_compact, max_lines=18, max_chars=1800),
             "regime_snapshot": self._summarize_regime_context(regime_context),
             "derivatives_snapshot": self._summarize_lines(funding_context, max_lines=8, max_chars=700),
@@ -493,7 +514,7 @@ Rules:
                 system_prompt=prompt,
                 user_message=user_message,
                 temperature=0.2,
-                max_tokens=2000,
+                max_tokens=3500,
                 chart_image_b64=chart_image_b64,
                 use_premium=True,
                 role=_judge_role,
@@ -680,9 +701,15 @@ Rules:
 
         normalized = self._decision_template()
         for key, value in decision.items():
-            if key in ("reasoning", "monitoring_playbook", "daily_dual_plan", "scenario_plan"):
+            if key in ("reasoning", "monitoring_playbook", "daily_dual_plan", "scenario_plan", "gate_assessment"):
                 continue
             normalized[key] = value
+
+        gate_assessment = decision.get("gate_assessment")
+        if isinstance(gate_assessment, dict) and gate_assessment:
+            merged_gate = normalized["gate_assessment"].copy()
+            merged_gate.update({k: v for k, v in gate_assessment.items() if v is not None})
+            normalized["gate_assessment"] = merged_gate
 
         reasoning = decision.get("reasoning", {})
         if isinstance(reasoning, dict):
@@ -737,6 +764,13 @@ Rules:
             "stop_loss": None,
             "take_profit": None,
             "hold_duration": "N/A",
+            "gate_assessment": {
+                "win_prob_ok": None,
+                "rr_ok": None,
+                "ev_ok": None,
+                "self_passed": False,
+                "reasoning": "",
+            },
             "reasoning": {
                 "counter_scenario": "N/A",
                 "meta_agent_context": "N/A",
