@@ -533,7 +533,7 @@ def main():
 
     if _SCHED_PROM:
         try:
-            _prom_start(9090, addr="127.0.0.1")
+            _prom_start(9090, addr="0.0.0.0")
             logger.info("Prometheus metrics server started on 127.0.0.1:9090")
         except Exception as e:
             logger.warning(f"Prometheus server failed to start: {e}")
