@@ -599,18 +599,50 @@ def node_context_gathering(state: AnalysisState) -> dict:
             snap = db.get_latest_microstructure(symbol)
             if snap: db_updates["microstructure_context"] = f"[MICRO] spread={snap.get('spread_bps', 0):.2f}bps imbalance={snap.get('orderbook_imbalance', 0):.4f}"
         except Exception: pass
+        is_position = (mode == TradingMode.POSITION)
+        macro_days   = 30 if is_position else 14
+        fg_days      = 14 if is_position else 7
+        deribit_days = 5
+
+        def _trend(df, col):
+            vals = df[col].dropna().tolist()
+            if not vals:
+                return "N/A"
+            if len(vals) == 1:
+                return str(round(vals[-1], 2))
+            delta = vals[-1] - vals[0]
+            arrow = "↑" if delta > 0 else "↓" if delta < 0 else "→"
+            return f"{round(vals[-1], 2)}({arrow}{abs(round(delta, 2))},{len(vals)}d)"
+
         try:
-            m = gcs_parquet_store.get_latest_row("macro")
-            if m: db_updates["macro_context"] = f"[MACRO] DGS10={m.get('dgs10', 'N/A')} DXY={m.get('dxy', 'N/A')} NASDAQ={m.get('nasdaq', 'N/A')}"
+            macro_df = gcs_parquet_store.get_recent_rows("macro", days=macro_days)
+            if not macro_df.empty:
+                db_updates["macro_context"] = (
+                    f"[MACRO] DGS10={_trend(macro_df, 'dgs10')} "
+                    f"DXY={_trend(macro_df, 'dxy')} "
+                    f"NASDAQ={_trend(macro_df, 'nasdaq')}"
+                )
         except Exception: pass
         try:
             currency = symbol[:-4] if symbol.endswith('USDT') else symbol
-            d = gcs_parquet_store.get_latest_row("deribit", currency)
-            if d: db_updates["deribit_context"] = f"[DERIBIT {currency}] DVOL={d.get('dvol')} PCR={d.get('pcr_oi')}"
+            deribit_df = gcs_parquet_store.get_recent_rows("deribit", currency, days=deribit_days)
+            if not deribit_df.empty:
+                db_updates["deribit_context"] = (
+                    f"[DERIBIT {currency}] DVOL={_trend(deribit_df, 'dvol')} "
+                    f"PCR={_trend(deribit_df, 'pcr_oi')}"
+                )
         except Exception: pass
         try:
-            fg = gcs_parquet_store.get_latest_row("fear_greed")
-            if fg: db_updates["fear_greed_context"] = f"[FEAR&GREED] {fg.get('value')}/100"
+            fg_df = gcs_parquet_store.get_recent_rows("fear_greed", days=fg_days)
+            if not fg_df.empty:
+                vals = fg_df['value'].dropna().astype(int).tolist()
+                trend_str = " → ".join(str(v) for v in vals[-5:])
+                delta = vals[-1] - vals[0] if len(vals) >= 2 else 0
+                arrow = "↑" if delta > 0 else "↓" if delta < 0 else "→"
+                label = fg_df.iloc[-1].get('classification', fg_df.iloc[-1].get('value_classification', ''))
+                db_updates["fear_greed_context"] = (
+                    f"[FEAR&GREED] {trend_str} ({arrow}{abs(delta)},{len(vals)}d) label={label}"
+                )
         except Exception: pass
         try:
             etf = db.get_latest_narrative_data(symbol, source="etf_flow_farside")

@@ -639,6 +639,24 @@ class GCSParquetStore:
                 return df.iloc[-1].to_dict()
         return None
 
+    def get_recent_rows(self, prefix: str, symbol: str = "global", days: int = 7) -> pd.DataFrame:
+        """prefix/symbol 경로에서 최근 days일 각 마지막 행을 반환 (시계열 추세용).
+
+        날짜 오름차순(오래된 순) DataFrame 반환. 각 날짜 파일의 마지막 행 1개씩만 취함.
+        """
+        now = datetime.now(timezone.utc)
+        dfs = []
+        for delta in range(days):
+            day = (now - timedelta(days=delta)).date().isoformat()
+            df = self._download_parquet(f"{prefix}/{symbol}/{day}.parquet")
+            if df is not None and not df.empty:
+                dfs.append(df.iloc[[-1]])
+        if not dfs:
+            return pd.DataFrame()
+        result = pd.concat(dfs, ignore_index=True)
+        time_col = next((c for c in ("timestamp", "date") if c in result.columns), result.columns[0])
+        return result.sort_values(time_col).reset_index(drop=True)
+
     def get_funding_history_parquet(self, symbol: str, limit: int = 100, since=None) -> pd.DataFrame:
         """funding/{symbol} 로컬 parquet에서 최근 N행 반환.
 
