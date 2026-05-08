@@ -878,9 +878,12 @@ class AIClient:
                     "max_output_tokens": max_tokens,
                     "temperature": temperature,
                 }
-                # Support thinking_config for gemini-3 and gemini-2.5 series
+                # thinking_config: gemini-3 전체 또는 gemini-2.5-pro 계열만 지원 (flash는 미지원)
                 lowercased_id = model_id.lower()
-                if "gemini-3" in lowercased_id or "gemini-2.5" in lowercased_id:
+                _supports_thinking = "gemini-3" in lowercased_id or (
+                    "gemini-2.5" in lowercased_id and "pro" in lowercased_id
+                )
+                if _supports_thinking:
                     thinking_level = "HIGH" if "pro" in lowercased_id else "LOW"
                     config_kwargs["thinking_config"] = types.ThinkingConfig(
                         thinking_level=thinking_level
@@ -1047,7 +1050,10 @@ class AIClient:
                 "temperature": temperature,
             }
             lowercased_id = model_id.lower()
-            if "gemini-3" in lowercased_id or "gemini-2.5" in lowercased_id:
+            _supports_thinking = "gemini-3" in lowercased_id or (
+                "gemini-2.5" in lowercased_id and "pro" in lowercased_id
+            )
+            if _supports_thinking:
                 thinking_level = "HIGH" if "pro" in lowercased_id else "LOW"
                 config_kwargs["thinking_config"] = types.ThinkingConfig(
                     thinking_level=thinking_level
