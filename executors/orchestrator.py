@@ -599,7 +599,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
             snap = db.get_latest_microstructure(symbol)
             if snap: db_updates["microstructure_context"] = f"[MICRO] spread={snap.get('spread_bps', 0):.2f}bps imbalance={snap.get('orderbook_imbalance', 0):.4f}"
         except Exception: pass
-        is_position = (mode == TradingMode.POSITION)
+        is_position = (mode == "position")
         macro_days   = 30 if is_position else 14
         fg_days      = 14 if is_position else 7
         deribit_days = 5
