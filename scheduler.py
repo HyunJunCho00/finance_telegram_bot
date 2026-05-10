@@ -759,6 +759,13 @@ def main():
             max_instances=1,
         )
 
+        scheduler_config.scheduler.add_job(
+            job_routine_market_status,
+            CronTrigger(minute=20),
+            id='job_routine_market_status',
+            max_instances=1,
+        )
+
         try:
             from executors.spot_orchestrator import (
                 SPOT_MODE_ENABLED as _SPOT_ENABLED,

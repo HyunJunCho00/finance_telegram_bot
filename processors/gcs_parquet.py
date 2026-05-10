@@ -506,7 +506,7 @@ class GCSParquetStore:
         paths = []
         now = datetime.now(timezone.utc)
         if timeframe == "1m":
-            for day_offset in range(max(1, months_back * 31)):
+            for day_offset in range(max(1, int(months_back * 31))):
                 day = (now - timedelta(days=day_offset)).date().isoformat()
                 paths.append(f"ohlcv/1m/{symbol}/{day}.parquet")
             # GCS archived data uses monthly format — include as fallback
@@ -519,7 +519,7 @@ class GCSParquetStore:
                 year = (now - timedelta(days=365 * year_offset)).strftime("%Y")
                 paths.append(f"ohlcv/{timeframe}/{symbol}/{year}.parquet")
         else:
-            for m in range(months_back):
+            for m in range(int(months_back)):
                 month = (now - timedelta(days=30 * m)).strftime("%Y-%m")
                 paths.append(f"ohlcv/{timeframe}/{symbol}/{month}.parquet")
         return paths
