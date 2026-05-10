@@ -13,8 +13,9 @@ class VolatilityMonitor:
 
     def calculate_price_change(self, symbol: str) -> Optional[float]:
         try:
-            df = db.get_latest_market_data(symbol, limit=2)
-            if len(df) < 2:
+            from processors.gcs_parquet import gcs_parquet_store
+            df = gcs_parquet_store.load_ohlcv("1m", symbol, months_back=0.2)
+            if df is None or len(df) < 2:
                 return None
 
             current_price = float(df.iloc[-1]['close'])
