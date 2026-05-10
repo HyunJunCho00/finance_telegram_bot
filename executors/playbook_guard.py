@@ -53,11 +53,14 @@ def build_playbook_context(playbook_row: Optional[Dict], *, trigger_reason: str 
     if created_at and ttl_hours is not None:
         expires_at = (created_at + timedelta(hours=float(ttl_hours))).isoformat()
 
+    source_confidence = _safe_float(payload.get("confidence")) or 0.0
     return {
         "playbook_id": row.get("id"),
         "source_decision": source_decision or "HOLD",
         "allowed_sides": _normalize_allowed_sides(payload.get("allowed_sides"), source_decision),
         "max_allocation_pct": _safe_float(payload.get("max_allocation_pct")),
+        "confidence": source_confidence,
+        "win_probability_pct": source_confidence,
         "strategy_version": payload.get("strategy_version") or row.get("strategy_version") or "daily_playbook_v1",
         "thesis_id": payload.get("thesis_id") or row.get("id"),
         "created_at": row.get("created_at"),

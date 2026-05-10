@@ -196,6 +196,7 @@ Return strict JSON only:
   "trigger_action": "EXECUTE" | "WAIT" | "REDUCE" | "CANCEL" | "REPLAN",
   "allocation_pct": 0-100,
   "leverage": 1-3,
+  "win_probability_pct": 0-100,
   "reasoning": "Korean sentence",
   "replan_reason": "Korean sentence"
 }
@@ -205,6 +206,7 @@ Rules:
 - If the playbook source direction is SHORT, you cannot output LONG logic.
 - Focus on whether price is entering the planned zone with confirmation on the execution timeframe. Do not overreact to small intraday fluctuations.
 - If context is stale or thesis-breaking, prefer REPLAN over inventing the opposite side.
+- win_probability_pct: your honest estimate of the probability this entry succeeds given current conditions. Do NOT anchor to the playbook's original value — re-evaluate from current snapshot.
 - Use Korean for reasoning and replan_reason.
 - Output exactly one JSON object only.
 """
@@ -401,10 +403,13 @@ Rules:
             "symbol": symbol,
             "mode": mode.value.upper(),
             "execution_gates": {
-                "min_win_prob_pct": float(getattr(settings, "JUDGE_MIN_WIN_PROB_PCT", 55.0)),
-                "min_rr": float(getattr(settings, "JUDGE_MIN_RR_FOR_ENTRY", 1.9)),
-                "min_ev_pct": float(getattr(settings, "JUDGE_MIN_EV_FOR_ENTRY_PCT", 0.20)),
-                "note": "LONG/SHORT 결정 시 gate_assessment에서 각 기준을 반드시 검토하세요. 경계선 수치라도 종합적 근거가 충분하면 진입 가능하나, 그 이유를 명시해야 합니다.",
+                "note": (
+                    "LONG/SHORT 결정 시 gate_assessment에서 각 기준(win_probability_pct, R/R, EV)을 반드시 검토하세요. "
+                    "win_probability_pct는 현재 시장 데이터에 기반한 솔직한 확률 추정값이어야 합니다. "
+                    "임계치에 인위적으로 맞추지 말고, 실제 근거 강도를 반영하세요. "
+                    "경계선 수치라도 종합적 근거가 충분하면 진입 가능하나, 그 이유를 명시해야 합니다."
+                ),
+                "thresholds_applied_by_policy_engine": True,
             },
             "structure_snapshot": self._summarize_lines(market_data_compact, max_lines=18, max_chars=1800),
             "regime_snapshot": self._summarize_regime_context(regime_context),
@@ -648,6 +653,25 @@ Rules:
             decision["leverage"] = max(1, min(raw_lev, max_lev)) if mode_str_ctx != "position" else max(1.0, min(float(raw_lev), lev_cap))
         except Exception:
             decision["leverage"] = 1
+
+        # LLM이 출력한 win_probability_pct 사용, 없으면 playbook 원본 상속
+        try:
+            llm_win_prob = float(parsed.get("win_probability_pct") or 0)
+        except Exception:
+            llm_win_prob = 0.0
+        if llm_win_prob > 0:
+            decision["win_probability_pct"] = llm_win_prob
+            decision["confidence"] = llm_win_prob
+        else:
+            # 트리거 LLM이 미출력 시 playbook의 원본 확신도 상속 (0% 방지)
+            source_conf = 0.0
+            try:
+                source_conf = float(context.get("confidence") or context.get("win_probability_pct") or 0)
+            except Exception:
+                pass
+            if source_conf > 0:
+                decision["win_probability_pct"] = source_conf
+                decision["confidence"] = source_conf
 
         if trigger_action in {"EXECUTE", "REDUCE"} and source_decision in {"LONG", "SHORT"}:
             decision["decision"] = source_decision

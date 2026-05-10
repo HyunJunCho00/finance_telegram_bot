@@ -1036,6 +1036,34 @@ class TradingBot:
             except Exception as e:
                 logger.error(f"Position control error: {e}")
                 await query.message.reply_text(f"Error: {e}")
+        elif data.startswith("onchain_"):
+            try:
+                report_id = "_".join(data.split("_")[1:])
+                from config.database import db
+                from executors.report_generator import report_generator
+                response = db.client_text.table("ai_reports").select("symbol,onchain_snapshot").eq("id", report_id).execute()
+                if response.data:
+                    row = response.data[0]
+                    symbol = row.get("symbol", "?")
+                    snapshot = row.get("onchain_snapshot") or {}
+                    if isinstance(snapshot, str):
+                        import json as _json
+                        try:
+                            snapshot = _json.loads(snapshot)
+                        except Exception:
+                            snapshot = {}
+                    chat_id = getattr(query.message.chat, "id", None)
+                    if chat_id is None:
+                        await query.message.reply_text("Unable to detect current chat.")
+                    else:
+                        onchain_text = report_generator.format_onchain_message(symbol, snapshot)
+                        await self._send_chat_text(str(chat_id), onchain_text)
+                else:
+                    await query.message.reply_text("Report no longer available in database.")
+            except Exception as e:
+                logger.error(f"Onchain callback error: {e}")
+                await query.message.reply_text(f"Error fetching on-chain data: {e}")
+
         elif data.startswith("detail_"):
             try:
                 report_id = "_".join(data.split("_")[1:])
@@ -1047,7 +1075,7 @@ class TradingBot:
                 response = db.client_text.table("ai_reports").select("*").eq("id", report_id).execute()
                 if response.data:
                     report = response.data[0]
-                
+
                 if report:
                     from executors.report_generator import report_generator
                     # Determine mode - default to current settings if not found

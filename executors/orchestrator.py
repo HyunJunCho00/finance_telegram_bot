@@ -2790,6 +2790,13 @@ def node_generate_playbook(state) -> dict:
                         "(entry_conditions is empty)"
                     )
                     continue
+                # 트리거 실행 시 확신도 상속을 위해 저장
+                try:
+                    normalized["confidence"] = float(
+                        final_decision.get("confidence") or final_decision.get("win_probability_pct") or 0
+                    )
+                except Exception:
+                    normalized["confidence"] = 0.0
                 records.append({
                     "symbol": symbol,
                     "mode": lane_mode,
@@ -3042,17 +3049,8 @@ class Orchestrator:
             started_at = str((result or {}).get("started_at", "") or "")
 
             if status_upper == "SUCCESS":
-                # 성공 시에도 완료 요약 알림 전송
-                sym = str((result or {}).get("symbol", "?") or "?")
-                mode_str = str((result or {}).get("mode", "?") or "?").upper()
-                decision = str((result or {}).get("decision", "-") or "-")
-                report_id = str((result or {}).get("report_id", "-") or "-")
-                lines = [
-                    "<b>\u2705 Daily Precision \uc644\ub8cc</b>",
-                    f"<code>{sym} {mode_str}</code>",
-                    f"Decision: <b>{decision}</b> | report_id: <code>{report_id}</code>",
-                    f"Started: <code>{started_at[:16].replace('T', ' ') if started_at else 'N/A'} UTC</code>",
-                ]
+                # 성공 시에는 node_generate_report에서 이미 분석 리포트를 전송했으므로 추가 알림 불필요
+                return
             else:
                 lines = [
                     "<b>\u26a0\ufe0f Daily Precision Partial Failure</b>",

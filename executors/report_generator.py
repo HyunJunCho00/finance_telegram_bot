@@ -540,6 +540,188 @@ class ReportGenerator:
 
         return "\n".join(lines)
 
+    def format_full_message(self, report: Dict, mode: TradingMode = TradingMode.SWING) -> str:
+        """AI 판단 근거 중심 전체 분석 메시지. 4000자 초과 시 _chunk_text_for_telegram으로 분할 발송."""
+        decision = self._load_json_field(report.get("final_decision"), {})
+        reasoning = decision.get("reasoning", {}) if isinstance(decision, dict) else {}
+        gate_assessment = decision.get("gate_assessment", {}) if isinstance(decision, dict) else {}
+        onchain_context = str(report.get("onchain_context", "") or "").strip()
+        symbol = report.get("symbol", "?")
+
+        direction = str(decision.get("decision", "N/A") or "N/A").upper()
+        confidence = decision.get("confidence", decision.get("win_probability_pct", 0))
+
+        if direction == "LONG":
+            header_icon, color_theme = "", "🟢 강세 (LONG)"
+        elif direction == "SHORT":
+            header_icon, color_theme = "🔻", "🔴 약세 (SHORT)"
+        else:
+            header_icon, color_theme = "⚖️", "⚪ 관망 (HOLD)"
+
+        mode_label = "SWING (스윙)" if mode == TradingMode.SWING else "POSITION (포지션)"
+        is_actionable = direction in ("LONG", "SHORT")
+
+        # EV 계산 (Judge가 이미 출력한 수치)
+        try:
+            win_prob = float(decision.get("win_probability_pct") or confidence or 0) / 100.0
+            profit_pct = float(decision.get("expected_profit_pct") or 0)
+            loss_pct = float(decision.get("expected_loss_pct") or 0)
+            ev = (win_prob * profit_pct) - ((1.0 - win_prob) * loss_pct) if (profit_pct or loss_pct) else None
+        except Exception:
+            ev = None
+
+        ev_str = f"EV: <code>{ev:+.2f}%</code>  " if ev is not None else ""
+        rr_str = ""
+        if loss_pct and loss_pct > 0:
+            rr_val = profit_pct / loss_pct
+            rr_str = f"RR: <code>{rr_val:.2f}</code>  "
+
+        lines = [
+            f"{header_icon} <b>[ {mode_label} ] AI 분석 리포트 | {self._escape_html(symbol)}</b>",
+            f"🕒 <code>{report['timestamp'][:16].replace('T', ' ')} UTC</code>",
+            f"🎯 <b>최종 결정: {color_theme}</b>  확신도: <code>{confidence}%</code>  {ev_str}{rr_str}".rstrip(),
+            "",
+        ]
+
+        # ── 1. Judge 핵심 판단 (주) ─────────────────────────────────────
+        final_logic = ""
+        if isinstance(reasoning, dict):
+            final_logic = str(reasoning.get("final_logic", "") or "").strip()
+        elif reasoning:
+            final_logic = str(reasoning).strip()
+
+        if final_logic:
+            safe = self._escape_html(final_logic).replace(". ", ".\n")
+            lines.append(f"<b>📋 Judge 종합 판단</b>\n{safe}\n")
+
+        # ── 2. Gate Assessment ──────────────────────────────────────────
+        if isinstance(gate_assessment, dict) and gate_assessment:
+            gate_parts = []
+            win_ok = gate_assessment.get("win_prob_ok")
+            rr_ok = gate_assessment.get("rr_ok")
+            ev_ok = gate_assessment.get("ev_ok")
+            self_passed = gate_assessment.get("self_passed")
+            gate_reason = str(gate_assessment.get("reasoning", "") or "").strip()
+
+            status_icon = "✅" if self_passed else "⚠️"
+            checks = []
+            if win_ok is not None:
+                checks.append(f"WinProb {'✅' if win_ok else '❌'}")
+            if rr_ok is not None:
+                checks.append(f"R/R {'✅' if rr_ok else '❌'}")
+            if ev_ok is not None:
+                checks.append(f"EV {'✅' if ev_ok else '❌'}")
+            if checks:
+                gate_parts.append(f"{status_icon} {' | '.join(checks)}")
+            if gate_reason:
+                gate_parts.append(self._escape_html(gate_reason).replace(". ", ".\n"))
+            if gate_parts:
+                lines.append("<b>🎯 Gate Assessment</b>")
+                lines.extend(gate_parts)
+                lines.append("")
+
+        # ── 3. 반대 시나리오 ────────────────────────────────────────────
+        counter = ""
+        if isinstance(reasoning, dict):
+            counter = str(reasoning.get("counter_scenario", "") or "").strip()
+        if counter and counter != "N/A":
+            safe = self._escape_html(counter).replace(". ", ".\n")
+            lines.append(f"<b>🚨 반대 시나리오</b>\n{safe}\n")
+
+        # ── 4. 온체인 요약 ──────────────────────────────────────────────
+        onchain_val = reasoning.get("onchain", "") if isinstance(reasoning, dict) else ""
+        if not onchain_val or onchain_val == "N/A":
+            onchain_val = self._extract_onchain_summary(onchain_context)
+        if onchain_val and onchain_val != "N/A":
+            safe = self._escape_html(str(onchain_val)).replace(". ", ".\n")
+            lines.append(f"<b>🔗 온체인 요약</b>\n{safe}\n")
+
+        # ── 5. VETO/HOLD 이유 ───────────────────────────────────────────
+        if not is_actionable:
+            policy_raw = self._load_json_field(decision.get("policy_checks"), {})
+            policy_status = str((policy_raw or {}).get("status", "")).upper() if isinstance(policy_raw, dict) else ""
+            if policy_status in ("VETO", "NO_TRADE"):
+                veto_reason = self._veto_summary(decision)
+                lines.append(f"<b>⛔ 보류 이유</b>\n<i>{self._escape_html(veto_reason)}</i>\n")
+
+        # ── 6. 진입 설정 (보조) ─────────────────────────────────────────
+        lines.append("─" * 20)
+        entry_line = (
+            f"🔵 진입: <code>{self._fmt_price(decision.get('entry_price')) if is_actionable else '---'}</code>  "
+            f"🛑 손절: <code>{self._fmt_price(decision.get('stop_loss')) if is_actionable else '---'}</code>  "
+            f"🏁 목표: <code>{self._fmt_price(decision.get('take_profit')) if is_actionable else '---'}</code>"
+        )
+        lines.append(entry_line)
+
+        policy = self._load_json_field(decision.get("policy_checks"), {}) if isinstance(decision, dict) else {}
+        if isinstance(policy, dict) and policy:
+            lines.append(
+                f"Policy: <code>{self._escape_html(policy.get('status', 'N/A'))}</code> | "
+                f"RR: <code>{self._fmt_num(policy.get('rr'), 2)}</code> | "
+                f"Stop: <code>{self._escape_html(policy.get('stop_basis', 'N/A'))}</code>"
+            )
+            flow_signals = policy.get("flow_signals", []) or []
+            if flow_signals:
+                lines.append(f"Flow: <code>{self._escape_html(', '.join(flow_signals[:2]))}</code>")
+
+        # ── 7. 시나리오 플랜 ─────────────────────────────────────────────
+        scenario_plan = self._load_json_field(decision.get("scenario_plan"), {}) if isinstance(decision, dict) else {}
+        if is_actionable and isinstance(scenario_plan, dict) and any(str(v or "").strip() for v in scenario_plan.values()):
+            lines.append("\n<b>📌 시나리오 플랜</b>")
+            for key, label in [
+                ("primary_scenario", "Primary"),
+                ("alternate_scenario", "Alternate"),
+                ("trigger_to_enter", "진입 트리거"),
+                ("trigger_to_abort", "중단 조건"),
+                ("partial_tp_plan", "분할 익절"),
+                ("stop_to_be_rule", "본절 이동"),
+            ]:
+                value = str(scenario_plan.get(key) or "").strip()
+                if value:
+                    lines.append(f"  · <b>{label}:</b> <i>{self._escape_html(value)}</i>")
+            lines.append("")
+
+        scenario_summary = self._load_json_field(decision.get("scenario_plan_summary"), {}) if isinstance(decision, dict) else {}
+        if is_actionable and isinstance(scenario_summary, dict) and scenario_summary:
+            lines.append(
+                "Setup: "
+                f"<code>{self._fmt_price(scenario_summary.get('entry_zone_low'))}</code> ~ "
+                f"<code>{self._fmt_price(scenario_summary.get('entry_zone_high'))}</code> | "
+                f"Inv <code>{self._fmt_price(scenario_summary.get('invalidation'))}</code> | "
+                f"TP1 <code>{self._fmt_price(scenario_summary.get('tp1'))}</code>"
+            )
+
+        # ── 8. 분할 진입 / BE Rule ───────────────────────────────────────
+        split_entry_plan = decision.get("split_entry_plan", []) if isinstance(decision, dict) else []
+        if is_actionable and isinstance(split_entry_plan, list) and split_entry_plan:
+            split_text = ", ".join(self._fmt_price(v) for v in split_entry_plan[:3])
+            lines.append(f"Scale-ins: <code>{self._escape_html(split_text)}</code>")
+
+        if is_actionable and decision.get("breakeven_rule"):
+            lines.append(f"BE Rule: <i>{self._escape_html(self._compact_text(decision.get('breakeven_rule'), 150))}</i>")
+
+        if decision.get("risk_manager_note"):
+            lines.append(f"<b>CRO Note:</b> <i>{self._escape_html(decision.get('risk_manager_note'))}</i>")
+
+        # ── 9. Judge 핵심 근거 목록 (key_factors) ───────────────────────
+        key_factors = decision.get("key_factors", []) if isinstance(decision, dict) else []
+        if isinstance(key_factors, list) and key_factors:
+            meaningful = [f for f in key_factors if str(f or "").strip() and str(f).strip() != "N/A"]
+            if meaningful:
+                lines.append("\n<b>📌 핵심 근거</b>")
+                for f in meaningful[:6]:
+                    lines.append(f"  · {self._escape_html(str(f).strip())}")
+
+        # ── 11. 실행 완료 ─────────────────────────────────────────────────
+        receipt = decision.get("execution_receipt")
+        receipt = receipt if self._should_render_execution_receipt(decision, receipt) else None
+        if receipt and receipt.get("success"):
+            lines.append(f"✅ <b>자동매매 실행 완료</b> ({len(receipt.get('receipts', []))} orders)")
+        elif receipt:
+            lines.append(f"⚠️ <b>실행 보류:</b> {receipt.get('note', 'PENDING')}")
+
+        return "\n".join(lines)
+
     def format_onchain_message(self, symbol: str, snapshot: Optional[Dict]) -> str:
         if not snapshot:
             return f"<b>ON-CHAIN SNAPSHOT | {self._escape_html(symbol)}</b>\n<i>No snapshot available.</i>"
@@ -550,7 +732,7 @@ class ReportGenerator:
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         if report_id in (None, ""):
             return None
-        keyboard = [[InlineKeyboardButton("🔍 View Deep Analysis", callback_data=f"detail_{report_id}")]]
+        keyboard = [[InlineKeyboardButton("🔗 온체인 상세", callback_data=f"onchain_{report_id}")]]
         return InlineKeyboardMarkup(keyboard)
 
     @staticmethod
@@ -589,7 +771,7 @@ class ReportGenerator:
         mode: TradingMode,
         notification_context: str,
     ) -> Dict[str, Any]:
-        summary_text = self._sanitize_html_for_telegram(self.format_summary_message(report, mode))
+        summary_text = self._sanitize_html_for_telegram(self.format_full_message(report, mode))
         report_id = report.get("id")  # always use Supabase primary key so callback lookup matches
         payload: Dict[str, Any] = {
             "context": notification_context,
