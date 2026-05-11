@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import threading
 import time
 from collections import defaultdict
@@ -315,25 +316,68 @@ class WebSocketCollector:
             except Exception as e:
                 logger.error(f"WS flush error: {e}")
 
+    @staticmethod
+    def _apply_tcp_keepalive(ws) -> None:
+        """OS 레벨 TCP Keepalive 설정. app-level ping과 독립적으로 동작하는 2차 방어선."""
+        try:
+            sock = ws.transport.get_extra_info("socket")
+            if sock is None:
+                return
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)   # 10초 idle 후 첫 probe
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)   # probe 간격 5초
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)     # 3회 무응답 → 연결 사망
+        except Exception as e:
+            logger.debug(f"[WS] TCP keepalive 설정 실패 (무시): {e}")
+
+    async def _backfill_missed_liquidations(self, gap_start: float) -> None:
+        """재연결 후 REST로 누락 구간 청산 데이터 복구.
+        !forceOrder@arr 스트림은 시장 전체 청산이라 공개 REST 엔드포인트가 없음.
+        Binance aggTrades 기반 대안: cvd_data 버퍼는 1분 유실 허용 설계이므로 스킵.
+        청산 버퍼는 gap 구간 데이터를 0으로 기록하는 대신 경고 로그만 남김.
+        """
+        gap_secs = time.time() - gap_start
+        if gap_secs < 3:
+            return
+        logger.warning(
+            f"[WS Backfill] 청산 스트림 {gap_secs:.0f}s 공백 발생. "
+            f"시장 전체 청산은 공개 REST 히스토리 없음 — 해당 구간 버퍼 공백으로 처리."
+        )
+
     async def _connect_and_listen(self):
         """Main WebSocket connection loop with reconnect."""
         url = self._build_ws_url()
+        backoff = 5.0
+        _disconnect_at: float = 0.0
 
         while self._running:
             try:
                 logger.info(f"WebSocket connecting to {len(SYMBOLS)} streams + liquidation...")
                 async with websockets.connect(
                     url,
-                    ping_interval=None,  # 바이낸스 서버가 보내는 Ping에만 응답하도록 변경 (클라이언트 핑 끄기)
-                    ping_timeout=None,
+                    ping_interval=20,   # 20초마다 ping → soft failure (NAT 타임아웃 등) 감지
+                    ping_timeout=10,    # 10초 내 pong 없으면 ConnectionClosedError
                     close_timeout=5,
                     max_size=2**20,
                 ) as ws:
+                    self._apply_tcp_keepalive(ws)  # OS 레벨 keepalive 추가
+
+                    if _disconnect_at > 0:
+                        await self._backfill_missed_liquidations(_disconnect_at)
+                        _disconnect_at = 0.0
+
                     logger.info("WebSocket connected successfully")
                     self._last_message_time = time.time()
+                    _connected_at = time.time()
+                    backoff = 5.0
                     msg_count = 0
+
                     async for message in ws:
                         if not self._running:
+                            break
+                        # Binance 24h TTL 강제 종료 전에 23h에서 proactive reconnect
+                        if time.time() - _connected_at > 23 * 3600:
+                            logger.info("[WS] 23h 경과 — Binance 24h TTL 전 proactive reconnect")
                             break
                         msg_count += 1
                         if msg_count == 1:
@@ -342,31 +386,51 @@ class WebSocketCollector:
                         await self._handle_message(message)
 
             except asyncio.CancelledError:
-                # 태스크 취소 시 루프 유지 — 재연결 시도
                 logger.warning("WebSocket task cancelled, retrying in 5s...")
+                _disconnect_at = time.time()
                 try:
                     await asyncio.sleep(5)
                 except asyncio.CancelledError:
                     break  # 진짜 종료 신호
             except websockets.ConnectionClosedError as e:
-                logger.warning(f"WebSocket connection closed: {e}. Reconnecting in 5s...")
+                logger.warning(f"WebSocket connection closed: {e}. Reconnecting in {backoff:.0f}s...")
+                _disconnect_at = time.time()
                 try:
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(backoff)
                 except asyncio.CancelledError:
                     break
+                backoff = min(backoff * 2, 60.0)
             except Exception as e:
-                logger.error(f"WebSocket error: {e}. Reconnecting in 10s...")
+                logger.error(f"WebSocket error: {e}. Reconnecting in {backoff:.0f}s...")
+                _disconnect_at = time.time()
                 try:
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(backoff)
                 except asyncio.CancelledError:
                     break
+                backoff = min(backoff * 2, 60.0)
+
+    async def _message_watchdog(self):
+        """Soft failure 감지: 메시지가 60초 이상 없으면 연결 강제 종료 → 재연결 트리거."""
+        await asyncio.sleep(60)  # 최초 연결 안정화 유예
+        while self._running:
+            await asyncio.sleep(15)
+            if self._last_message_time == 0.0:
+                continue
+            silent = time.time() - self._last_message_time
+            if silent > 60:
+                logger.warning(f"[WS Watchdog] No message for {silent:.0f}s — forcing reconnect")
+                for task in list(getattr(self, '_tasks', [])):
+                    if not task.done():
+                        task.cancel()
+                return
 
     async def _run_async(self):
-        """Run both the listener and the flusher concurrently."""
+        """Run listener, flusher, and watchdog concurrently."""
         self._running = True
         tasks = [
             asyncio.ensure_future(self._connect_and_listen()),
             asyncio.ensure_future(self._flush_to_db()),
+            asyncio.ensure_future(self._message_watchdog()),
         ]
         self._tasks = tasks
         try:
@@ -383,16 +447,25 @@ class WebSocketCollector:
             return
 
         def _run():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            self._loop = loop
-            try:
-                loop.run_until_complete(self._run_async())
-            except Exception as e:
-                logger.error(f"WebSocket background thread error: {e}")
-            finally:
-                self._loop = None
-                loop.close()
+            backoff = 5.0
+            while self._running:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self._loop = loop
+                try:
+                    loop.run_until_complete(self._run_async())
+                    backoff = 5.0  # 정상 종료 시 백오프 리셋
+                except Exception as e:
+                    logger.error(f"WebSocket event loop crashed: {e}. Restarting in {backoff:.0f}s...")
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 60.0)
+                finally:
+                    self._loop = None
+                    try:
+                        loop.close()
+                    except Exception:
+                        pass
+            logger.info("WebSocket collector thread exiting (running=False)")
 
         self._running = True
         self._started_at = time.time()

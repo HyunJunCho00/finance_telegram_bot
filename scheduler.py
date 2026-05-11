@@ -875,19 +875,19 @@ def main():
     try:
         import time
         while True:
-            time.sleep(60)
+            time.sleep(30)
             # Optional: restart bot thread if it dies (only if not disabled)
             if os.environ.get("DISABLE_TELEGRAM_BOT") != "true":
                 if not bot_thread.is_alive():
-                    logger.warning("Telegram bot thread died  - restarting in 30s...")
-                    time.sleep(30)
+                    logger.warning("Telegram bot thread died — restarting in 5s...")
+                    time.sleep(5)
                     bot_thread = threading.Thread(target=_run_telegram_bot, name="telegram-bot", daemon=True)
                     bot_thread.start()
 
             if os.environ.get("DISABLE_TELEGRAM_LISTENER") != "true":
                 if not listener_thread.is_alive():
-                    logger.warning("Telegram listener thread died  - restarting in 30s...")
-                    time.sleep(30)
+                    logger.warning("Telegram listener thread died — restarting in 5s...")
+                    time.sleep(5)
                     listener_thread = threading.Thread(target=_run_telegram_listener, name="telegram-listener", daemon=True)
                     listener_thread.start()
     except (KeyboardInterrupt, SystemExit):

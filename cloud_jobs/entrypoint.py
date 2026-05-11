@@ -188,7 +188,7 @@ try:
             try:
                 orchestrator.refresh_snapshot_with_mode(
                     symbol, TradingMode.SWING,
-                    allow_perplexity=True,
+                    allow_perplexity=False,  # 내러티브는 daily_precision 전용 (30분 주기 스냅샷에서 호출 금지)
                     include_meta=False,
                     include_vlm=False,
                 )

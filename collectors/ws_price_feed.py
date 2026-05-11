@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import threading
 import time
 from typing import Dict, List, Optional
@@ -150,6 +151,15 @@ class WsPriceFeed:
             ping_timeout=10,
             close_timeout=5,
         ) as ws:
+            try:
+                sock = ws.transport.get_extra_info("socket")
+                if sock:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 10)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 5)
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3)
+            except Exception:
+                pass
             logger.info(f"[WsPriceFeed] Connected ({len(streams)} streams)")
             async for raw in ws:
                 if not self._running:

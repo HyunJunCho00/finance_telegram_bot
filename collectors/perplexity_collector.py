@@ -24,6 +24,13 @@ import os
 class PerplexityCollector:
     BASE_URL = "https://api.perplexity.ai/chat/completions"
 
+    # 심볼당 하루 최대 API 호출 횟수 (하드 제한)
+    MAX_CALLS_PER_DAY = 2
+
+    # 인메모리 일일 캐시: Supabase가 죽어도 같은 UTC 날짜에 중복 API 호출 방지
+    # { symbol: {"date": date, "result": dict} }
+    _mem_cache: dict = {}
+
     # Full symbol → coin name mapping (not just BTC/ETH)
     COIN_NAME_MAP = {
         "BTC": "Bitcoin", "ETH": "Ethereum", "SOL": "Solana",
@@ -609,21 +616,33 @@ class PerplexityCollector:
             return result
 
         coin_name, base = self._get_coin_name(symbol)
+        today = datetime.now(timezone.utc).date()
 
-        # Hard daily cache guard: at most one Perplexity API call per symbol per UTC day.
+        # 1차 캐시: 인메모리 (Supabase 무관 — 프로세스 수명 동안 유효)
+        mem = PerplexityCollector._mem_cache.get(symbol)
+        if mem and mem.get("date") == today:
+            logger.info(f"Perplexity [{symbol}]: in-memory cache hit — skipping API call")
+            return mem["result"]
+
+        # 2차 캐시: Supabase (프로세스 재시작 후 복구용)
         try:
             last_n = db.get_latest_narrative_data(symbol)
             if last_n:
                 last_ts = datetime.fromisoformat(last_n['timestamp'].replace('Z', '+00:00'))
-                if last_ts.date() == datetime.now(timezone.utc).date():
+                if last_ts.date() == today:
                     logger.info(f"Perplexity [{symbol}]: already fetched today (UTC), using cached narrative.")
                     cached_result = last_n.get('raw_payload', {})
                     if not cached_result:
                         cached_result = self._empty_result(symbol)
                         cached_result.update(last_n)
+                    PerplexityCollector._mem_cache[symbol] = {"date": today, "result": cached_result}
                     return cached_result
         except Exception as e:
-            logger.warning(f"Narrative cache check failed: {e}")
+            logger.warning(f"Narrative cache check failed (Supabase): {e}")
+
+        # 하드 일일 한도 체크 — 캐시 레이어 모두 통과한 경우에만 도달
+        if not self._acquire_daily_slot(symbol):
+            return self._empty_result(symbol)
 
         # Emergency uses cheaper target model; normal run uses narrative model.
         use_model = settings.PERPLEXITY_MODEL_TARGETED if is_emergency else settings.PERPLEXITY_MODEL_NARRATIVE
@@ -637,6 +656,7 @@ class PerplexityCollector:
             if citations:
                 result["sources"] = citations[:5]
             self.persist_narrative(result, symbol)
+            PerplexityCollector._mem_cache[symbol] = {"date": today, "result": result}
             logger.info(
                 f"Perplexity narrative [{coin_name}]: "
                 f"sentiment={result.get('sentiment', '?')} (unified)"
@@ -926,6 +946,35 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
             "position_view": {},
         }
         return self._normalize_narrative_result(empty, symbol, status="unavailable")
+
+    def _acquire_daily_slot(self, symbol: str) -> bool:
+        """파일 기반 하드 일일 카운터. Supabase·인메모리 무관하게 MAX_CALLS_PER_DAY 절대 제한.
+
+        Returns True(호출 허용) / False(한도 초과 차단).
+        파일 I/O 오류 시 fail-open (허용) — 단, 로그 남김.
+        """
+        from pathlib import Path
+        today = datetime.now(timezone.utc).date().isoformat()
+        path = Path("cache/perplexity_daily.json")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data: dict = json.loads(path.read_text()) if path.exists() else {}
+            # 오늘 날짜 키만 유지 (묵은 키 자동 정리)
+            data = {k: v for k, v in data.items() if k.endswith(today)}
+            key = f"{symbol}_{today}"
+            count = int(data.get(key, 0))
+            if count >= self.MAX_CALLS_PER_DAY:
+                logger.warning(
+                    f"[Perplexity] HARD LIMIT BLOCKED: {symbol} already {count}/{self.MAX_CALLS_PER_DAY} calls today"
+                )
+                return False
+            data[key] = count + 1
+            path.write_text(json.dumps(data))
+            logger.info(f"[Perplexity] daily slot acquired: {symbol} {count + 1}/{self.MAX_CALLS_PER_DAY}")
+            return True
+        except Exception as e:
+            logger.warning(f"[Perplexity] daily slot file error ({e}) — fail-open")
+            return True  # 파일 오류는 차단 안 함 (Supabase 캐시가 백업)
 
     def persist_narrative(self, narrative: Dict, symbol: str) -> None:
         """Persist narrative result into PostgreSQL for 4-hour report traceability."""

@@ -388,7 +388,11 @@ def node_collect_data(state: AnalysisState) -> dict:
         gap_limit = min(gap_minutes, settings.SWING_CANDLE_LIMIT)  # 상한: 43,200 (30일)
 
         logger.info(f"Supabase gap fill: {gap_minutes:,}min gap → fetching up to {gap_limit:,} rows")
-        df_recent = db.get_market_data_gap(symbol, since=last_cached_ts, limit=gap_limit)
+        try:
+            df_recent = db.get_market_data_gap(symbol, since=last_cached_ts, limit=gap_limit)
+        except Exception as e:
+            logger.warning(f"Supabase gap fill failed ({e}) — proceeding with GCS cache only")
+            df_recent = pd.DataFrame()
 
         if not df_recent.empty:
             df = pd.concat([df_cached, df_recent], ignore_index=True)
@@ -533,17 +537,28 @@ def node_context_gathering(state: AnalysisState) -> dict:
 
     def fetch_db_contexts():
         db_updates = {}
-        # 3. Funding Context
+        # 3. Funding Context — Supabase 우선, 실패 시 GCS parquet fallback
+        raw_funding = {}
         try:
             res = db.client.table("funding_data").select("*").eq("symbol", symbol).order("timestamp", desc=True).limit(1).execute()
             raw_funding = res.data[0] if res.data else {}
+        except Exception as e:
+            logger.warning(f"Funding Supabase failed ({e}) — trying GCS fallback")
+            try:
+                fdf = gcs_parquet_store.get_funding_history_parquet(symbol, limit=1)
+                if fdf is not None and not fdf.empty:
+                    raw_funding = fdf.iloc[-1].to_dict()
+            except Exception as ge:
+                logger.warning(f"Funding GCS fallback also failed: {ge}")
+        try:
             funding_data = math_engine.analyze_funding_context(raw_funding) if raw_funding else {}
             if raw_funding:
-                for k in ['oi_binance', 'oi_bybit', 'oi_okx']: funding_data[k] = raw_funding.get(k, 0)
+                for k in ['oi_binance', 'oi_bybit', 'oi_okx']:
+                    funding_data[k] = raw_funding.get(k, 0)
             db_updates["funding_context"] = json.dumps(funding_data, default=str) if funding_data else "No funding data."
             db_updates["raw_funding"] = raw_funding
         except Exception as e:
-            logger.error(f"Funding context error: {e}")
+            logger.error(f"Funding context processing error: {e}")
 
         # 4. OI Divergence + MFI Summary (appended to funding_context)
         try:
@@ -565,10 +580,9 @@ def node_context_gathering(state: AnalysisState) -> dict:
         except Exception as e:
             logger.error(f"OI divergence/MFI error: {e}")
 
-        # 5. Liquidation Context
+        # 5. Liquidation Context (캐시에서 읽기 — pre-fetch로 이미 로드됨)
         try:
-            liq_df = db.get_liquidation_data(symbol, limit=2880)  # 2일치 (egress 절감: data_lookback_hours*60=262800→2880)
-            _liq_cache[cache_key] = liq_df  # Cache for chart generation
+            liq_df = _liq_cache.get(cache_key, pd.DataFrame())
             if not liq_df.empty:
                 t_long, t_short = float(liq_df['long_liq_usd'].sum()), float(liq_df['short_liq_usd'].sum())
                 db_updates["liquidation_context"] = f"[LIQUIDATION] Total=${t_long+t_short:,.0f} (Long=${t_long:,.0f}, Short=${t_short:,.0f})"
@@ -686,13 +700,9 @@ def node_context_gathering(state: AnalysisState) -> dict:
             except Exception:
                 return None
 
-        # 단계 1. Liquidation 7-day hourly stats 수집
+        # 단계 1. Liquidation 7-day hourly stats (캐시에서 읽기 — pre-fetch로 이미 로드됨)
         try:
-            liq_df_wide = db.get_liquidation_data(
-                symbol,
-                limit=int(getattr(settings, "ORCHESTRATOR_LIQ_STATS_LIMIT", 2880)),
-                columns="timestamp,long_liq_usd,short_liq_usd",
-            )
+            liq_df_wide = _liq_cache.get(cache_key, pd.DataFrame())
             if not liq_df_wide.empty and "timestamp" in liq_df_wide.columns:
                 liq_ts = pd.to_datetime(liq_df_wide["timestamp"], utc=True, errors="coerce")
                 latest_liq_ts = liq_ts.max()
@@ -882,6 +892,15 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 "onchain_context": "On-chain Context: unavailable",
                 "onchain_gate": onchain_signal_engine.build_gate(None),
             }
+
+    # liquidation 1회 pre-fetch → fetch_db_contexts / fetch_stats_context 캐시 공유
+    # (두 함수가 병렬로 실행되면 각자 2880행씩 조회하는 중복 방지)
+    if _liq_cache.get(cache_key) is None:
+        try:
+            _liq_cache[cache_key] = db.get_liquidation_data(symbol, limit=2880)
+        except Exception as e:
+            logger.warning(f"[context_gathering] liquidation pre-fetch failed ({e}) — cache empty")
+            _liq_cache[cache_key] = pd.DataFrame()
 
     # Run network/DB calls in parallel
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -2371,11 +2390,15 @@ def node_paper_order_record(state: AnalysisState) -> dict:
         "regime":                   state.get("market_regime"),
     }
 
-    order_id = db.insert_paper_order(paper_order)
-    if order_id:
-        logger.info(f"[PaperOrder] Created id={order_id} | {state['symbol']} {direction} @ {entry_price:.2f}")
-    else:
-        logger.warning("[PaperOrder] DB insert returned None")
+    try:
+        order_id = db.insert_paper_order(paper_order)
+        if order_id:
+            logger.info(f"[PaperOrder] Created id={order_id} | {state['symbol']} {direction} @ {entry_price:.2f}")
+        else:
+            logger.warning("[PaperOrder] DB insert returned None")
+    except Exception as e:
+        logger.error(f"[PaperOrder] DB insert failed (Supabase unavailable?): {e}")
+        order_id = None
 
     return {"paper_order": paper_order, "paper_order_id": order_id}
 
