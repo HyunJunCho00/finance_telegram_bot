@@ -12,10 +12,8 @@ load_dotenv()
 
 
 class TradingMode(str, Enum):
-    """Swing trading mode — days to 2 weeks, 4h analysis cycle.
-    Weekly/daily structure is loaded as read-only context for big-picture awareness.
-    """
     SWING = "swing"
+    POSITION = "position"
 
 
 class SpotMode(str, Enum):
