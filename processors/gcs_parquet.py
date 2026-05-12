@@ -608,17 +608,25 @@ class GCSParquetStore:
     def write_timeseries_to_local(
         self, prefix: str, symbol: str, df: pd.DataFrame, dedup_cols: List[str]
     ) -> int:
-        """CVD / funding 등 시계열을 오늘 날짜 로컬 캐시 parquet에 merge 기록.
+        """CVD / funding 등 시계열을 오늘 날짜 로컬 캐시 parquet에 merge 기록 후
+        GCS 버킷에도 업로드 → Cloud Run jobs가 load_timeseries()로 읽을 수 있음.
 
-        경로: cache/gcs_parquet/{prefix}_{symbol}_{today}.parquet
-        → load_timeseries(prefix, symbol) 가 동일 파일을 읽음.
+        경로: {prefix}/{symbol}/{YYYY-MM-DD}.parquet
         """
         if df is None or df.empty:
             return 0
         df = df.copy()
         today = datetime.now(timezone.utc).date().isoformat()
         object_path = f"{prefix}/{symbol}/{today}.parquet"
-        return self._merge_to_local_cache(object_path, df, dedup_cols)
+        rows = self._merge_to_local_cache(object_path, df, dedup_cols)
+        if self.enabled and rows > 0:
+            try:
+                cache_path = self._local_cache_path(object_path)
+                if cache_path.exists():
+                    self._upload_parquet_payload(object_path, cache_path.read_bytes())
+            except Exception as e:
+                logger.debug(f"[GCS] write_timeseries upload skipped ({object_path}): {e}")
+        return rows
 
     # ------------------------------------------------------------------
     # Supabase 대체 읽기 API

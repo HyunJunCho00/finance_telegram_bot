@@ -763,18 +763,15 @@ def node_context_gathering(state: AnalysisState) -> dict:
         except Exception as e:
             logger.warning(f"[Stats] liq error: {e}")
 
-        # 단계 2. Microstructure 7-day stats (최소 30개 hourly snapshot)
+        # 단계 2. Microstructure stats (GCS — SWING=48행/2d, POSITION=168행/7d)
         try:
-            rows = (
-                db.client.table("microstructure_data")
-                .select("spread_bps,orderbook_imbalance,timestamp")
-                .eq("symbol", symbol)
-                .order("timestamp", desc=True)
-                .limit(168)
-                .execute()
-            )
-            if rows.data and len(rows.data) >= 30:  # 30개 미만이면 std 불
-                latest_micro_ts = max((r.get("timestamp") for r in rows.data if r.get("timestamp")), default=None)
+            micro_limit = 168 if mode == TradingMode.POSITION else 48
+            micro_df = gcs_parquet_store.load_timeseries("microstructure", symbol, months_back=1)
+            if not micro_df.empty:
+                micro_df["timestamp"] = pd.to_datetime(micro_df["timestamp"], utc=True, errors="coerce")
+                micro_df = micro_df.sort_values("timestamp").tail(micro_limit).reset_index(drop=True)
+            if not micro_df.empty and len(micro_df) >= 30:
+                latest_micro_ts = micro_df["timestamp"].max()
                 micro_age_hours = _age_hours(latest_micro_ts)
                 micro_is_stale = (
                     micro_age_hours is not None
@@ -782,8 +779,8 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 )
                 stats["micro_data_age_hours"] = micro_age_hours
                 stats["micro_data_stale"] = bool(micro_is_stale)
-                imbs    = [abs(float(r.get("orderbook_imbalance") or 0)) for r in rows.data]
-                spreads = [float(r.get("spread_bps") or 0) for r in rows.data]
+                imbs    = micro_df["orderbook_imbalance"].fillna(0).abs().tolist()
+                spreads = micro_df["spread_bps"].fillna(0).tolist()
                 if micro_is_stale:
                     logger.warning(
                         f"[Stats] microstructure data stale age={micro_age_hours:.2f}h "
@@ -794,26 +791,22 @@ def node_context_gathering(state: AnalysisState) -> dict:
                     stats["imbalance_std"]  = float(np.std(imbs))
                     stats["spread_mean"]    = float(np.mean(spreads))
                     stats["spread_std"]     = float(np.std(spreads))
-            elif rows.data:
+            elif not micro_df.empty:
                 logger.warning(
-                    f"[Stats] micro samples={len(rows.data)} < 30 → std 불, static fallback"
+                    f"[Stats] micro samples={len(micro_df)} < 30 → std 불, static fallback"
                 )
         except Exception as e:
             logger.warning(f"[Stats] micro error: {e}")
 
-        # ---- 3. DVOL/PCR 7 day hourly stats ( 7~30 lookback) ----
-        # ------------------ 24h lookback regime ------------------
+        # ---- 3. DVOL/PCR stats (GCS — SWING=72행/3d, POSITION=168행/7d) ----
         try:
-            rows = (
-                db.client.table("deribit_data")
-                .select("dvol,pcr_oi,timestamp")
-                .eq("symbol", currency)
-                .order("timestamp", desc=True)
-                .limit(168)   # 7일치 24h (최 표 lookback)
-                .execute()
-            )
-            if rows.data and len(rows.data) >= 24:  # 최소 1주치 hourly 필요
-                latest_deribit_ts = max((r.get("timestamp") for r in rows.data if r.get("timestamp")), default=None)
+            deribit_limit = 168 if mode == TradingMode.POSITION else 72
+            deribit_df = gcs_parquet_store.load_timeseries("deribit", currency, months_back=1)
+            if not deribit_df.empty:
+                deribit_df["timestamp"] = pd.to_datetime(deribit_df["timestamp"], utc=True, errors="coerce")
+                deribit_df = deribit_df.sort_values("timestamp").tail(deribit_limit).reset_index(drop=True)
+            if not deribit_df.empty and len(deribit_df) >= 24:
+                latest_deribit_ts = deribit_df["timestamp"].max()
                 deribit_age_hours = _age_hours(latest_deribit_ts)
                 deribit_is_stale = (
                     deribit_age_hours is not None
@@ -821,8 +814,8 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 )
                 stats["deribit_data_age_hours"] = deribit_age_hours
                 stats["deribit_data_stale"] = bool(deribit_is_stale)
-                dvols = [float(r["dvol"])   for r in rows.data if r.get("dvol")]
-                pcrs  = [float(r["pcr_oi"]) for r in rows.data if r.get("pcr_oi")]
+                dvols = deribit_df["dvol"].dropna().astype(float).tolist() if "dvol" in deribit_df.columns else []
+                pcrs  = deribit_df["pcr_oi"].dropna().astype(float).tolist() if "pcr_oi" in deribit_df.columns else []
                 if deribit_is_stale:
                     logger.warning(
                         f"[Stats] deribit data stale age={deribit_age_hours:.2f}h "
@@ -868,9 +861,9 @@ def node_context_gathering(state: AnalysisState) -> dict:
                             f"(base={pcr_floor_meta['base_floor']:.4f}, rolling={pcr_floor_meta['rolling_floor']:.4f}) "
                             f"data_ok={_pcr_data_ok} - PCR flat, static fallback"
                         )
-            elif rows.data:
+            elif not deribit_df.empty:
                 logger.warning(
-                    f"[Stats] deribit samples={len(rows.data)} < 24 - static fallback"
+                    f"[Stats] deribit samples={len(deribit_df)} < 24 - static fallback"
                 )
         except Exception as e:
             logger.warning(f"[Stats] dvol error: {e}")
@@ -894,13 +887,22 @@ def node_context_gathering(state: AnalysisState) -> dict:
             }
 
     # liquidation 1회 pre-fetch → fetch_db_contexts / fetch_stats_context 캐시 공유
-    # (두 함수가 병렬로 실행되면 각자 2880행씩 조회하는 중복 방지)
+    # SWING=720(12h) / POSITION=2880(48h) — GCS 우선, Supabase fallback
     if _liq_cache.get(cache_key) is None:
+        liq_limit = 2880 if mode == TradingMode.POSITION else 720
         try:
-            _liq_cache[cache_key] = db.get_liquidation_data(symbol, limit=2880)
-        except Exception as e:
-            logger.warning(f"[context_gathering] liquidation pre-fetch failed ({e}) — cache empty")
-            _liq_cache[cache_key] = pd.DataFrame()
+            liq_df = gcs_parquet_store.load_timeseries("liquidations", symbol, months_back=1)
+            if not liq_df.empty:
+                liq_df["timestamp"] = pd.to_datetime(liq_df["timestamp"], utc=True, errors="coerce")
+                _liq_cache[cache_key] = liq_df.sort_values("timestamp").tail(liq_limit).reset_index(drop=True)
+            else:
+                raise ValueError("GCS liquidation empty")
+        except Exception:
+            try:
+                _liq_cache[cache_key] = db.get_liquidation_data(symbol, limit=liq_limit)
+            except Exception as e:
+                logger.warning(f"[context_gathering] liquidation pre-fetch failed ({e}) — cache empty")
+                _liq_cache[cache_key] = pd.DataFrame()
 
     # Run network/DB calls in parallel
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
@@ -1768,13 +1770,18 @@ def node_generate_chart(state: AnalysisState) -> dict:
             logger.warning(f"CVD data load for chart skipped: {e}")
 
 
-    # Load liquidation data for chart markers
+    # Load liquidation data for chart markers (GCS 우선, Supabase fallback)
     liquidation_df = None
     try:
         liquidation_df = _liq_cache.get(cache_key)
         if liquidation_df is None:
-            liq_limit = 2880  # 2일치 (egress 절감)
-            liquidation_df = db.get_liquidation_data(symbol, limit=liq_limit)
+            liq_limit = 2880 if mode == TradingMode.POSITION else 720
+            liq_df = gcs_parquet_store.load_timeseries("liquidations", symbol, months_back=1)
+            if not liq_df.empty:
+                liq_df["timestamp"] = pd.to_datetime(liq_df["timestamp"], utc=True, errors="coerce")
+                liquidation_df = liq_df.sort_values("timestamp").tail(liq_limit).reset_index(drop=True)
+            else:
+                liquidation_df = db.get_liquidation_data(symbol, limit=liq_limit)
             _liq_cache[cache_key] = liquidation_df
     except Exception:
         pass
@@ -2191,7 +2198,12 @@ def node_risk_manager(state: AnalysisState) -> dict:
     liq_df = _liq_cache.get(cache_key)
     if liq_df is None:
         try:
-            liq_df = db.get_liquidation_data(symbol, limit=60)
+            gcs_liq = gcs_parquet_store.load_timeseries("liquidations", symbol, months_back=1)
+            if not gcs_liq.empty:
+                gcs_liq["timestamp"] = pd.to_datetime(gcs_liq["timestamp"], utc=True, errors="coerce")
+                liq_df = gcs_liq.sort_values("timestamp").tail(60).reset_index(drop=True)
+            else:
+                liq_df = db.get_liquidation_data(symbol, limit=60)
         except Exception:
             liq_df = None
 
