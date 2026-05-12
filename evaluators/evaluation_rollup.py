@@ -315,15 +315,30 @@ class EvaluationRollupService:
             rollup_date = end_date - timedelta(days=offset)
             start_dt, end_dt = _utc_bounds(rollup_date)
 
-            predictions = db.get_evaluation_predictions(start_time=start_dt, end_time=end_dt, limit=10000)
-            db.delete_evaluation_rollups_for_date(rollup_date.isoformat())
+            try:
+                predictions = db.get_evaluation_predictions(start_time=start_dt, end_time=end_dt, limit=10000)
+            except Exception as e:
+                logger.warning(f"[rollup] DB unavailable for {rollup_date}, skipping: {e}")
+                continue
+            try:
+                db.delete_evaluation_rollups_for_date(rollup_date.isoformat())
+            except Exception as e:
+                logger.warning(f"[rollup] delete_rollups failed for {rollup_date}: {e}")
             if not predictions:
                 processed_dates.append(rollup_date.isoformat())
                 continue
 
             prediction_ids = [int(pred["id"]) for pred in predictions if pred.get("id") is not None]
-            outcomes = db.get_evaluation_outcomes(prediction_ids=prediction_ids, limit=20000)
-            component_scores = db.get_evaluation_component_scores(prediction_ids)
+            try:
+                outcomes = db.get_evaluation_outcomes(prediction_ids=prediction_ids, limit=20000)
+            except Exception as e:
+                logger.warning(f"[rollup] get_outcomes failed for {rollup_date}: {e}")
+                outcomes = []
+            try:
+                component_scores = db.get_evaluation_component_scores(prediction_ids)
+            except Exception as e:
+                logger.warning(f"[rollup] get_component_scores failed for {rollup_date}: {e}")
+                component_scores = []
 
             predictions_by_group: Dict[tuple[str, str], List[dict]] = defaultdict(list)
             outcomes_by_group: Dict[tuple[str, str], List[dict]] = defaultdict(list)
@@ -371,8 +386,12 @@ class EvaluationRollupService:
 
             rollup_rows = [row for row in rollup_rows if row]
             if rollup_rows:
-                db.upsert_evaluation_rollups(rollup_rows)
-                total_rows += len(rollup_rows)
+                try:
+                    db.upsert_evaluation_rollups(rollup_rows)
+                except Exception as e:
+                    logger.warning(f"[rollup] upsert failed for {rollup_date}: {e}")
+                else:
+                    total_rows += len(rollup_rows)
 
             processed_dates.append(rollup_date.isoformat())
 

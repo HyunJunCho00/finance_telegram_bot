@@ -276,24 +276,156 @@ def refresh_snapshot_bundle(
     include_meta: bool = True,
     include_vlm: bool = True,
 ) -> None:
+    import executors.orchestrator as orchestrator_module
+
     started = time.perf_counter()
     logger.info(
         f"Refreshing snapshot bundle for {symbol}/{mode.value} "
         f"(perplexity={'on' if allow_perplexity else 'off'}, meta={'on' if include_meta else 'off'}, vlm={'on' if include_vlm else 'off'})"
     )
-    refresh_context_bundle(symbol, mode, allow_perplexity=allow_perplexity, include_meta=include_meta)
-    # chart_bundle은 context_bundle이 이미 meta_agent를 실행해 저장했으므로
-    # include_meta=False로 고정하여 node_meta_agent 이중 호출 방지 (Gemini Pro RPD 절감)
+
+    # Single combined pipeline — node_collect_data / node_context_gathering run only once.
+    # Previously this called refresh_context_bundle then refresh_chart_bundle separately;
+    # each function called _clear_symbol_mode_caches + node_collect_data, loading 265k rows
+    # twice simultaneously and causing OOM in the snapshot_narrative Cloud Run job.
+    state = _base_state(symbol, mode, allow_perplexity, "snapshot_bundle")
+    orchestrator_module._clear_symbol_mode_caches(symbol, mode)
+    _apply_update(state, orchestrator_module.node_collect_data(state))
+    _apply_update(state, orchestrator_module.node_context_gathering(state))
+
+    if include_meta:
+        _apply_update(state, orchestrator_module.node_meta_agent(state))
+    else:
+        state["regime_context"] = {
+            "regime": state.get("market_regime", "RANGE_BOUND"),
+            "rationale": "Meta agent disabled for snapshot prewarm",
+            "trust_directive": "Use cached/deterministic context until precision/trigger analysis runs.",
+            "risk_budget_pct": 50,
+            "risk_bias": "NEUTRAL",
+        }
+
+    market_data = orchestrator_module._market_data_cache.get(orchestrator_module._cache_key(symbol, mode), {}) or {}
+
+    # ── context payloads ─────────────────────────────────────────────────────
+    agent_state_store.upsert_agent_state(
+        symbol,
+        mode.value,
+        "market_snapshot_agent",
+        {
+            "market_data_compact": state.get("market_data_compact", ""),
+            "market_data": market_data,
+            "active_orders": state.get("active_orders", []),
+            "open_positions": state.get("open_positions", ""),
+            "regime_context": state.get("regime_context", {}),
+            "market_regime": state.get("market_regime", "RANGE_BOUND"),
+            "df_size": state.get("df_size", 0),
+        },
+        expires_at=_iso_after(minutes=5),
+        latency_ms=(time.perf_counter() - started) * 1000.0,
+    )
+    narrative_payload = {
+        "narrative_text": state.get("narrative_text", ""),
+        "rag_context": state.get("rag_context", ""),
+        "telegram_news": state.get("telegram_news", ""),
+        "feedback_text": state.get("feedback_text", ""),
+    }
+    agent_state_store.upsert_agent_state(
+        symbol,
+        mode.value,
+        "narrative_agent",
+        narrative_payload,
+        expires_at=_iso_after(minutes=30),
+        latency_ms=(time.perf_counter() - started) * 1000.0,
+    )
+    funding_payload = {
+        "funding_context": state.get("funding_context", ""),
+        "liquidation_context": state.get("liquidation_context", ""),
+        "raw_funding": state.get("raw_funding", {}),
+        "macro_context": state.get("macro_context", ""),
+        "deribit_context": state.get("deribit_context", ""),
+        "fear_greed_context": state.get("fear_greed_context", ""),
+        "microstructure_context": state.get("microstructure_context", ""),
+    }
+    agent_state_store.upsert_agent_state(
+        symbol,
+        mode.value,
+        "funding_liq_agent",
+        funding_payload,
+        expires_at=_iso_after(minutes=5 if mode == TradingMode.SWING else 30),
+        latency_ms=(time.perf_counter() - started) * 1000.0,
+    )
+    onchain_payload = {
+        "onchain_snapshot": state.get("onchain_snapshot", {}),
+        "onchain_context": state.get("onchain_context", ""),
+        "onchain_gate": state.get("onchain_gate", {}),
+    }
+    agent_state_store.upsert_agent_state(
+        symbol,
+        mode.value,
+        "onchain_agent",
+        onchain_payload,
+        expires_at=_iso_after(hours=6),
+        latency_ms=(time.perf_counter() - started) * 1000.0,
+    )
+    performance_telemetry.log_snapshot_refresh(
+        symbol=symbol,
+        mode=mode.value,
+        stage="context_bundle",
+        allow_perplexity=allow_perplexity,
+        latency_ms=(time.perf_counter() - started) * 1000.0,
+        details={
+            "has_narrative": bool(narrative_payload.get("narrative_text")),
+            "has_onchain": bool(onchain_payload.get("onchain_context")),
+            "includes_meta": include_meta,
+        },
+    )
+
+    # ── chart pipeline (reuses state already in memory, no second data load) ─
     try:
-        refresh_chart_bundle(
+        _apply_update(state, orchestrator_module.node_triage(state))
+        _apply_update(state, orchestrator_module.node_generate_chart(state))
+        _apply_update(state, orchestrator_module.node_rule_based_chart(state))
+        if include_vlm:
+            _apply_update(state, orchestrator_module.node_vlm_geometric_expert(state))
+        else:
+            state.setdefault("blackboard", {})["vlm_geometry"] = {
+                "anomaly": "skipped",
+                "directional_bias": "NEUTRAL",
+                "confidence": 0,
+                "rationale": "VLM disabled for snapshot prewarm",
+            }
+        blackboard = state.get("blackboard", {}) or {}
+        chart_payload = {
+            "chart_bytes": state.get("chart_bytes"),
+            "chart_image_b64": state.get("chart_image_b64"),
+            "chart_rules": blackboard.get("chart_rules", {}),
+            "vlm_geometry": blackboard.get("vlm_geometry", {}),
+            "confluence_score": blackboard.get("confluence_score", {}),
+            "vlm_context_text": state.get("vlm_context_text", ""),
+            "market_data": market_data,
+        }
+        agent_state_store.upsert_agent_state(
             symbol,
-            mode,
+            mode.value,
+            "chart_prep_agent",
+            chart_payload,
+            expires_at=_iso_after(minutes=5),
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+        )
+        performance_telemetry.log_snapshot_refresh(
+            symbol=symbol,
+            mode=mode.value,
+            stage="chart_prep_agent",
             allow_perplexity=allow_perplexity,
-            include_meta=False,
-            include_vlm=include_vlm,
+            latency_ms=(time.perf_counter() - started) * 1000.0,
+            details={
+                "has_chart_bytes": bool(chart_payload.get("chart_bytes")),
+                "has_vlm_geometry": bool(chart_payload.get("vlm_geometry")),
+            },
         )
     except Exception as e:
         logger.warning(f"Chart bundle refresh failed for {symbol}/{mode.value}, continuing without chart: {e}")
+
     logger.info(f"Snapshot bundle ready for {symbol}/{mode.value}")
     performance_telemetry.log_snapshot_refresh(
         symbol=symbol,

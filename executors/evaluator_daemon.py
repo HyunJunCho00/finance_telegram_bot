@@ -36,7 +36,11 @@ class EvaluatorDaemon:
         symbols = settings.trading_symbols
 
         for symbol in symbols:
-            report = db.get_latest_report(symbol)
+            try:
+                report = db.get_latest_report(symbol)
+            except Exception as e:
+                logger.warning(f"[evaluation] DB unavailable for {symbol}, skipping: {e}")
+                continue
             if not report:
                 continue
 
