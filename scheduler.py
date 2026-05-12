@@ -800,8 +800,7 @@ def main():
         "hourly_eval=hh:45 | gcs_archive=01:00 | safe_cleanup=01:20 | higher_tf_refresh=02:00"
     )
 
-    # [FIX Cold Start] Run initial data collection immediately so first analysis has data
-    logger.info("Running initial data collection (cold start bootstrap)...")
+    logger.info(f"Running startup bootstrap (ROLE={role})...")
     def _startup_telegram_catchup():
         """Handles initial RAG synthesis for the last 24h.
         Raw collection is handled by the telegram_listener thread's backfill task.
@@ -832,44 +831,51 @@ def main():
         except Exception as e:
             logger.warning(f"Parquet cache bootstrap failed (non-fatal): {e}")
 
-    # Phase 1: independent HTTP collectors — run in parallel
-    _parallel_collectors = [
-        ("Price + Funding + Microstructure", lambda: (collector.run(), funding_collector.run(), microstructure_collector.run())),
-        ("Volatility", lambda: volatility_monitor.run()),
-        ("Deribit", lambda: deribit_collector.run()),
-        ("Fear & Greed", lambda: fear_greed_collector.run()),
-        ("Coin Metrics", lambda: job_daily_coinmetrics()),
-    ]
-    with ThreadPoolExecutor(max_workers=len(_parallel_collectors), thread_name_prefix="boot") as _boot_pool:
-        _boot_futures = {_boot_pool.submit(fn): name for name, fn in _parallel_collectors}
-        for _fut in as_completed(_boot_futures, timeout=120):
-            _name = _boot_futures[_fut]
-            try:
-                _fut.result(timeout=1)
-                logger.info(f"  [OK] {_name} collected")
-            except Exception as e:
-                logger.warning(f"  [WARN] {_name} collection failed (non-fatal): {e}")
+    # Phase 1: data collection bootstrap — data role only
+    if role in ("all", "data"):
+        _parallel_collectors = [
+            ("Price + Funding + Microstructure", lambda: (collector.run(), funding_collector.run(), microstructure_collector.run())),
+            ("Volatility", lambda: volatility_monitor.run()),
+            ("Deribit", lambda: deribit_collector.run()),
+            ("Fear & Greed", lambda: fear_greed_collector.run()),
+            ("Coin Metrics", lambda: job_daily_coinmetrics()),
+        ]
+        with ThreadPoolExecutor(max_workers=len(_parallel_collectors), thread_name_prefix="boot") as _boot_pool:
+            _boot_futures = {_boot_pool.submit(fn): name for name, fn in _parallel_collectors}
+            for _fut in as_completed(_boot_futures, timeout=120):
+                _name = _boot_futures[_fut]
+                try:
+                    _fut.result(timeout=1)
+                    logger.info(f"  [OK] {_name} collected")
+                except Exception as e:
+                    logger.warning(f"  [WARN] {_name} collection failed (non-fatal): {e}")
+    else:
+        logger.info("Phase 1 data collection skipped (ROLE=brain)")
 
-    # Phase 2: sequential — each depends on phase 1 data
-    for name, fn in [
-        ("Parquet cache bootstrap", _bootstrap_missing_parquet_cache),
-        ("Snapshot prewarm", lambda: job_snapshot_refresh_fast()),
-        ("Pressure signal evaluation", lambda: job_pressure_signal_evaluation()),
-    ]:
+    # Phase 2: brain bootstrap — all roles need parquet cache, brain jobs only for brain role
+    _phase2_jobs = [("Parquet cache bootstrap", _bootstrap_missing_parquet_cache)]
+    if role in ("all", "brain"):
+        _phase2_jobs += [
+            ("Snapshot prewarm", lambda: job_snapshot_refresh_fast()),
+            ("Pressure signal evaluation", lambda: job_pressure_signal_evaluation()),
+        ]
+    for name, fn in _phase2_jobs:
         try:
             fn()
             logger.info(f"  [OK] {name}")
         except Exception as e:
             logger.warning(f"  [WARN] {name} failed (non-fatal): {e}")
 
-    # Phase 3: Telegram catch-up has an internal 30s sleep — run in background
-    # so the main thread completes startup immediately
-    threading.Thread(
-        target=_startup_telegram_catchup,
-        name="startup-telegram-catchup",
-        daemon=True,
-    ).start()
-    logger.info("  [OK] Telegram catch-up started in background")
+    # Phase 3: Telegram catch-up — data role only
+    if role in ("all", "data"):
+        threading.Thread(
+            target=_startup_telegram_catchup,
+            name="startup-telegram-catchup",
+            daemon=True,
+        ).start()
+        logger.info("  [OK] Telegram catch-up started in background")
+    else:
+        logger.info("Phase 3 Telegram catch-up skipped (ROLE=brain)")
 
     # Main thread: keep alive + graceful shutdown
     try:

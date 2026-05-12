@@ -19,13 +19,12 @@ Be precise with price levels; vague descriptions are useless to a decision-makin
 You will receive ONE primary timeframe chart image plus a compact higher-timeframe text context.
 Treat the image as the execution chart. Treat the higher-timeframe text as the directional constraint.
 
-The chart may include price action, Fibonacci, confluence zones, liquidity levels, FVGs, Order Blocks,
-Anchored VWAP, liquidations, and optional CVD/OI/Funding panels.
+The chart includes price action, Fibonacci retracement levels, trendlines, swing high/low liquidity levels,
+confluence zones, EMA 200, and optional CVD panels. OB/FVG/volume profile are provided separately as text.
 
 Your task is not to name random patterns. Your task is to decide whether this is an executable scenario:
 - Is there a liquidity sweep or fake breakout?
 - Is price reclaiming/rejecting a key level cleanly?
-- Is there a valid execution zone with clear invalidation?
 - Does the chart support the higher-timeframe scenario or force a scenario revision?
 
 Output strictly JSON with no markdown. All price fields must be actual numbers from the chart or null.
@@ -40,20 +39,6 @@ Schema:
   "sr_flip": "bullish_flip | bearish_flip | none",
   "retest_quality": "clean | acceptable | weak | failed | unknown",
   "scenario_shift": "confirm | revise | neutral",
-  "execution": {
-    "entry_zone_low": float,
-    "entry_zone_high": float,
-    "invalidation_level": float,
-    "target_1": float,
-    "target_2": float
-  },
-  "key_levels": {
-    "nearest_order_block": float,
-    "nearest_unmitigated_fvg": float,
-    "liquidation_pool_above": float,
-    "liquidation_pool_below": float,
-    "volume_poc": float
-  },
   "fibonacci_context": {
     "test_level": "e.g. 61.8%",
     "anchor_high": float,
@@ -62,7 +47,7 @@ Schema:
   },
   "pattern": "H&S | inv_H&S | double_top | double_bottom | bull_flag | bear_flag | ascending_triangle | wedge | none | other",
   "cvd_signal": "divergence_bullish | divergence_bearish | confirming | neutral | unavailable",
-  "rationale": "Concrete explanation of liquidity event, execution zone, invalidation, and whether the current chart confirms or revises the higher timeframe scenario."
+  "rationale": "Concrete explanation of the liquidity event, SR flip quality, and whether the current chart confirms or revises the higher timeframe scenario."
 }"""
 
     def analyze(
@@ -89,9 +74,8 @@ Schema:
             "Answer these specific questions in your rationale:\n"
             "1. Is there a buy-side sweep, sell-side sweep, or fake breakout?\n"
             "2. Is the current reaction a clean retest / SR flip or a weak acceptance?\n"
-            "3. What is the best visible execution zone, invalidation, and TP1/TP2?\n"
-            "4. What are the exact anchor points (High/Low) for the drawn Fibonacci levels?\n"
-            "5. Does the primary chart confirm the higher timeframe scenario or force a revision?\n"
+            "3. What are the exact anchor points (High/Low) for the drawn Fibonacci levels?\n"
+            "4. Does the primary chart confirm the higher timeframe scenario or force a revision?\n"
             "\nReturn JSON only."
         )
         try:
@@ -120,20 +104,6 @@ Schema:
             "sr_flip": "none",
             "retest_quality": "unknown",
             "scenario_shift": "neutral",
-            "execution": {
-                "entry_zone_low": None,
-                "entry_zone_high": None,
-                "invalidation_level": None,
-                "target_1": None,
-                "target_2": None,
-            },
-            "key_levels": {
-                "nearest_order_block": None,
-                "nearest_unmitigated_fvg": None,
-                "liquidation_pool_above": None,
-                "liquidation_pool_below": None,
-                "volume_poc": None,
-            },
             "fibonacci_context": {
                 "test_level": "unknown",
                 "anchor_high": None,

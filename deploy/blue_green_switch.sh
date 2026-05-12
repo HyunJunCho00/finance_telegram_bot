@@ -61,7 +61,7 @@ if [ "$answer" != "${answer#[Yy]}" ] ;then
     docker stop --timeout 60 tgbot-blue-executor
     
     echo "🛑 Stopping Blue Brain..."
-    docker stop tgbot-blue-brain
+    docker stop --timeout 30 tgbot-blue-brain
     
     # 4. 컨테이너 롤체인지 
     # Green 컨테이너를 끄고, Live 세팅을 주입하여 Blue 컨테이너로 리로드

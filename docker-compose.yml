@@ -70,7 +70,7 @@ services:
       - USE_SECRET_MANAGER=true
       - PROJECT_ID=${PROJECT_ID}
       - PAPER_TRADING_MODE=False
-      - SCHEDULER_ROLE=all
+      - SCHEDULER_ROLE=brain
       - DISABLE_TELEGRAM_BOT=true
       - DISABLE_TELEGRAM_LISTENER=true
     restart: always
