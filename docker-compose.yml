@@ -6,6 +6,7 @@ x-bot-service: &bot-service
   image: finance-bot:latest
   volumes:
     - /opt/app/data:/app/data
+    - /opt/app/cache:/app/cache
   environment:
     - PROJECT_ID=${PROJECT_ID}
     - GCE_METADATA_HOST=169.254.169.254

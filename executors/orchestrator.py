@@ -510,9 +510,12 @@ def node_context_gathering(state: AnalysisState) -> dict:
             perp_updates["narrative_text"] = "Market Narrative: Disabled for this analysis path"
             return perp_updates
         try:
-            narrative = perplexity_collector.search_market_narrative(symbol, is_emergency=is_emergency)
+            # 통합 BTC+ETH 1회 호출 → GCS 캐시로 두 심볼 공유
+            unified = perplexity_collector.search_market_narrative_unified()
+            sym_key = "btc" if "BTC" in symbol else "eth"
+            narrative = unified.get(sym_key) or perplexity_collector._empty_result(symbol)
             narrative_text = perplexity_collector.format_for_agents(narrative)
-            logger.info(f"Narrative for {asset}: {narrative.get('sentiment', '?')}")
+            logger.info(f"Narrative for {asset}: {narrative.get('sentiment', '?')} (unified)")
             perp_updates["narrative_text"] = narrative_text
             
             # RAG Ingest
@@ -2879,6 +2882,14 @@ def node_generate_playbook(state) -> dict:
             logger.info(f"Daily Playbook saved: {rec['symbol']}/{rec['mode']}")
         except Exception as db_err:
             logger.warning(f"Playbook DB upsert failed ({rec['symbol']}/{rec['mode']}): {db_err}")
+            # Supabase quota 차단 시 GCS 폴백
+            try:
+                from processors.gcs_parquet import gcs_parquet_store
+                sym, mode_val = rec["symbol"], rec["mode"]
+                gcs_parquet_store.upload_json(f"fallback/daily_playbooks/{sym}_{mode_val}.json", rec)
+                logger.info(f"[GCS Fallback] Playbook saved to GCS: {sym}/{mode_val}")
+            except Exception as gcs_e:
+                logger.error(f"[GCS Fallback] Playbook GCS save failed: {gcs_e}")
     return {}
 
 def build_analysis_graph():

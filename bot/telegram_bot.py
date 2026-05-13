@@ -434,7 +434,7 @@ class TradingBot:
         return pressure if isinstance(pressure, dict) else {}, evaluation
 
     def _build_pressure_evaluation_summary(self, symbol: str, hours: int = 168, limit: int = 300) -> str:
-        rows = db.get_market_status_events(symbol=symbol, limit=limit, hours=hours)
+        rows = db.get_market_status_events_with_fallback(symbol=symbol, limit=limit, hours=hours)
         if not rows:
             return f"<b>{symbol} Pressure Evaluation</b>\n- 최근 {hours}시간 이벤트 없습니다."
 

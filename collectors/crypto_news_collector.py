@@ -11,18 +11,18 @@ from typing import List, Dict, Optional
 from loguru import logger
 from processors.light_rag import light_rag
 
-# 1. A-Tier 이상 고품질 금융/크립토 RSS 피드
+# 공신력 순 정렬: 전통 금융 권위 > 크립토 기관급 > 데이터/리서치 > 커뮤니티
 RSS_FEEDS = {
-    "The Block":        "https://www.theblock.co/rss.xml",
-    "CoinDesk":         "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
-    "Reuters Crypto":   "https://feeds.reuters.com/reuters/technologyNews",
-    "Protos":           "https://protos.com/feed/",
-    "Bitcoin Magazine": "https://bitcoinmagazine.com/.rss/full/",
-    "Blockworks":       "https://blockworks.co/feed",
-    "The Defiant":      "https://thedefiant.io/api/feed",
-    "Decrypt":          "https://decrypt.co/feed",
-    "Messari":          "https://messari.io/rss",
-    "DL News":          "https://www.dlnews.com/rss/",
+    "Reuters Crypto":   "https://feeds.reuters.com/reuters/technologyNews",   # 전통 금융 최고 권위
+    "CoinDesk":         "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",  # 크립토 최고참
+    "The Block":        "https://www.theblock.co/rss.xml",                    # 기관급 크립토
+    "Blockworks":       "https://blockworks.co/feed",                         # 기관 투자자 타겟
+    "Messari":          "https://messari.io/rss",                             # 데이터 기반 리서치
+    "DL News":          "https://www.dlnews.com/rss/",                        # 심층 취재
+    "Decrypt":          "https://decrypt.co/feed",                            # 광범위 커버리지
+    "Bitcoin Magazine": "https://bitcoinmagazine.com/.rss/full/",             # BTC 특화
+    "The Defiant":      "https://thedefiant.io/api/feed",                     # DeFi 특화
+    "Protos":           "https://protos.com/feed/",                           # 비판적 저널리즘
 }
 
 # 2. 분류 키워드
@@ -137,19 +137,23 @@ class CryptoNewsCollector:
         return new_articles
 
     def fetch_news(self, categories: List[str] = None, limit: int = 10, lang: str = "en") -> List[Dict]:
-        """Query recent articles from SQLite, filtered by tag categories. Returns list with link/source/title/description keys."""
+        """Query recent articles from SQLite with per-source cap for diversity."""
         conn = sqlite3.connect(str(self.db_path))
         try:
             rows = conn.execute(
-                "SELECT title, url, source, summary, tags FROM articles ORDER BY published_at DESC LIMIT 200"
+                "SELECT title, url, source, summary, tags FROM articles ORDER BY published_at DESC LIMIT 500"
             ).fetchall()
         finally:
             conn.close()
 
+        MAX_PER_SOURCE = max(2, limit // len(RSS_FEEDS) + 1)
+        source_counts: dict = {}
         results = []
         for title, url, source, summary, tags_json in rows:
             if len(results) >= limit:
                 break
+            if source_counts.get(source, 0) >= MAX_PER_SOURCE:
+                continue
             if categories:
                 try:
                     tags = json.loads(tags_json or "[]")
@@ -158,6 +162,7 @@ class CryptoNewsCollector:
                 if not any(t in categories for t in tags):
                     continue
             results.append({"link": url, "source": source, "title": title, "description": summary or ""})
+            source_counts[source] = source_counts.get(source, 0) + 1
         return results
 
     def fetch_and_ingest(self, categories: List[str] = None):

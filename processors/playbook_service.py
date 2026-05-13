@@ -53,4 +53,25 @@ def get_latest_playbook_snapshot(symbol: str) -> dict:
         return snapshot
     except Exception as e:
         logger.warning(f"Failed to load playbook snapshot for {symbol}: {e}")
+        # GCS 폴백
+        try:
+            from processors.gcs_parquet import gcs_parquet_store
+            snapshot: dict = {}
+            for mode in ("swing", "position"):
+                rec = gcs_parquet_store.download_json(f"fallback/daily_playbooks/{symbol}_{mode}.json")
+                if not rec:
+                    continue
+                playbook = rec.get("playbook", {}) if isinstance(rec.get("playbook", {}), dict) else {}
+                snapshot[mode] = {
+                    "source_decision": str(rec.get("source_decision") or "HOLD").upper(),
+                    "max_allocation_pct": playbook.get("max_allocation_pct"),
+                    "entry_conditions": format_playbook_conditions(playbook.get("entry_conditions", [])),
+                    "invalidation_conditions": format_playbook_conditions(playbook.get("invalidation_conditions", []), limit=1),
+                    "created_at": rec.get("created_at"),
+                }
+            if snapshot:
+                logger.info(f"[GCS Fallback] Playbook loaded from GCS for {symbol}: {list(snapshot)}")
+            return snapshot
+        except Exception as gcs_e:
+            logger.warning(f"[GCS Fallback] Playbook GCS read failed for {symbol}: {gcs_e}")
         return {}

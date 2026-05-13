@@ -609,6 +609,15 @@ class PerplexityCollector:
 
     def search_market_narrative(self, symbol: str = "BTC", is_emergency: bool = False) -> Dict:
         """Daily narrative search (one API call per symbol per UTC day)."""
+        import os
+        _job = os.environ.get("JOB_NAME", "").strip()
+        if _job != "daily_precision":
+            logger.warning(
+                f"[Perplexity] BLOCKED: search_market_narrative은 daily_precision 잡에서만 허용 "
+                f"(현재 JOB_NAME={_job!r})"
+            )
+            return self._empty_result(symbol)
+
         if not self.api_key:
             logger.warning("PERPLEXITY_API_KEY not set, skipping narrative search")
             result = self._empty_result(symbol)
@@ -673,6 +682,308 @@ class PerplexityCollector:
         result = self._empty_result(symbol)
         self.persist_narrative(result, symbol)
         return result
+
+    # ── 통합 BTC+ETH 1회 호출 ──────────────────────────────────────────────────
+    _UNIFIED_GCS_PATH = "fallback/narrative/unified/latest.json"
+    _unified_mem_cache: dict = {}  # {"date": date, "btc": {...}, "eth": {...}}
+
+    def _extract_and_validate_json(self, content: str) -> Optional[Dict]:
+        """LLM 응답에서 JSON 추출 + btc/eth 필드 검증."""
+        if not content:
+            return None
+        text = content.strip()
+
+        # 마크다운 펜스 제거
+        if text.startswith("```"):
+            text = text.split("```")[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.rsplit("```", 1)[0].strip()
+
+        # { } 범위 추출
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start < 0 or end <= start:
+            return None
+
+        try:
+            raw = json.loads(text[start:end])
+        except json.JSONDecodeError:
+            return None
+
+        # 최소 구조 검증
+        if not isinstance(raw, dict):
+            return None
+        if "btc" not in raw or "eth" not in raw:
+            return None
+        for key in ("btc", "eth"):
+            sec = raw.get(key, {})
+            if not isinstance(sec, dict):
+                return None
+            # 필수 필드 기본값 보장
+            sec.setdefault("summary", "")
+            sec.setdefault("sentiment", "neutral")
+            sec.setdefault("reasoning", "")
+            sec.setdefault("macro_context", "")
+            sec.setdefault("policy_supporting_factors", [])
+            sec.setdefault("policy_risks", [])
+            sec.setdefault("invalidation_risks", [])
+            sec.setdefault("scheduled_binary_events", [])
+            sec.setdefault("headline_vs_structural", "")
+            sec.setdefault("swing_view", {"summary": "", "sentiment": "neutral", "scheduled_events": []})
+            # sentiment 값 정규화
+            if sec["sentiment"] not in ("bullish", "bearish", "neutral"):
+                sec["sentiment"] = "neutral"
+            # list 필드 타입 보장
+            for f in ("policy_supporting_factors", "policy_risks", "invalidation_risks",
+                      "scheduled_binary_events"):
+                if not isinstance(sec[f], list):
+                    sec[f] = [str(sec[f])] if sec[f] else []
+
+        return raw
+
+    def _collect_news_context(self, hours: int = 4, max_articles: int = 20) -> str:
+        """최근 RSS 기사 + Telegram 메시지를 텍스트로 수집."""
+        lines = []
+
+        # RSS 기사 (SQLite)
+        try:
+            from collectors.crypto_news_collector import collector as news_collector
+            articles = news_collector.fetch_news(
+                categories=["bitcoin", "ethereum", "macro", "institutional"],
+                limit=max_articles,
+            )
+            if articles:
+                lines.append("=== RECENT NEWS ARTICLES ===")
+                for a in articles:
+                    lines.append(f"[{a['source']}] {a['title']}")
+                    if a.get("description"):
+                        lines.append(f"  {a['description'][:300]}")
+        except Exception as e:
+            logger.debug(f"[Narrative] RSS collect failed: {e}")
+
+        # Telegram 메시지 (GCS parquet)
+        try:
+            from processors.gcs_parquet import gcs_parquet_store
+            msgs = gcs_parquet_store.get_recent_telegram_messages_parquet(hours=hours) or []
+            if msgs:
+                lines.append("\n=== RECENT TELEGRAM SIGNALS ===")
+                for m in msgs[:20]:
+                    ch = m.get("channel", "")
+                    txt = str(m.get("text", ""))[:200]
+                    if txt:
+                        lines.append(f"[{ch}] {txt}")
+        except Exception as e:
+            logger.debug(f"[Narrative] Telegram collect failed: {e}")
+
+        return "\n".join(lines)
+
+    def _build_unified_multi_prompt(self, btc_state: Dict, eth_state: Dict, collected_context: str = "") -> str:
+        """BTC+ETH 동시 분석 프롬프트 — 하루 1회 호출."""
+        now_utc = datetime.now(timezone.utc)
+        date_today = now_utc.strftime("%Y-%m-%d")
+        date_8h_ago = (now_utc - timedelta(hours=8)).strftime("%Y-%m-%d %H:%M")
+        date_7d_ago = (now_utc - timedelta(days=7)).strftime("%Y-%m-%d")
+        date_30d_ago = (now_utc - timedelta(days=30)).strftime("%Y-%m-%d")
+
+        def _state_lines(base: str, state: Dict) -> list:
+            lines = [f"[{base}]"]
+            if state.get("current_price"):
+                ret = f" ({state['return_30d']:+.1f}% 30d)" if state.get("return_30d") is not None else ""
+                lines.append(f"- Price: ${state['current_price']:,.0f}{ret}")
+            if state.get("funding_rate") is not None:
+                lines.append(f"- Funding: {state['funding_rate']:+.4f}% per 8h")
+            if state.get("flow_state"):
+                lines.append(f"- Flow: {state['flow_state']}")
+            return lines
+
+        shared = []
+        if btc_state.get("fear_greed"):
+            shared.append(f"- Fear & Greed: {btc_state['fear_greed']}")
+        if btc_state.get("dgs10") is not None:
+            shared.append(f"- US 10Y yield: {btc_state['dgs10']:.2f}%")
+        if btc_state.get("dxy") is not None:
+            shared.append(f"- DXY: {btc_state['dxy']:.1f}")
+        if btc_state.get("ust_spread") is not None:
+            shared.append(f"- 2s10s spread: {btc_state['ust_spread']:+.2f}%")
+        if btc_state.get("nasdaq") is not None:
+            shared.append(f"- Nasdaq: {btc_state['nasdaq']:,.0f}")
+
+        lines = [
+            f"Today is {date_today} (UTC).",
+            "Analyze BOTH Bitcoin (BTC) and Ethereum (ETH) in ONE response.",
+            "",
+            "Shared macro indicators:",
+        ] + (shared or ["- No macro data available."]) + [
+            "",
+            "Asset-specific indicators:",
+        ] + _state_lines("BTC", btc_state) + _state_lines("ETH", eth_state) + [
+            "",
+            "Search instructions:",
+            "You are an external evidence engine for a deterministic crypto trading policy.",
+            f"1) SWING horizon: last 8 hours to next 7 days (window starts {date_8h_ago} UTC).",
+            f"2) POSITION horizon: structural context from {date_30d_ago} to {date_today}.",
+            f"3) Every factor must include concrete dates. Ignore events earlier than {date_30d_ago}.",
+            "4) Prefer high-authority sources. Avoid speculation and generic sentiment.",
+            "5) Distinguish short-lived headlines from structural regime shifts.",
+            "6) For ETH-specific: Pectra upgrade, staking flows, DeFi TVL, L2 metrics.",
+            "7) For BTC-specific: ETF flows, institutional custody, miner activity, strategic reserve.",
+            "",
+            "OUTPUT FORMAT — CRITICAL:",
+            "- Return ONLY a single JSON object. Zero prose before or after.",
+            "- Do NOT use markdown code fences (no ```json).",
+            "- All string values must be non-empty. Use 'N/A' if unknown.",
+            '- "sentiment" must be exactly one of: "bullish", "bearish", "neutral".',
+            "- All list fields must be JSON arrays (even if empty: []).",
+            "",
+            "EXACT SCHEMA (copy this structure):",
+            '{',
+            '  "btc": {',
+            '    "symbol": "BTC",',
+            '    "summary": "string",',
+            '    "sentiment": "bullish",',
+            '    "reasoning": "string",',
+            '    "macro_context": "string",',
+            '    "policy_supporting_factors": ["YYYY-MM-DD: fact"],',
+            '    "policy_risks": ["YYYY-MM-DD: fact"],',
+            '    "invalidation_risks": ["YYYY-MM-DD: fact"],',
+            '    "scheduled_binary_events": ["YYYY-MM-DD HH:mm: event"],',
+            '    "headline_vs_structural": "structural",',
+            '    "swing_view": {',
+            '      "summary": "string",',
+            '      "sentiment": "bullish",',
+            '      "scheduled_events": ["YYYY-MM-DD HH:mm: event"]',
+            '    }',
+            '  },',
+            '  "eth": {',
+            '    "symbol": "ETH",',
+            '    "summary": "string",',
+            '    "sentiment": "neutral",',
+            '    "reasoning": "string",',
+            '    "macro_context": "string",',
+            '    "policy_supporting_factors": [],',
+            '    "policy_risks": [],',
+            '    "invalidation_risks": [],',
+            '    "scheduled_binary_events": [],',
+            '    "headline_vs_structural": "headline",',
+            '    "swing_view": {',
+            '      "summary": "string",',
+            '      "sentiment": "neutral",',
+            '      "scheduled_events": []',
+            '    }',
+            '  }',
+            '}',
+        ]
+
+        if collected_context:
+            lines = [
+                "The following news and signals have already been collected for you:",
+                "",
+                collected_context,
+                "",
+                "Use the above as your primary source. Use Google Search to fill gaps "
+                "or verify recency of key events.",
+                "",
+            ] + lines
+
+        return "\n".join(lines)
+
+    def search_market_narrative_unified(self) -> Dict:
+        """BTC+ETH 통합 1회 호출 — GCS에 캐시, 당일 재호출 시 캐시 반환.
+
+        Returns: {"btc": narrative_dict, "eth": narrative_dict}
+        """
+        import os
+        _job = os.environ.get("JOB_NAME", "").strip()
+        if _job != "daily_precision":
+            logger.warning(f"[Perplexity Unified] BLOCKED: JOB_NAME={_job!r}")
+            return {"btc": self._empty_result("BTCUSDT"), "eth": self._empty_result("ETHUSDT")}
+
+        today = datetime.now(timezone.utc).date()
+
+        # 인메모리 캐시
+        mem = PerplexityCollector._unified_mem_cache
+        if mem.get("date") == today:
+            logger.info("[Perplexity Unified] in-memory cache hit")
+            return {"btc": mem["btc"], "eth": mem["eth"]}
+
+        # GCS 캐시
+        try:
+            from processors.gcs_parquet import gcs_parquet_store
+            cached = gcs_parquet_store.download_json(self._UNIFIED_GCS_PATH)
+            if cached and cached.get("date") == today.isoformat():
+                logger.info("[Perplexity Unified] GCS cache hit")
+                PerplexityCollector._unified_mem_cache = {
+                    "date": today, "btc": cached["btc"], "eth": cached["eth"]
+                }
+                return {"btc": cached["btc"], "eth": cached["eth"]}
+        except Exception:
+            pass
+
+        # 일일 슬롯 (1회만)
+        if not self._acquire_daily_slot("UNIFIED"):
+            return {"btc": self._empty_result("BTCUSDT"), "eth": self._empty_result("ETHUSDT")}
+
+        btc_state = self._gather_market_state("BTCUSDT")
+        eth_state = self._gather_market_state("ETHUSDT")
+        collected_context = self._collect_news_context()
+        prompt = self._build_unified_multi_prompt(btc_state, eth_state, collected_context)
+        logger.info("[Narrative] Gemini+Grounding으로 BTC+ETH 통합 분석 시작")
+
+        try:
+            from agents.ai_router import ai_client
+            _system = (
+                "You are an external evidence engine for a crypto trading policy system. "
+                "Use the provided news articles and your Google Search access. "
+                "Return ONLY a valid JSON object. No markdown, no prose, no code fences."
+            )
+            content = ai_client.generate_with_grounding(
+                system_prompt=_system,
+                user_message=prompt,
+                max_tokens=2000,
+                temperature=0.1,
+            )
+            if not content:
+                raise ValueError("Empty response")
+
+            raw = self._extract_and_validate_json(content)
+            if not raw:
+                # 1회 재시도 — JSON만 요청
+                logger.warning("[Narrative] JSON 파싱 실패, JSON-only 재시도")
+                retry = ai_client.generate_with_grounding(
+                    system_prompt=_system,
+                    user_message=(
+                        "Return ONLY the JSON object, nothing else:\n\n"
+                        + prompt[-2000:]  # 마지막 2000자(스키마 포함)만 재전송
+                    ),
+                    max_tokens=2000,
+                    temperature=0.0,
+                )
+                raw = self._extract_and_validate_json(retry or "")
+            if not raw:
+                raise ValueError("JSON 파싱 2회 모두 실패")
+
+            btc_result = self._normalize_narrative_result(raw.get("btc", {}), "BTCUSDT")
+            eth_result = self._normalize_narrative_result(raw.get("eth", {}), "ETHUSDT")
+
+            self.persist_narrative(btc_result, "BTCUSDT")
+            self.persist_narrative(eth_result, "ETHUSDT")
+            PerplexityCollector._mem_cache["BTCUSDT"] = {"date": today, "result": btc_result}
+            PerplexityCollector._mem_cache["ETHUSDT"] = {"date": today, "result": eth_result}
+            PerplexityCollector._unified_mem_cache = {"date": today, "btc": btc_result, "eth": eth_result}
+            try:
+                from processors.gcs_parquet import gcs_parquet_store
+                gcs_parquet_store.upload_json(self._UNIFIED_GCS_PATH, {
+                    "date": today.isoformat(), "btc": btc_result, "eth": eth_result
+                })
+            except Exception:
+                pass
+            logger.info(f"[Narrative] 완료 BTC={btc_result.get('sentiment')} ETH={eth_result.get('sentiment')}")
+            return {"btc": btc_result, "eth": eth_result}
+
+        except Exception as e:
+            logger.error(f"[Narrative] Gemini grounding error: {e}")
+            return {"btc": self._empty_result("BTCUSDT"), "eth": self._empty_result("ETHUSDT")}
 
     def _check_tavily_budget(self, daily_limit: int = 33) -> bool:
         """Check if we have remaining daily budget for Tavily.

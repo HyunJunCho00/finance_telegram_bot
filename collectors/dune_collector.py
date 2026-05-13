@@ -109,7 +109,11 @@ class DuneCollector:
         return resolved
 
     def _should_run_now(self, query_cfg: DuneQueryConfig) -> bool:
-        latest = db.get_latest_dune_query_result(query_cfg.query_id)
+        try:
+            latest = db.get_latest_dune_query_result(query_cfg.query_id, columns="collected_at")
+        except Exception as e:
+            logger.error(f"Dune: failed to get latest result for {query_cfg.query_id}: {e}")
+            return False  # If DB fails, skip running to save credits
         if not latest:
             return True
 
@@ -152,7 +156,11 @@ class DuneCollector:
     def _get_last_dune_collection_ts(self) -> datetime | None:
         latest_ts: datetime | None = None
         for cfg in QUERY_CONFIGS:
-            latest = db.get_latest_dune_query_result(cfg.query_id)
+            try:
+                latest = db.get_latest_dune_query_result(cfg.query_id, columns="collected_at")
+            except Exception as e:
+                logger.error(f"Dune: failed to get latest result for {cfg.query_id}: {e}")
+                continue
             if not latest:
                 continue
             collected_at = latest.get("collected_at")
@@ -178,7 +186,11 @@ class DuneCollector:
         today = datetime.now(timezone.utc).date()
         count = 0
         for cfg in QUERY_CONFIGS:
-            latest = db.get_latest_dune_query_result(cfg.query_id)
+            try:
+                latest = db.get_latest_dune_query_result(cfg.query_id, columns="collected_at")
+            except Exception as e:
+                logger.error(f"Dune: failed to get latest result for {cfg.query_id}: {e}")
+                continue
             if not latest:
                 continue
             collected_at = latest.get("collected_at")

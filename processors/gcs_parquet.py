@@ -799,5 +799,35 @@ class GCSParquetStore:
             except Exception as e:
                 logger.error(f"refresh_higher_tf_cache failed for {symbol} {tf}: {e}")
 
+    def upload_json(self, object_path: str, data: dict) -> bool:
+        """GCS에 JSON 블롭 저장. Supabase 폴백용."""
+        if not self.enabled:
+            return False
+        try:
+            import json as _json
+            blob = self.bucket.blob(object_path)
+            blob.upload_from_string(
+                _json.dumps(data, ensure_ascii=False, default=str),
+                content_type="application/json",
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"GCS upload_json failed ({object_path}): {e}")
+            return False
+
+    def download_json(self, object_path: str) -> dict | None:
+        """GCS에서 JSON 블롭 읽기. Supabase 폴백용."""
+        if not self.enabled:
+            return None
+        try:
+            import json as _json
+            blob = self.bucket.blob(object_path)
+            if not blob.exists():
+                return None
+            return _json.loads(blob.download_as_text())
+        except Exception as e:
+            logger.warning(f"GCS download_json failed ({object_path}): {e}")
+            return None
+
 
 gcs_parquet_store = GCSParquetStore()

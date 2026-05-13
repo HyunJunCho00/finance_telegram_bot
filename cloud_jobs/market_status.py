@@ -106,17 +106,32 @@ def _collect_symbol_indicators(symbol: str) -> dict:
             }
     except Exception:
         pass
+    event = {
+        "symbol": symbol,
+        "regime": latest_regime,
+        "price": ind.get("price"),
+        "funding_rate": ind.get("funding_rate"),
+        "volatility": ind.get("volatility"),
+        "technical_snapshot": ind["technical_snapshot"],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = None
     try:
-        db.insert_market_status_event({
-            "symbol": symbol,
-            "regime": latest_regime,
-            "price": ind.get("price"),
-            "funding_rate": ind.get("funding_rate"),
-            "volatility": ind.get("volatility"),
-            "technical_snapshot": ind["technical_snapshot"],
-        })
+        result = db.insert_market_status_event(event)
     except Exception as e:
         logger.warning(f"market_status_events insert skipped for {symbol}: {e}")
+
+    if not result:
+        # CB OPEN 또는 Supabase 장애 → GCS timeseries에 저장
+        try:
+            import pandas as pd
+            df = pd.DataFrame([event])
+            df["created_at"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
+            gcs_parquet_store.write_timeseries_to_local(
+                "market_status_events", symbol, df, ["created_at", "symbol"]
+            )
+        except Exception as gcs_e:
+            logger.warning(f"[GCS Fallback] market_status_events write failed ({symbol}): {gcs_e}")
     return ind
 
 
@@ -337,7 +352,7 @@ def run_market_status() -> None:
 
         ext_raw = news_collector.fetch_news(
             categories=["bitcoin", "ethereum", "macro", "trading", "institutional", "defi"],
-            limit=4,
+            limit=10,
             lang="en",
         ) or []
         seen_links: set[str] = set()

@@ -2072,11 +2072,89 @@ CRITICAL RULES:
             logger.error(f"LightRAG Restoration error: {e}")
 
     def run_triangulation_worker(self, limit: int = 5):
-        """Cross-Domain Triangulation: Verifies CORROBORATED claims via Web Search (Perplexity)."""
-        logger.info(
-            "Truth Engine: web triangulation disabled to prevent external search costs. "
-            f"Skipping candidate verification (limit={limit})."
-        )
+        """Cross-Domain Triangulation: Verifies CORROBORATED claims via Tavily/Serper.
+
+        Perplexity는 triangulation에서 완전 배제 — daily_precision 전용.
+        Tavily(무료 33회/일) → Serper(무료 2,500회) 순으로 사용.
+        """
+        if not hasattr(self.graph, 'get_triangulation_candidates'):
+            return
+
+        candidates = self.graph.get_triangulation_candidates(limit=limit)
+        if not candidates:
+            return
+
+        from collectors.tavily_collector import tavily_collector
+        from collectors.serper_collector import serper_collector
+
+        priority_keywords = {"ETF", "SEC", "FED", "HACK", "LISTING", "APPROVAL", "COURT", "LAWSUIT", "EXPLOIT"}
+        major_coins = {"BTC", "ETH", "SOL", "BNB", "XRP"}
+
+        verified_count = 0
+        logger.info(f"Truth Engine: triangulation 시작 (후보 {len(candidates)}개, limit={limit})")
+
+        for cand in candidates:
+            if cand.get("status") != "CORROBORATED":
+                continue
+
+            source = cand["source"]
+            target = cand["target"]
+            rel_type = cand["rel_type"]
+            desc = cand["description"]
+            combined = (source + target + desc).upper()
+
+            is_high_priority = any(k in combined for k in priority_keywords)
+            is_major = any(c in combined for c in major_coins)
+            search_depth = "advanced" if (is_high_priority or is_major) else "basic"
+
+            entity = f"{source} and {target}"
+            context = f"Relationship: {rel_type} | Claim: {desc}"
+            query = f"{entity} crypto news. {context}"
+
+            result = None
+            # 1차: Tavily
+            try:
+                r = tavily_collector.search_targeted_compat(entity, context, search_depth=search_depth)
+                if r.get("status") == "ok":
+                    result = r
+            except Exception as e:
+                logger.debug(f"Truth Engine: Tavily 실패 [{entity}]: {e}")
+
+            # 2차: Serper (Tavily 실패 시)
+            if not result:
+                try:
+                    r = serper_collector.verify_news(query)
+                    if r.get("status") == "ok" and r.get("results"):
+                        organic = r["results"]
+                        result = {
+                            "status": "ok",
+                            "trust_score": 50,
+                            "key_facts": [f"{x.get('title')}: {x.get('snippet','')}" for x in organic[:3]],
+                        }
+                except Exception as e:
+                    logger.debug(f"Truth Engine: Serper 실패 [{entity}]: {e}")
+
+            if not result:
+                logger.info(f"Truth Engine: [{source}]-[{target}] 검색 실패, 스킵")
+                continue
+
+            trust_score = result.get("trust_score", 0)
+            fact_count = len(result.get("key_facts", []))
+
+            if trust_score >= 80 and fact_count > 0:
+                logger.info(f"Truth Engine: SUCCEEDED (Trust {trust_score}%) [{source}]-[{target}] → PROBABLE")
+                if hasattr(self.graph, "update_relationship_status"):
+                    self.graph.update_relationship_status(
+                        source=source, target=target, rel_type=rel_type,
+                        status="PROBABLE", weight_boost=2.0,
+                    )
+                verified_count += 1
+            elif trust_score >= 50:
+                logger.info(f"Truth Engine: WEAK (Trust {trust_score}%) [{source}]-[{target}] → CORROBORATED 유지")
+            else:
+                logger.info(f"Truth Engine: FAILED (Trust {trust_score}%) [{source}]-[{target}]")
+
+        logger.info(f"Truth Engine: 완료 — 검증 {verified_count}/{len(candidates)}")
 
 
 # Singleton instance

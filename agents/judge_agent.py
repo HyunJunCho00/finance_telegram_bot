@@ -433,6 +433,17 @@ Rules:
         """[FIX CRITICAL-6] symbol parameter added  was NameError (symbol not in scope)."""
         try:
             latest_report = db.get_latest_report(symbol=symbol)
+            # CB OPEN 시 None 반환 → GCS 폴백
+            if not latest_report:
+                try:
+                    from processors.gcs_parquet import gcs_parquet_store
+                    latest_report = gcs_parquet_store.download_json(
+                        f"fallback/ai_reports/{symbol}/latest.json"
+                    )
+                    if latest_report:
+                        logger.info(f"[GCS Fallback] Previous decision loaded from GCS: {symbol}")
+                except Exception:
+                    pass
             if latest_report and latest_report.get('final_decision'):
                 fd = latest_report['final_decision']
                 if isinstance(fd, str):

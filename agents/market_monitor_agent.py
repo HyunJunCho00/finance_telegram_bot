@@ -63,7 +63,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
         self.role = "monitor_hourly"
 
     def _load_playbook(self, symbol: str, mode: str) -> Optional[Dict]:
-        """Load the current Daily Playbook from DB."""
+        """Load the current Daily Playbook from DB, GCS fallback on Supabase failure."""
         try:
             res = (
                 db.client.table("daily_playbooks")
@@ -78,6 +78,19 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 return res.data[0]
         except Exception as e:
             logger.warning(f"Playbook load error ({symbol}/{mode}): {e}")
+
+        # GCS 폴백 — Supabase 402 / CB OPEN 시
+        try:
+            from processors.gcs_parquet import gcs_parquet_store
+            rec = gcs_parquet_store.download_json(
+                f"fallback/daily_playbooks/{symbol}_{mode}.json"
+            )
+            if rec:
+                logger.info(f"[GCS Fallback] Playbook loaded for monitor: {symbol}/{mode}")
+                return rec
+        except Exception as gcs_e:
+            logger.warning(f"[GCS Fallback] Playbook GCS read failed ({symbol}/{mode}): {gcs_e}")
+
         return None
 
     def _load_recent_df(self, symbol: str, lookback_days: int = 3) -> pd.DataFrame:
@@ -161,13 +174,34 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                     indicators["price_chg_pct_1h"] = round((p_now - p_prev) / p_prev * 100, 3) if p_prev else 0
         except Exception:
             pass
+        # 펀딩레이트 + OI: GCS parquet primary (Supabase 무관하게 항상 읽힘)
         try:
-            f_df = gcs_parquet_store.get_funding_history_parquet(symbol, limit=1)
-            if f_df is not None and not f_df.empty and "funding_rate" in f_df.columns:
-                indicators["funding_rate"] = float(f_df["funding_rate"].iloc[-1])
+            f_df = gcs_parquet_store.get_funding_history_parquet(symbol, limit=4)
+            if f_df is not None and not f_df.empty:
+                if "funding_rate" in f_df.columns:
+                    indicators["funding_rate"] = float(f_df["funding_rate"].iloc[-1])
+                oi_cols = [c for c in ("oi_binance", "oi_bybit", "oi_okx") if c in f_df.columns]
+                if oi_cols and len(f_df) >= 2:
+                    oi_series = f_df[oi_cols].fillna(0).sum(axis=1).tolist()
+                    oi_now, oi_prev = oi_series[-1], oi_series[0]
+                    oi_chg = ((oi_now - oi_prev) / oi_prev * 100) if oi_prev else 0
+                    indicators["oi_chg_pct"] = round(oi_chg, 3)
+                    price_chg = indicators.get("price_chg_pct_4h", indicators.get("price_chg_pct_1h", 0))
+                    indicators["oi_divergence"] = (
+                        "DIVERGENCE"
+                        if (oi_chg > 1.5 and price_chg < -0.5) or (oi_chg < -1.5 and price_chg > 0.5)
+                        else "ALIGNED"
+                    )
+                    indicators["mfi_proxy"] = (
+                        "INFLOW" if oi_chg > 0.5 and price_chg > 0
+                        else "OUTFLOW" if oi_chg < -0.5 and price_chg < 0
+                        else "NEUTRAL"
+                    )
         except Exception:
             pass
-        try:
+        # OI Supabase 보완: parquet에 OI 없을 때만 시도
+        if "oi_chg_pct" not in indicators:
+          try:
             res = (
                 db.client.table("funding_data")
                 .select("oi_binance", "oi_bybit", "oi_okx", "timestamp")
@@ -198,8 +232,8 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                     else "OUTFLOW" if oi_chg < -0.5 and price_chg < 0
                     else "NEUTRAL"
                 )
-        except Exception:
-            pass
+          except Exception:
+              pass
         return indicators
 
     def _get_live_scenario_snapshot(self, symbol: str, mode: str) -> Dict:

@@ -90,7 +90,10 @@ def _precision_prepare():
 try:
     # ── 데이터 수집 잡 ─────────────────────────────────────────────────────────
 
-    if JOB_NAME == "etf_flow":
+    if __name__ != "__main__":
+        # multiprocessing child processes import this as __mp_main__ — skip job
+        pass
+    elif JOB_NAME == "etf_flow":
         from collectors.etf_flow_collector import etf_flow_collector
         etf_flow_collector.run()
 

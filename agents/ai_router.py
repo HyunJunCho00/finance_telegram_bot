@@ -878,11 +878,9 @@ class AIClient:
                     "max_output_tokens": max_tokens,
                     "temperature": temperature,
                 }
-                # thinking_config: gemini-3 전체 또는 gemini-2.5-pro 계열만 지원 (flash는 미지원)
+                # thinking_config: gemini-3 계열만 지원 (gemini-2.5-pro는 Vertex AI에서 미지원)
                 lowercased_id = model_id.lower()
-                _supports_thinking = "gemini-3" in lowercased_id or (
-                    "gemini-2.5" in lowercased_id and "pro" in lowercased_id
-                )
+                _supports_thinking = "gemini-3" in lowercased_id
                 if _supports_thinking:
                     thinking_level = "HIGH" if "pro" in lowercased_id else "LOW"
                     config_kwargs["thinking_config"] = types.ThinkingConfig(
@@ -1050,9 +1048,7 @@ class AIClient:
                 "temperature": temperature,
             }
             lowercased_id = model_id.lower()
-            _supports_thinking = "gemini-3" in lowercased_id or (
-                "gemini-2.5" in lowercased_id and "pro" in lowercased_id
-            )
+            _supports_thinking = "gemini-3" in lowercased_id
             if _supports_thinking:
                 thinking_level = "HIGH" if "pro" in lowercased_id else "LOW"
                 config_kwargs["thinking_config"] = types.ThinkingConfig(
@@ -1134,6 +1130,41 @@ class AIClient:
             use_premium=use_premium,
             role=role,
         )
+
+    def generate_with_grounding(
+        self,
+        system_prompt: str,
+        user_message: str,
+        max_tokens: int = 2000,
+        temperature: float = 0.1,
+    ) -> str:
+        """Gemini Flash + Google Search Grounding.
+
+        무료 티어: 500 RPD. 우리 사용량 1회/일 → 완전 무료.
+        grounding으로 가져온 웹 콘텐츠는 입력 토큰 미청구.
+        """
+        client = self._gemini_default
+        if not client:
+            logger.warning("[Grounding] Gemini client unavailable")
+            return ""
+        model_id = settings.MODEL_JUDGE_FALLBACK  # gemini-2.5-flash
+        try:
+            config = types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                max_output_tokens=max_tokens,
+                temperature=temperature,
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+            )
+            response = client.models.generate_content(
+                model=model_id,
+                contents=[types.Content(role="user", parts=[types.Part.from_text(text=user_message)])],
+                config=config,
+            )
+            self._mark_model_success(model_id)
+            return response.text or ""
+        except Exception as e:
+            logger.error(f"[Grounding] error ({model_id}): {e}")
+            return ""
 
 
 ai_client = AIClient()

@@ -668,18 +668,52 @@ class DatabaseClient:
 
     @reconnect_on_error
     def upsert_dune_query_result(self, data: Dict) -> Dict:
-        return self.client_text.table("dune_query_results").upsert(
-            data, on_conflict="query_id,collected_at"
-        ).execute()
+        try:
+            return self.client_text.table("dune_query_results").upsert(
+                data, on_conflict="query_id,collected_at"
+            ).execute()
+        except Exception as e:
+            from loguru import logger
+            import json
+            from pathlib import Path
+            logger.error(f"[Fallback] Supabase failed for dune_query_results. Saving locally. {e}")
+            try:
+                path = Path("cache/dune_fallback")
+                path.mkdir(parents=True, exist_ok=True)
+                file_path = path / f"dune_{data.get('query_id')}_{data.get('collected_at', '').replace(':', '')}.json"
+                file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+            except Exception as inner_e:
+                logger.error(f"Failed to write dune fallback: {inner_e}")
+            return {"data": [data]}
 
-    def get_latest_dune_query_result(self, query_id: int) -> Optional[Dict]:
-        response = self.client_text.table("dune_query_results")\
-                        .select("*")\
-            .eq("query_id", query_id)\
-            .order("collected_at", desc=True)\
-            .limit(1)\
-            .execute()
-        return response.data[0] if response.data else None
+    @reconnect_on_error
+    def get_latest_dune_query_result(self, query_id: int, columns: str = "*") -> Optional[Dict]:
+        try:
+            response = self.client_text.table("dune_query_results")\
+                            .select(columns)\
+                .eq("query_id", query_id)\
+                .order("collected_at", desc=True)\
+                .limit(1)\
+                .execute()
+            if response.data:
+                return response.data[0]
+        except Exception as e:
+            from loguru import logger
+            logger.warning(f"[Fallback] Supabase read failed for dune query {query_id}: {e}. Checking local cache.")
+        
+        try:
+            from pathlib import Path
+            import json
+            path = Path("cache/dune_fallback")
+            if path.exists():
+                files = list(path.glob(f"dune_{query_id}_*.json"))
+                if files:
+                    files.sort(reverse=True)
+                    return json.loads(files[0].read_text())
+        except Exception:
+            pass
+
+        return None
 
 # ----------------------- Feedback ---------------------------
 
@@ -754,6 +788,40 @@ class DatabaseClient:
             query = query.gte("created_at", cutoff)
         response = query.execute()
         return response.data if response.data else []
+
+    def get_market_status_events_with_fallback(
+        self,
+        symbol: Optional[str] = None,
+        limit: int = 100,
+        hours: Optional[int] = None,
+    ) -> List[Dict]:
+        """CB OPEN 또는 Supabase 장애 시 GCS timeseries 폴백 포함 버전."""
+        result = self.get_market_status_events(symbol=symbol, limit=limit, hours=hours)
+        if result:
+            return result
+        # GCS 폴백
+        try:
+            from processors.gcs_parquet import gcs_parquet_store
+            import pandas as pd
+            months_back = max((hours or 168) / 720.0, 0.1)
+            df = gcs_parquet_store.load_timeseries("market_status_events", symbol or "BTCUSDT", months_back=months_back)
+            if df is None or df.empty:
+                return []
+            if "created_at" in df.columns:
+                df["created_at"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
+                df = df.sort_values("created_at", ascending=False)
+                if hours is not None:
+                    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+                    df = df[df["created_at"] >= cutoff]
+            if symbol and "symbol" in df.columns:
+                df = df[df["symbol"] == symbol]
+            df = df.head(limit)
+            records = df.to_dict("records")
+            logger.info(f"[GCS Fallback] market_status_events loaded {len(records)} rows for {symbol}")
+            return records
+        except Exception as gcs_e:
+            logger.warning(f"[GCS Fallback] market_status_events read failed: {gcs_e}")
+        return []
 
     @reconnect_on_error
     def update_market_status_event_technical_snapshot(self, event_id: int, technical_snapshot: Dict) -> Dict:

@@ -337,6 +337,19 @@ class ReportGenerator:
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
             report_id = db.insert_ai_report(report)
+            if not report_id:
+                # CB OPEN 또는 Supabase 불가 → GCS에 저장
+                try:
+                    from processors.gcs_parquet import gcs_parquet_store
+                    import uuid as _uuid
+                    report_id = f"gcs-{_uuid.uuid4().hex[:8]}"
+                    gcs_parquet_store.upload_json(
+                        f"fallback/ai_reports/{symbol}/latest.json",
+                        {**report, "id": report_id},
+                    )
+                    logger.info(f"[GCS Fallback] Report saved to GCS: {symbol} id={report_id}")
+                except Exception as gcs_e:
+                    logger.error(f"[GCS Fallback] Report GCS save failed: {gcs_e}")
             logger.info(f"Report generated for {symbol} ({mode.value}) with ID: {report_id}")
             report["report_id"] = report_id
             return report
