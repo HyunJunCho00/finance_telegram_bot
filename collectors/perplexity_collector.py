@@ -689,6 +689,7 @@ class PerplexityCollector:
 
     def _extract_and_validate_json(self, content: str) -> Optional[Dict]:
         """LLM 응답에서 JSON 추출 + btc/eth 필드 검증."""
+        import re as _re
         if not content:
             return None
         text = content.strip()
@@ -706,10 +707,20 @@ class PerplexityCollector:
         if start < 0 or end <= start:
             return None
 
+        candidate = text[start:end]
+
+        # Grounding citation 마커 제거: [1], [2], [1][2] 등
+        candidate = _re.sub(r'\[\d+\]', '', candidate)
+
         try:
-            raw = json.loads(text[start:end])
+            raw = json.loads(candidate)
         except json.JSONDecodeError:
-            return None
+            # 2차 시도: JSON 문자열 값 내 개행/탭 정리
+            candidate = _re.sub(r'[\x00-\x1f](?=[^"]*"(?:[^"]*"[^"]*")*[^"]*$)', ' ', candidate)
+            try:
+                raw = json.loads(candidate)
+            except json.JSONDecodeError:
+                return None
 
         # 최소 구조 검증
         if not isinstance(raw, dict):
@@ -983,6 +994,15 @@ class PerplexityCollector:
 
         except Exception as e:
             logger.error(f"[Narrative] Gemini grounding error: {e}")
+            # Gemini 완전 실패 시 stale GCS cache 폴백 (날짜 무관)
+            try:
+                from processors.gcs_parquet import gcs_parquet_store
+                cached = gcs_parquet_store.download_json(self._UNIFIED_GCS_PATH)
+                if cached and cached.get("btc") and cached.get("eth"):
+                    logger.warning(f"[Narrative] Gemini failed — using stale GCS cache (date={cached.get('date')})")
+                    return {"btc": cached["btc"], "eth": cached["eth"]}
+            except Exception:
+                pass
             return {"btc": self._empty_result("BTCUSDT"), "eth": self._empty_result("ETHUSDT")}
 
     def _check_tavily_budget(self, daily_limit: int = 33) -> bool:

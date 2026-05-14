@@ -432,8 +432,11 @@ Rules:
     def get_previous_decision(self, symbol: str = "BTCUSDT") -> Optional[Dict]:
         """[FIX CRITICAL-6] symbol parameter added  was NameError (symbol not in scope)."""
         try:
-            latest_report = db.get_latest_report(symbol=symbol)
-            # CB OPEN 시 None 반환 → GCS 폴백
+            try:
+                latest_report = db.get_latest_report(symbol=symbol)
+            except Exception:
+                latest_report = None
+            # CB OPEN 또는 예외 → GCS 폴백
             if not latest_report:
                 try:
                     from processors.gcs_parquet import gcs_parquet_store
@@ -510,10 +513,14 @@ Rules:
 
         user_message = (
             "Use this compressed investment-committee brief as the ground truth.\n"
-            "Do not assume missing raw fields exist.\n"
-            "If a field is absent or marked unavailable, treat it as unknown rather than inferring.\n\n"
+            "CRITICAL: You MUST provide substantive analysis and reasoning based on whatever data IS available. "
+            "Data poverty is NOT a reason to abstain — it is a reason to widen your uncertainty bands.\n"
+            "If a field is absent, note it briefly then proceed with your best analysis from the remaining signals.\n\n"
             f"JUDGE_BRIEF:\n{json.dumps(judge_brief, ensure_ascii=False, indent=2)}\n\n"
-            "Make your trading decision. Output as JSON. Ensure the counter_scenario is thoroughly explored."
+            "Make your trading decision. Output as JSON. "
+            "reasoning.final_logic MUST be at least 3 sentences. "
+            "monitoring_playbook MUST be populated regardless of decision. "
+            "Ensure the counter_scenario is thoroughly explored."
         )
         logger.info(
             f"Judge brief prepared for {symbol}/{mode.value}: "
@@ -548,12 +555,39 @@ Rules:
                 f"conf={conf} win_prob={win_prob} (mode={mode.value}) "
                 f"final_logic_preview={repr(final_logic_preview)}"
             )
-            if not final_logic_preview and not conf and not win_prob:
+            _is_thin = (
+                len(response or "") < 500
+                or (not final_logic_preview and not conf and not win_prob)
+            )
+            if _is_thin:
                 logger.warning(
-                    f"Judge returned empty/zero decision for {symbol}/{mode.value}. "
-                    f"Raw response length={len(response or '')} chars. "
-                    f"response_preview={repr((response or '')[:200])}"
+                    f"Judge returned thin/empty decision for {symbol}/{mode.value} "
+                    f"(len={len(response or '')}, conf={conf}, win_prob={win_prob}). "
+                    "Retrying with judge_lite + forced analysis instruction."
                 )
+                retry_msg = (
+                    "The previous response was too thin. You MUST now provide a full analysis.\n"
+                    "Even if some data is missing, analyze what is available and give your best assessment.\n"
+                    "reasoning.final_logic must be at least 5 sentences covering: "
+                    "market structure, key risks, why you chose this decision, "
+                    "what would change your view, and monitoring triggers.\n\n"
+                ) + user_message
+                retry_response = ai_client.generate_response(
+                    system_prompt=prompt,
+                    user_message=retry_msg,
+                    temperature=0.3,
+                    max_tokens=3500,
+                    use_premium=False,
+                    role="judge_lite",
+                )
+                retry_decision = self._parse_decision(retry_response)
+                retry_logic = ""
+                if isinstance(retry_decision.get("reasoning"), dict):
+                    retry_logic = str(retry_decision["reasoning"].get("final_logic", "") or "")[:120]
+                if retry_logic or retry_decision.get("confidence", 0) or retry_decision.get("win_probability_pct", 0):
+                    logger.info(f"Judge retry succeeded for {symbol}/{mode.value}: {repr(retry_logic[:80])}")
+                    return retry_decision
+                logger.warning(f"Judge retry also thin for {symbol}/{mode.value}; returning original")
             return decision
 
         except Exception as e:
