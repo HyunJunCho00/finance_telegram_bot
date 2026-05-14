@@ -5,7 +5,8 @@ import json
 import time
 import re
 import html
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import List, Dict, Optional
 from loguru import logger
@@ -80,60 +81,73 @@ class CryptoNewsCollector:
         text = (title + " " + summary).lower()
         return [tag for tag, kws in TAG_KEYWORDS.items() if any(kw in text for kw in kws)]
 
-    def fetch_rss_feeds(self) -> List[Dict]:
-        """RSS를 파싱하고 DB에 저장한 뒤, '새로 추가된' 기사들만 반환합니다."""
-        conn = sqlite3.connect(str(self.db_path))
+    def _parse_pub_date(self, pub_str: str) -> Optional[datetime]:
+        """RSS 날짜 문자열을 UTC datetime으로 파싱. 실패 시 None."""
+        if not pub_str:
+            return None
+        try:
+            dt = parsedate_to_datetime(pub_str)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+        try:
+            dt = datetime.fromisoformat(pub_str.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    def fetch_rss_feeds(self, lookback_minutes: int = 70) -> List[Dict]:
+        """RSS를 파싱하고 cutoff 이후 발행된 기사만 반환합니다 (DB 불필요)."""
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=lookback_minutes)
         new_articles = []
 
         for source, url in RSS_FEEDS.items():
             try:
                 feed = feedparser.parse(url, agent="CryptoNewsCollector/2.0")
-                
+                source_count = 0
+
                 for entry in feed.entries:
                     link = entry.get("link", "")
                     if not link:
                         continue
-                        
+
+                    pub_str = entry.get("published", entry.get("updated", ""))
+                    pub_dt = self._parse_pub_date(pub_str)
+
+                    # 날짜 파싱 실패 시 스킵 (날짜 불명 기사는 오래된 것으로 간주)
+                    if pub_dt is None:
+                        continue
+
+                    # cutoff 이전 기사 스킵
+                    if pub_dt < cutoff:
+                        continue
+
                     title = self._clean_text(entry.get("title", ""))
                     summary_raw = entry.get("summary", entry.get("description", ""))
-                    summary = self._clean_text(summary_raw) # 길이 제한 해제 (원본 그대로 보존)
-                    pub = entry.get("published", entry.get("updated", ""))
+                    summary = self._clean_text(summary_raw)
                     tags = self._tag_article(title, summary)
-                    
-                    article_id = hashlib.md5(link.encode()).hexdigest()
-                    
-                    # DB 저장 (INSERT OR IGNORE)
-                    try:
-                        cursor = conn.execute("""
-                            INSERT OR IGNORE INTO articles
-                                (id, title, url, source, summary, published_at, collected_at, tags, raw_json)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, (
-                            article_id, title, link, source, summary, pub,
-                            datetime.now(timezone.utc).isoformat(),
-                            json.dumps(tags, ensure_ascii=False),
-                            json.dumps({"title": title, "link": link}, ensure_ascii=False)
-                        ))
-                        
-                        # 변화가 있다면(새로운 기사라면) 리스트에 추가
-                        if cursor.rowcount > 0:
-                            new_articles.append({
-                                "source": source,
-                                "title": title,
-                                "url": link,
-                                "summary": summary,
-                                "tags": tags
-                            })
-                    except sqlite3.Error as e:
-                        logger.warning(f"DB insert error: {e}")
-                        
+
+                    new_articles.append({
+                        "source":     source,
+                        "title":      title,
+                        "url":        link,
+                        "summary":    summary,
+                        "tags":       tags,
+                        "published":  pub_dt.isoformat(),
+                    })
+                    source_count += 1
+
+                if source_count:
+                    logger.info(f"[{source}] {source_count}개 신규 기사 (최근 {lookback_minutes}분)")
+
             except Exception as e:
                 logger.warning(f"[{source}] feed parse error: {e}")
-                
-            time.sleep(0.5)  # 소스 간 딜레이
 
-        conn.commit()
-        conn.close()
+            time.sleep(0.5)
+
+        new_articles.sort(key=lambda a: a["published"], reverse=True)
         return new_articles
 
     def fetch_news(self, categories: List[str] = None, limit: int = 10, lang: str = "en") -> List[Dict]:
@@ -168,9 +182,9 @@ class CryptoNewsCollector:
     def fetch_and_ingest(self, categories: List[str] = None):
         """기존 API를 완벽히 대체하는 메인 함수. cloud_jobs에서 1시간마다 호출됩니다."""
         logger.info("Fetching Crypto News via RSS Feeds...")
-        
-        # 1. RSS에서 뉴스 긁어오고 SQLite에 영구 보존
-        new_articles = self.fetch_rss_feeds()
+
+        # 1. 최근 70분 내 발행된 기사만 수집 (타임스탬프 기반 dedup)
+        new_articles = self.fetch_rss_feeds(lookback_minutes=70)
         
         if not new_articles:
             logger.info("No new articles from RSS since last run.")
