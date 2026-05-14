@@ -336,7 +336,10 @@ class ReportGenerator:
                 "onchain_snapshot": onchain_snapshot or {},
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
-            report_id = db.insert_ai_report(report)
+            try:
+                report_id = db.insert_ai_report(report)
+            except Exception:
+                report_id = None
             if not report_id:
                 # CB OPEN 또는 Supabase 불가 → GCS에 저장
                 try:

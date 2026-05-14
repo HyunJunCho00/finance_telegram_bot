@@ -265,7 +265,7 @@ class AIClient:
         self._gemini_vlm = _make_gemini(vlm_key) or self._gemini_default
 
         if self._gemini_default:
-            backend = "AI Studio key" if default_key else "Vertex AI"
+            backend = "Vertex AI" if can_use_vertex else "AI Studio key"
             logger.info(f"Gemini clients initialized (default / judge / vlm) via {backend}")
         else:
             logger.warning("Gemini disabled: no API key and no PROJECT_ID for Vertex AI")
