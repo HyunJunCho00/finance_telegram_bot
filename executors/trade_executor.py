@@ -39,6 +39,21 @@ class TradeExecutor:
 
         if settings.BINANCE_USE_TESTNET:
             self.binance.set_sandbox_mode(True)
+            # Spot 테스트넷: set_sandbox_mode는 futures 전용이라 URL 직접 교체
+            # fapi.binance.com도 'api.binance.com'을 포함하므로 전체 prefix로 매칭
+            for key, val in self.binance_spot.urls['api'].items():
+                if isinstance(val, str) and val.startswith('https://api.binance.com'):
+                    self.binance_spot.urls['api'][key] = val.replace(
+                        'https://api.binance.com', 'https://testnet.binance.vision'
+                    )
+            self.binance_spot.options['fetchCurrencies'] = False
+            # 테스트넷은 margin endpoint 미지원(404) → fetch2 레벨에서 차단
+            _orig_fetch2 = self.binance_spot.fetch2
+            def _testnet_fetch2(path, api='public', method='GET', params={}, headers=None, body=None, config={}):
+                if 'margin' in str(path).lower():
+                    return []
+                return _orig_fetch2(path, api, method, params, headers, body, config)
+            self.binance_spot.fetch2 = _testnet_fetch2
 
         self.upbit = ccxt.upbit({
             'apiKey': settings.UPBIT_ACCESS_KEY,
@@ -95,9 +110,14 @@ class TradeExecutor:
             if direction not in ["LONG", "SHORT"]:
                 return {"success": False, "note": "No valid trade direction"}
 
+            # Spot-only: SHORT는 매수 안 함으로 처리
+            if direction == "SHORT":
+                logger.info(f"[SpotOnly] SHORT signal skipped for {symbol} — spot-only mode")
+                return {"success": False, "note": "SHORT skipped — spot-only mode (no short selling)"}
+
             allocation_pct = min(max(float(final_decision.get("allocation_pct", 0) or 0), 0.0), 100.0)
-            leverage = min(max(float(final_decision.get("leverage", 1) or 1), 1.0), 3.0)
-            target_exchange = str(final_decision.get("target_exchange", "BINANCE")).lower()
+            leverage = 1.0  # Spot-only: 레버리지 없음
+            target_exchange = "binance_spot"  # Spot-only: 항상 binance_spot
             exec_style = str(final_decision.get("recommended_execution_style", "MOMENTUM_SNIPER"))
             tp_price = float(final_decision.get("tp1_price", final_decision.get("take_profit", 0)) or 0)
             sl_price = float(final_decision.get("stop_loss", 0) or 0)
@@ -368,7 +388,7 @@ class TradeExecutor:
                 if exchange == 'binance':
                     result = self._execute_binance(symbol, side, amount, leverage, tp_price=tp_price, sl_price=sl_price, tp2_price=tp2_price, tp1_exit_pct=tp1_exit_pct)
                 elif exchange == 'binance_spot':
-                    result = self._execute_binance_spot(symbol, side, amount)
+                    result = self._execute_binance_spot(symbol, side, amount, tp_price=tp_price, sl_price=sl_price)
                 elif exchange == 'upbit':
                     if settings.UPBIT_PAPER_ONLY:
                         result = self._simulate_order(symbol, side, amount, leverage, exchange, style, tp_price, sl_price, tp2_price, tp1_exit_pct)
@@ -805,22 +825,82 @@ class TradeExecutor:
             logger.error(f"Upbit execution error: {e}")
             return {"success": False, "paper": False, "error": str(e)}
 
-    def _execute_binance_spot(self, symbol: str, side: str, amount: float) -> Dict:
+    def _execute_binance_spot(self, symbol: str, side: str, amount: float, tp_price: float = 0.0, sl_price: float = 0.0) -> Dict:
         try:
             if side.upper() == "SHORT":
                 return {"success": False, "paper": False, "error": "SHORT is not allowed on Binance spot"}
-            order = self.binance_spot.create_order(
-                symbol=symbol,
-                type='market',
-                side=side.lower(),
-                amount=amount
-            )
+
+            ccxt_symbol = symbol.replace('USDT', '/USDT') if 'USDT' in symbol and '/' not in symbol else symbol
+
+            if side.upper() == 'BUY':
+                # amount는 USD 노셔널 → quoteOrderQty로 전달 (BTC 수량 X)
+                order = self.binance_spot.create_market_buy_order_with_cost(ccxt_symbol, amount)
+            else:
+                # SELL: USD 노셔널 → 코인 수량으로 변환
+                ref_price = self._get_reference_price(symbol, 'binance_spot')
+                if not ref_price:
+                    return {"success": False, "paper": False, "error": "Could not fetch price for sell quantity"}
+                coin_qty = round(amount / ref_price, 5)
+                order = self.binance_spot.create_order(
+                    symbol=ccxt_symbol,
+                    type='market',
+                    side='sell',
+                    amount=coin_qty,
+                )
 
             exchange_order_id = str(order.get('id') or '')
             filled_price = order.get('average') or order.get('price')
+            filled_qty = float(order.get('filled') or order.get('amount') or 0)
 
             if not filled_price and exchange_order_id:
                 self._enqueue_fill_check("binance_spot", exchange_order_id, symbol)
+
+            # BUY 체결 후 TP/SL 브라켓 등록
+            # OCO(One-Cancels-the-Other): TP 또는 SL 중 하나 체결 시 나머지 자동 취소
+            bracket_ids: Dict[str, str] = {}
+            if side.upper() == 'BUY' and filled_qty > 0 and tp_price > 0 and sl_price > 0:
+                try:
+                    sl_limit = round(sl_price * 0.999, 2)  # SL 트리거 후 체결 보장용 limit
+                    oco = self.binance_spot.create_order(
+                        symbol=ccxt_symbol,
+                        type='oco',
+                        side='sell',
+                        amount=filled_qty,
+                        price=tp_price,
+                        params={
+                            'stopPrice': sl_price,
+                            'stopLimitPrice': sl_limit,
+                            'stopLimitTimeInForce': 'GTC',
+                        },
+                    )
+                    # OCO는 두 주문 ID를 반환
+                    orders = oco.get('orders') or oco.get('orderReports') or []
+                    if len(orders) >= 2:
+                        bracket_ids['tp_order_id'] = str(orders[0].get('orderId') or '')
+                        bracket_ids['sl_order_id'] = str(orders[1].get('orderId') or '')
+                    bracket_ids['oco_list_id'] = str(oco.get('orderListId') or '')
+                    logger.info(f"[Bracket] Spot OCO registered TP={tp_price} SL={sl_price} list={bracket_ids['oco_list_id']}")
+                except Exception as e:
+                    # OCO 미지원 환경(일부 테스트넷) → 개별 주문으로 폴백
+                    logger.warning(f"[Bracket] OCO failed, falling back to separate orders: {e}")
+                    try:
+                        tp_order = self.binance_spot.create_order(
+                            symbol=ccxt_symbol, type='limit', side='sell',
+                            amount=filled_qty, price=tp_price,
+                            params={'timeInForce': 'GTC'},
+                        )
+                        bracket_ids['tp_order_id'] = str(tp_order.get('id') or '')
+                    except Exception as tp_e:
+                        logger.warning(f"[Bracket] TP order failed: {tp_e}")
+                    try:
+                        sl_order = self.binance_spot.create_order(
+                            symbol=ccxt_symbol, type='stop_loss_limit', side='sell',
+                            amount=filled_qty, price=round(sl_price * 0.999, 2),
+                            params={'stopPrice': sl_price, 'timeInForce': 'GTC'},
+                        )
+                        bracket_ids['sl_order_id'] = str(sl_order.get('id') or '')
+                    except Exception as sl_e:
+                        logger.warning(f"[Bracket] SL order failed: {sl_e}")
 
             return {
                 "success": True,
@@ -828,11 +908,12 @@ class TradeExecutor:
                 "exchange": "binance_spot",
                 "symbol": symbol,
                 "side": side,
-                "amount": amount,
+                "amount": filled_qty,
                 "order_id": exchange_order_id,
                 "filled_price": filled_price,
                 "fill_confirmed": bool(filled_price),
-                "timestamp": datetime.now(timezone.utc).isoformat()
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                **bracket_ids,
             }
 
         except Exception as e:

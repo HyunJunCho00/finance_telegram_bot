@@ -145,10 +145,10 @@ class Settings(BaseSettings):
 
 
     # ===== Paper trading / sandbox safety =====
-    PAPER_TRADING_MODE: bool = True  # default safe mode (no real orders)
+    PAPER_TRADING_MODE: bool = False
     PAPER_TRADING_PRICE_SOURCE: str = "ticker"  # ticker | last_report
     ENABLE_DIRECT_MCP_TRADING: bool = False
-    BINANCE_USE_TESTNET: bool = False
+    BINANCE_USE_TESTNET: bool = True  # testnet — 실계정 전환 시 False로
     UPBIT_PAPER_ONLY: bool = True
 
     # ===== Order execution safety =====
