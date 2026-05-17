@@ -259,7 +259,11 @@ class GCSParquetStore:
 
             # 로컬 캐시 우선 (mutable 포함)
             if cache_path.exists():
-                return pd.read_parquet(cache_path, engine="pyarrow")
+                try:
+                    return pd.read_parquet(cache_path, engine="pyarrow")
+                except Exception as local_err:
+                    logger.warning(f"Corrupted local cache — deleting and falling back to GCS ({object_path}): {local_err}")
+                    cache_path.unlink(missing_ok=True)
 
             # 로컬 없으면 GCS fallback
             if not self.enabled:
@@ -577,8 +581,14 @@ class GCSParquetStore:
         """로컬 캐시 parquet에 merge-upsert."""
         try:
             cache_path = self._local_cache_path(object_path)
+            existing = None
             if cache_path.exists():
-                existing = pd.read_parquet(cache_path, engine="pyarrow")
+                try:
+                    existing = pd.read_parquet(cache_path, engine="pyarrow")
+                except Exception as read_err:
+                    logger.warning(f"Corrupted local cache — resetting ({object_path}): {read_err}")
+                    cache_path.unlink(missing_ok=True)
+            if existing is not None and not existing.empty:
                 merged = pd.concat([existing, new_df], ignore_index=True)
                 merged = merged.drop_duplicates(subset=dedup_cols, keep="last")
                 merged = merged.sort_values(dedup_cols[0]).reset_index(drop=True)

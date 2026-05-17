@@ -29,8 +29,6 @@ from loguru import logger
 class FundingCollector:
     def __init__(self):
         self.binance = ccxt.binance({
-            'apiKey': settings.BINANCE_API_KEY,
-            'secret': settings.BINANCE_API_SECRET,
             'enableRateLimit': True,
             'options': {'defaultType': 'future'}
         })

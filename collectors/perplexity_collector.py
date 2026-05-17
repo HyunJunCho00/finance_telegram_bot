@@ -951,7 +951,7 @@ class PerplexityCollector:
             content = ai_client.generate_with_grounding(
                 system_prompt=_system,
                 user_message=prompt,
-                max_tokens=2000,
+                max_tokens=8000,
                 temperature=0.1,
             )
             if not content:
@@ -959,15 +959,16 @@ class PerplexityCollector:
 
             raw = self._extract_and_validate_json(content)
             if not raw:
-                # 1회 재시도 — JSON만 요청
-                logger.warning("[Narrative] JSON 파싱 실패, JSON-only 재시도")
+                # 1회 재시도 — 전체 프롬프트 유지, JSON 전용 지시만 추가
+                logger.warning(f"[Narrative] JSON 파싱 실패 (응답 앞 500자: {content[:500]!r}), JSON-only 재시도")
                 retry = ai_client.generate_with_grounding(
-                    system_prompt=_system,
-                    user_message=(
-                        "Return ONLY the JSON object, nothing else:\n\n"
-                        + prompt[-2000:]  # 마지막 2000자(스키마 포함)만 재전송
+                    system_prompt=(
+                        "You are a JSON-only response system. "
+                        "Return ONLY a valid JSON object matching the schema. "
+                        "No markdown, no prose, no code fences, no explanation."
                     ),
-                    max_tokens=2000,
+                    user_message=prompt,
+                    max_tokens=8000,
                     temperature=0.0,
                 )
                 raw = self._extract_and_validate_json(retry or "")

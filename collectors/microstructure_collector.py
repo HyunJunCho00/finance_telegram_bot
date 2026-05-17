@@ -23,8 +23,6 @@ from config.settings import settings
 class MicrostructureCollector:
     def __init__(self):
         self.binance_futures = ccxt.binance({
-            "apiKey": settings.BINANCE_API_KEY,
-            "secret": settings.BINANCE_API_SECRET,
             "enableRateLimit": True,
             "options": {"defaultType": "future"},
         })

@@ -564,12 +564,16 @@ def main():
         logger.warning(f"WS price feed unavailable (REST fallback active): {e}")
 
     # [PERF] Start User Data Stream — real-time fill confirmation (replaces outbox polling)
-    try:
-        from collectors.ws_user_stream import ws_user_stream
-        ws_user_stream.start()
-        logger.info("WS user stream started (real-time fill confirmation)")
-    except Exception as e:
-        logger.warning(f"WS user stream unavailable (outbox fallback active): {e}")
+    # Futures user stream only valid with production Futures key — skip in testnet mode
+    if not settings.BINANCE_USE_TESTNET:
+        try:
+            from collectors.ws_user_stream import ws_user_stream
+            ws_user_stream.start()
+            logger.info("WS user stream started (real-time fill confirmation)")
+        except Exception as e:
+            logger.warning(f"WS user stream unavailable (outbox fallback active): {e}")
+    else:
+        logger.info("WS user stream skipped (testnet mode)")
 
     # Start WebSocket collector for liquidation + whale data
     try:
