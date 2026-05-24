@@ -1,117 +1,267 @@
 # -*- coding: utf-8 -*-
-# -*- coding: cp1252 -*-
-import functools
-import httpx
-from supabase import create_client, Client, ClientOptions
-from config.settings import settings
+import json
+import time
+from types import SimpleNamespace
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta, timezone
-import pandas as pd
-import asyncio
+
+import psycopg2
+import psycopg2.extras
+import psycopg2.pool
+import psycopg2.extensions
 from loguru import logger
+import pandas as pd
 
-# ----------------- HTTP/2 Cloudflare Patch -----------------
-try:
-    _orig_init = httpx.Client.__init__
-    def _patched_init(self, *args, **kwargs):
-        kwargs["http2"] = False
-        _orig_init(self, *args, **kwargs)
-    httpx.Client.__init__ = _patched_init
-
-    _orig_async_init = httpx.AsyncClient.__init__
-    def _patched_async_init(self, *args, **kwargs):
-        kwargs["http2"] = False
-        _orig_async_init(self, *args, **kwargs)
-    httpx.AsyncClient.__init__ = _patched_async_init
-except Exception:
-    pass
-# ------------------------------------------------------------
+from config.settings import settings
 
 
+# ---------------------------------------------------------------------------
+# JSON adapter: Python dict/list → psycopg2 Json wrapper
+# ---------------------------------------------------------------------------
+psycopg2.extensions.register_adapter(dict, psycopg2.extras.Json)
+psycopg2.extensions.register_adapter(list, psycopg2.extras.Json)
+
+
+# ---------------------------------------------------------------------------
+# Minimal Supabase-SDK-compatible query builder over psycopg2
+# Supports the subset of the Supabase chained-builder API used in this repo.
+# ---------------------------------------------------------------------------
+class _QueryBuilder:
+    def __init__(self, pool: psycopg2.pool.ThreadedConnectionPool, table: str):
+        self._pool = pool
+        self._table = table
+        self._select_cols = "*"
+        self._where_parts: List[str] = []
+        self._params: List = []
+        self._order_col: Optional[str] = None
+        self._order_desc: bool = False
+        self._limit_val: Optional[int] = None
+        self._offset_val: Optional[int] = None
+        self._op = "select"
+        self._mutation_data = None
+        self._on_conflict: Optional[str] = None
+        self._update_data: Optional[Dict] = None
+
+    # ── Filters ──────────────────────────────────────────────────────────────
+    def eq(self, col: str, val):
+        self._where_parts.append(f'"{col}" = %s')
+        self._params.append(val)
+        return self
+
+    def lt(self, col: str, val):
+        self._where_parts.append(f'"{col}" < %s')
+        self._params.append(val)
+        return self
+
+    def lte(self, col: str, val):
+        self._where_parts.append(f'"{col}" <= %s')
+        self._params.append(val)
+        return self
+
+    def gte(self, col: str, val):
+        self._where_parts.append(f'"{col}" >= %s')
+        self._params.append(val)
+        return self
+
+    def in_(self, col: str, vals):
+        self._where_parts.append(f'"{col}" = ANY(%s)')
+        self._params.append(list(vals))
+        return self
+
+    def is_(self, col: str, val):
+        if str(val).lower() == "null":
+            self._where_parts.append(f'"{col}" IS NULL')
+        else:
+            self._where_parts.append(f'"{col}" IS NOT NULL')
+        return self
+
+    # ── Projection / ordering / paging ───────────────────────────────────────
+    def select(self, cols: str = "*"):
+        self._select_cols = cols
+        return self
+
+    def order(self, col: str, desc: bool = False):
+        self._order_col = col
+        self._order_desc = desc
+        return self
+
+    def limit(self, n: int):
+        self._limit_val = n
+        return self
+
+    def range(self, start: int, end: int):
+        self._offset_val = start
+        self._limit_val = end - start + 1
+        return self
+
+    # ── Mutations ─────────────────────────────────────────────────────────────
+    def insert(self, data):
+        self._op = "insert"
+        self._mutation_data = data
+        return self
+
+    def upsert(self, data, on_conflict: Optional[str] = None):
+        self._op = "upsert"
+        self._mutation_data = data
+        self._on_conflict = on_conflict
+        return self
+
+    def update(self, data: Dict):
+        self._op = "update"
+        self._update_data = data
+        return self
+
+    def delete(self):
+        self._op = "delete"
+        return self
+
+    # ── Execution ─────────────────────────────────────────────────────────────
+    def execute(self) -> SimpleNamespace:
+        return self._run(attempt=0)
+
+    def _run(self, attempt: int) -> SimpleNamespace:
+        conn = None
+        try:
+            conn = self._pool.getconn()
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                rows = self._dispatch(cur)
+            conn.commit()
+            self._pool.putconn(conn)
+            return SimpleNamespace(data=rows)
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                self._pool.putconn(conn, close=True)
+            if attempt == 0:
+                logger.warning(f"[DB] Connection error on {self._table}.{self._op}, retrying… ({exc})")
+                time.sleep(1.5)
+                return self._run(attempt=1)
+            raise
+        except Exception:
+            if conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                self._pool.putconn(conn)
+            raise
+
+    def _dispatch(self, cur):
+        if self._op == "select":
+            return self._do_select(cur)
+        if self._op == "insert":
+            return self._do_insert(cur)
+        if self._op == "upsert":
+            return self._do_upsert(cur)
+        if self._op == "update":
+            return self._do_update(cur)
+        if self._op == "delete":
+            return self._do_delete(cur)
+        raise ValueError(f"Unknown op: {self._op}")
+
+    def _where_clause(self):
+        if not self._where_parts:
+            return "", []
+        return "WHERE " + " AND ".join(self._where_parts), list(self._params)
+
+    def _do_select(self, cur) -> List[Dict]:
+        where_sql, params = self._where_clause()
+        order_sql = ""
+        if self._order_col:
+            order_sql = f'ORDER BY "{self._order_col}" {"DESC" if self._order_desc else "ASC"}'
+        limit_sql = f"LIMIT {self._limit_val}" if self._limit_val is not None else ""
+        offset_sql = f"OFFSET {self._offset_val}" if self._offset_val else ""
+        sql = " ".join(filter(None, [
+            f"SELECT {self._select_cols} FROM {self._table}",
+            where_sql, order_sql, limit_sql, offset_sql
+        ]))
+        cur.execute(sql, params)
+        return [dict(r) for r in cur.fetchall()]
+
+    def _do_insert(self, cur) -> List[Dict]:
+        rows = self._mutation_data if isinstance(self._mutation_data, list) else [self._mutation_data]
+        if not rows:
+            return []
+        cols = list(rows[0].keys())
+        col_sql = ", ".join(f'"{c}"' for c in cols)
+        placeholders = "(" + ", ".join(["%s"] * len(cols)) + ")"
+        sql = f"INSERT INTO {self._table} ({col_sql}) VALUES {placeholders} RETURNING *"
+        if len(rows) == 1:
+            cur.execute(sql, [rows[0][c] for c in cols])
+            return [dict(r) for r in cur.fetchall()]
+        psycopg2.extras.execute_batch(
+            cur,
+            f"INSERT INTO {self._table} ({col_sql}) VALUES {placeholders}",
+            [[r[c] for c in cols] for r in rows],
+        )
+        return []
+
+    def _do_upsert(self, cur) -> List[Dict]:
+        rows = self._mutation_data if isinstance(self._mutation_data, list) else [self._mutation_data]
+        if not rows:
+            return []
+        cols = list(rows[0].keys())
+        col_sql = ", ".join(f'"{c}"' for c in cols)
+        placeholders = "(" + ", ".join(["%s"] * len(cols)) + ")"
+        update_cols = [c for c in cols if c not in ("id", "created_at")]
+        update_sql = ", ".join(f'"{c}" = EXCLUDED."{c}"' for c in update_cols)
+
+        if self._on_conflict:
+            conflict_cols = [c.strip() for c in self._on_conflict.split(",")]
+            conflict_sql = "(" + ", ".join(f'"{c}"' for c in conflict_cols) + ")"
+            do_clause = f"ON CONFLICT {conflict_sql} DO UPDATE SET {update_sql}"
+        else:
+            do_clause = "ON CONFLICT DO NOTHING"
+
+        base_sql = f"INSERT INTO {self._table} ({col_sql}) VALUES {placeholders} {do_clause}"
+        vals_list = [[r[c] for c in cols] for r in rows]
+
+        if len(rows) == 1:
+            cur.execute(base_sql + " RETURNING *", vals_list[0])
+            return [dict(r) for r in cur.fetchall()]
+        psycopg2.extras.execute_batch(cur, base_sql, vals_list)
+        return []
+
+    def _do_update(self, cur) -> List[Dict]:
+        set_parts = [f'"{k}" = %s' for k in self._update_data]
+        set_params = list(self._update_data.values())
+        where_sql, where_params = self._where_clause()
+        sql = f"UPDATE {self._table} SET {', '.join(set_parts)} {where_sql} RETURNING *"
+        cur.execute(sql, set_params + where_params)
+        return [dict(r) for r in cur.fetchall()]
+
+    def _do_delete(self, cur) -> List[Dict]:
+        where_sql, params = self._where_clause()
+        sql = f"DELETE FROM {self._table} {where_sql}"
+        cur.execute(sql, params)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Table router: db.client.table("x") → _QueryBuilder
+# ---------------------------------------------------------------------------
 class _TableRouter:
-    """db.client.table(...) 호출을 테이블명에 따라 올바른 Supabase 클라이언트로 자동 라우팅.
+    def __init__(self, pool: psycopg2.pool.ThreadedConnectionPool):
+        self._pool = pool
 
-    기존 코드의 db.client.table("xxx") 패턴을 전혀 수정하지 않아도
-    QUANT/TEXT 프로젝트로 자동 분기됨.
-    """
-    def __init__(self, db_instance: "DatabaseClient"):
-        self._db = db_instance
-
-    def table(self, table_name: str):
-        return self._db._client(table_name).table(table_name)
+    def table(self, table_name: str) -> _QueryBuilder:
+        return _QueryBuilder(self._pool, table_name)
 
 
-class _CircuitBreaker:
-    """Per-client circuit breaker for Supabase quota/rate-limit errors.
-
-    States:
-      CLOSED  — normal operation, all calls pass through
-      OPEN    — too many consecutive quota failures; calls are blocked for
-                `cooldown_seconds` to stop the retry storm
-      HALF_OPEN — cooldown elapsed; next call is a probe to test recovery
-
-    Quota errors (429 / "quota exceeded" / "over_request_rate_limit") are
-    tracked separately from transient connection errors.  Connection errors
-    still trigger reconnection; quota errors open the circuit so the caller
-    backs off immediately rather than hammering a rate-limited endpoint.
-    """
-
-    QUOTA_KEYWORDS = (
-        "429", "quota", "over_request_rate_limit", "rate limit", "too many requests",
-        "rate_limit", "exceeded",
-    )
-
-    def __init__(self, failure_threshold: int = 3, cooldown_seconds: int = 60):
-        self._failure_threshold = failure_threshold
-        self._cooldown_seconds = cooldown_seconds
-        self._consecutive_failures = 0
-        self._opened_at: Optional[datetime] = None
-        self._state = "CLOSED"  # CLOSED | OPEN | HALF_OPEN
-
-    @staticmethod
-    def _is_quota_error(err_msg: str) -> bool:
-        return any(k in err_msg for k in _CircuitBreaker.QUOTA_KEYWORDS)
-
-    def record_success(self) -> None:
-        self._consecutive_failures = 0
-        self._state = "CLOSED"
-
-    def record_failure(self, err_msg: str) -> None:
-        if not self._is_quota_error(err_msg):
-            return  # Only quota errors open the circuit
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self._failure_threshold:
-            if self._state != "OPEN":
-                logger.warning(
-                    f"[CircuitBreaker] OPEN after {self._consecutive_failures} quota errors — "
-                    f"blocking DB writes for {self._cooldown_seconds}s"
-                )
-            self._state = "OPEN"
-            self._opened_at = datetime.now(timezone.utc)
-
-    def is_open(self) -> bool:
-        if self._state == "CLOSED":
-            return False
-        if self._state == "OPEN":
-            elapsed = (datetime.now(timezone.utc) - self._opened_at).total_seconds()
-            if elapsed >= self._cooldown_seconds:
-                self._state = "HALF_OPEN"
-                logger.info("[CircuitBreaker] HALF_OPEN — probing Supabase recovery")
-                return False  # Allow one probe call through
-            return True
-        return False  # HALF_OPEN: let probe through
-
-
+# ===========================================================================
+# DatabaseClient
+# ===========================================================================
 class DatabaseClient:
-    # ── QUANT Project 담당 테이블 (수치 데이터) ───────────────────────────
+    # Keep these sets for any external code that may reference them
     QUANT_TABLES = {
         "market_data", "cvd_data", "funding_data", "liquidations",
         "microstructure_data", "liquidation_cascade_features",
         "liquidation_cascade_predictions", "macro_data", "deribit_data",
         "fear_greed_data", "onchain_daily_snapshots", "archive_manifests",
     }
-
-    # ── TEXT Project 담당 테이블 (텍스트/AI 데이터) ───────────────────────
     TEXT_TABLES = {
         "telegram_messages", "narrative_data", "ai_reports", "feedback_logs",
         "trade_executions", "dune_query_results", "daily_playbooks",
@@ -120,154 +270,49 @@ class DatabaseClient:
         "evaluation_rollups_daily", "paper_orders",
     }
 
+    MARKET_DATA_OHLCV_COLUMNS = (
+        "timestamp,symbol,exchange,open,high,low,close,volume,"
+        "taker_buy_volume,taker_sell_volume"
+    )
+
     def __init__(self):
-        options = ClientOptions(postgrest_client_timeout=60)
+        dsn = settings.DATABASE_URL
+        if not dsn:
+            raise RuntimeError(
+                "DATABASE_URL is not set in .env — "
+                "example: postgresql://botuser:pass@localhost:5432/financebot"
+            )
+        self._pool = psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=12, dsn=dsn)
+        self.client = _TableRouter(self._pool)
+        logger.info("[DB] PostgreSQL connection pool initialised")
 
-        # QUANT 클라이언트 — SUPABASE_URL_QUANT 없으면 기존 URL로 fallback
-        quant_url = getattr(settings, "SUPABASE_URL_QUANT", "") or settings.SUPABASE_URL
-        quant_key = getattr(settings, "SUPABASE_KEY_QUANT", "") or settings.SUPABASE_KEY
-        self.client_quant: Client = create_client(quant_url, quant_key, options=options)
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _qb(self, table: str) -> _QueryBuilder:
+        return _QueryBuilder(self._pool, table)
 
-        # TEXT 클라이언트 — SUPABASE_URL_TEXT 없으면 기존 URL로 fallback
-        text_url = getattr(settings, "SUPABASE_URL_TEXT", "") or settings.SUPABASE_URL
-        text_key = getattr(settings, "SUPABASE_KEY_TEXT", "") or settings.SUPABASE_KEY
-        self.client_text: Client = create_client(text_url, text_key, options=options)
-
-        # db.client.table("xxx") 호출을 테이블명 기준으로 자동 라우팅
-        self.client = _TableRouter(self)
-
-        # Per-project circuit breakers — stop retry storms on quota exhaustion
-        self._cb_quant = _CircuitBreaker(failure_threshold=3, cooldown_seconds=60)
-        self._cb_text = _CircuitBreaker(failure_threshold=3, cooldown_seconds=60)
-
-    def _circuit_breaker_for(self, table: str) -> _CircuitBreaker:
-        return self._cb_text if table in self.TEXT_TABLES else self._cb_quant
-
-    def get_circuit_breaker_status(self) -> dict:
-        """Return current circuit breaker state for both projects — useful for health checks."""
-        return {
-            "quant": {
-                "state": self._cb_quant._state,
-                "consecutive_failures": self._cb_quant._consecutive_failures,
-                "opened_at": self._cb_quant._opened_at.isoformat() if self._cb_quant._opened_at else None,
-            },
-            "text": {
-                "state": self._cb_text._state,
-                "consecutive_failures": self._cb_text._consecutive_failures,
-                "opened_at": self._cb_text._opened_at.isoformat() if self._cb_text._opened_at else None,
-            },
-        }
-
-    def _client(self, table: str) -> Client:
-        """테이블명으로 적절한 Supabase 클라이언트 반환."""
-        return self.client_text if table in self.TEXT_TABLES else self.client_quant
-
-    def reconnect_on_error(func):
-        """Transient connection error → reconnect + 1 retry.
-        Quota/rate-limit error → record in circuit breaker; open circuit blocks
-        further calls for 60 s to prevent retry storms.
-        """
-        @functools.wraps(func)
-        def wrapper(self, *args, **kwargs):
-            # Infer which circuit breaker to consult from the first kwarg/arg
-            # that looks like a table name, or fall back to quant.
-            _cb: _CircuitBreaker = self._cb_quant
-            for arg in list(args) + list(kwargs.values()):
-                if isinstance(arg, str) and arg in self.TEXT_TABLES:
-                    _cb = self._cb_text
-                    break
-                if isinstance(arg, str) and arg in self.QUANT_TABLES:
-                    _cb = self._cb_quant
-                    break
-
-            if _cb.is_open():
-                logger.warning(f"[CircuitBreaker] OPEN — skipping {func.__name__} to avoid quota storm")
-                return None
-
-            try:
-                result = func(self, *args, **kwargs)
-                _cb.record_success()
-                return result
-            except Exception as e:
-                err_msg = str(e).lower()
-                err_type = type(e).__name__.lower()
-
-                # Quota/rate-limit errors: open the circuit, do NOT reconnect
-                if _CircuitBreaker._is_quota_error(err_msg):
-                    _cb.record_failure(err_msg)
-                    logger.warning(f"[CircuitBreaker] Quota error in {func.__name__}: {err_msg[:120]}")
-                    raise
-
-                transient_keywords = [
-                    "disconnected", "closed", "connection", "eof", "protocol",
-                    "pseudo-header", "timeout", "61", "104", "refused", "reset",
-                    "cloudflare", "400 bad request", "json could not be generated",
-                    "model_validate_json", "apierrorfromjson", "validation error",
-                    "500", "502", "503", "504",
-                ]
-
-                if any(x in err_msg for x in transient_keywords) or "protocol" in err_type or "connection" in err_type:
-                    logger.warning(f"Database transient error in {func.__name__} ({e.__class__.__name__}), reconnecting...")
-                    try:
-                        import time
-                        time.sleep(1.5)
-                        options = ClientOptions(postgrest_client_timeout=60)
-
-                        quant_url = getattr(settings, "SUPABASE_URL_QUANT", "") or settings.SUPABASE_URL
-                        quant_key = getattr(settings, "SUPABASE_KEY_QUANT", "") or settings.SUPABASE_KEY
-                        self.client_quant = create_client(quant_url, quant_key, options=options)
-
-                        text_url = getattr(settings, "SUPABASE_URL_TEXT", "") or settings.SUPABASE_URL
-                        text_key = getattr(settings, "SUPABASE_KEY_TEXT", "") or settings.SUPABASE_KEY
-                        self.client_text = create_client(text_url, text_key, options=options)
-                        self.client = _TableRouter(self)
-
-                        result = func(self, *args, **kwargs)
-                        _cb.record_success()
-                        return result
-                    except Exception as retry_e:
-                        logger.error(f"Database reconnection/retry failed: {retry_e}")
-                        raise
-                raise
-        return wrapper
-
-# =====================================================================
-# QUANT PROJECT — 수치 데이터
-# =====================================================================
-
-# ----------------------- Market Data -----------------------
-
-    @reconnect_on_error
-    def insert_market_data(self, data: Dict) -> Dict:
-        return self.client_quant.table("market_data").insert(data).execute()
-
-    @reconnect_on_error
-    def batch_insert_market_data(self, data_list: List[Dict]) -> Dict:
-        """Upsert to avoid duplicate errors on (timestamp, symbol, exchange)."""
-        return self.client_quant.table("market_data").upsert(
-            data_list, on_conflict="timestamp,symbol,exchange"
-        ).execute()
-
-    def _fetch_paginated(self, table: str, limit: int, order_col: str, since: Optional[datetime] = None, columns: Optional[str] = None, **eq_filters) -> List[Dict]:
-        """Helper to bypass Supabase 1000 row max limit using pagination."""
-        client = self._client(table)
-        all_rows = []
+    def _fetch_paginated(
+        self,
+        table: str,
+        limit: int,
+        order_col: str,
+        since: Optional[datetime] = None,
+        columns: Optional[str] = None,
+        **eq_filters,
+    ) -> List[Dict]:
+        all_rows: List[Dict] = []
         fetched = 0
         page_size = 1000
         while fetched < limit:
             fetch_size = min(page_size, limit - fetched)
-            start = fetched
-            end = fetched + fetch_size - 1
-
-            query = client.table(table).select(columns or "*")
+            qb = self._qb(table).select(columns or "*")
             for k, v in eq_filters.items():
-                query = query.eq(k, v)
-
+                qb = qb.eq(k, v)
             if since:
-                query = query.gte("timestamp", since.isoformat())
-
-            response = query.order(order_col, desc=True).range(start, end).execute()
-            rows = response.data if response.data else []
+                qb = qb.gte("timestamp", since.isoformat())
+            qb = qb.order(order_col, desc=True).range(fetched, fetched + fetch_size - 1)
+            rows = qb.execute().data or []
             if not rows:
                 break
             all_rows.extend(rows)
@@ -276,207 +321,37 @@ class DatabaseClient:
                 break
         return all_rows
 
-    # OHLCV 분석에 필요한 최소 컬럼 집합 (egress 절감)
-    MARKET_DATA_OHLCV_COLUMNS = "timestamp,symbol,exchange,open,high,low,close,volume,taker_buy_volume,taker_sell_volume"
+    # ------------------------------------------------------------------
+    # MARKET DATA
+    # ------------------------------------------------------------------
+    def insert_market_data(self, data: Dict) -> Dict:
+        return self._qb("market_data").insert(data).execute()
 
-    @reconnect_on_error
-    def get_latest_market_data(self, symbol: str, limit: int = 1000, exchange: str = "binance", columns: Optional[str] = None) -> pd.DataFrame:
-        effective_columns = columns if columns is not None else self.MARKET_DATA_OHLCV_COLUMNS
-        rows = self._fetch_paginated("market_data", limit, "timestamp", columns=effective_columns, symbol=symbol, exchange=exchange)
-        if rows:
-            df = pd.DataFrame(rows)
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-            return df.sort_values('timestamp').reset_index(drop=True)
-        return pd.DataFrame()
-
-# ------------------------- CVD Data -------------------------
-
-    @reconnect_on_error
-    def batch_upsert_cvd_data(self, data_list: List[Dict]) -> Dict:
-        return self.client_quant.table("cvd_data").upsert(
-            data_list, on_conflict="timestamp,symbol"
-        ).execute()
-
-    @reconnect_on_error
-    def get_cvd_data(self, symbol: str, limit: int = 240, since: Optional[datetime] = None, columns: Optional[str] = None) -> pd.DataFrame:
-        rows = self._fetch_paginated("cvd_data", limit, "timestamp", since=since, columns=columns, symbol=symbol)
-        if rows:
-            df = pd.DataFrame(rows)
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-            df = df.sort_values('timestamp').reset_index(drop=True)
-            df['cvd'] = df['volume_delta'].cumsum()
-            if 'whale_buy_vol' in df.columns and 'whale_sell_vol' in df.columns:
-                df['whale_buy_vol'] = df['whale_buy_vol'].fillna(0)
-                df['whale_sell_vol'] = df['whale_sell_vol'].fillna(0)
-                df['whale_delta'] = df['whale_buy_vol'] - df['whale_sell_vol']
-                df['whale_cvd'] = df['whale_delta'].cumsum()
-            return df
-        return pd.DataFrame()
-
-# ----------- Whale Data (from WebSocket aggTrade) -----------
-
-    @reconnect_on_error
-    def batch_upsert_whale_data(self, data_list: List[Dict]) -> Dict:
-        """Upsert whale trade data into cvd_data table (whale columns)."""
-        return self.client_quant.table("cvd_data").upsert(
-            data_list, on_conflict="timestamp,symbol"
-        ).execute()
-
-# --------------------- Liquidation Data ---------------------
-
-    @reconnect_on_error
-    def batch_upsert_liquidations(self, data_list: List[Dict]) -> Dict:
-        return self.client_quant.table("liquidations").upsert(
-            data_list, on_conflict="timestamp,symbol"
-        ).execute()
-
-    @reconnect_on_error
-    def get_liquidation_data(self, symbol: str, limit: int = 240, since: Optional[datetime] = None, columns: Optional[str] = None) -> pd.DataFrame:
-        rows = self._fetch_paginated("liquidations", limit, "timestamp", since=since, columns=columns, symbol=symbol)
-        if rows:
-            df = pd.DataFrame(rows)
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-            return df.sort_values('timestamp').reset_index(drop=True)
-        return pd.DataFrame()
-
-# ----------------------- Funding Data -----------------------
-
-    @reconnect_on_error
-    def upsert_funding_data(self, data: Dict) -> Dict:
-        return self.client_quant.table("funding_data").upsert(
-            data, on_conflict="timestamp,symbol"
-        ).execute()
-
-    @reconnect_on_error
-    def get_funding_history(self, symbol: str, limit: int = 100, since: Optional[datetime] = None, columns: Optional[str] = None) -> pd.DataFrame:
-        rows = self._fetch_paginated("funding_data", limit, "timestamp", since=since, columns=columns, symbol=symbol)
-        if rows:
-            df = pd.DataFrame(rows)
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-            return df.sort_values('timestamp').reset_index(drop=True)
-        return pd.DataFrame()
-
-# ------------------- Microstructure Data -------------------
-
-    @reconnect_on_error
-    def batch_upsert_microstructure_data(self, data_list: List[Dict]) -> Dict:
-        return self.client_quant.table("microstructure_data").upsert(
+    def batch_insert_market_data(self, data_list: List[Dict]) -> Dict:
+        return self._qb("market_data").upsert(
             data_list, on_conflict="timestamp,symbol,exchange"
         ).execute()
 
-    @reconnect_on_error
-    def get_latest_microstructure(self, symbol: str) -> Optional[Dict]:
-        response = self.client_quant.table("microstructure_data")\
-                        .select("*")\
-            .eq("symbol", symbol)\
-            .order("timestamp", desc=True)\
-            .limit(1)\
-            .execute()
-        return response.data[0] if response.data else None
-
-    @reconnect_on_error
-    def get_microstructure_history(self, symbol: str, limit: int = 240, since: Optional[datetime] = None, columns: Optional[str] = None) -> pd.DataFrame:
-        rows = self._fetch_paginated("microstructure_data", limit, "timestamp", since=since, columns=columns, symbol=symbol, exchange="binance")
+    def get_latest_market_data(
+        self,
+        symbol: str,
+        limit: int = 1000,
+        exchange: str = "binance",
+        columns: Optional[str] = None,
+    ) -> pd.DataFrame:
+        effective_columns = columns if columns is not None else self.MARKET_DATA_OHLCV_COLUMNS
+        rows = self._fetch_paginated(
+            "market_data", limit, "timestamp",
+            columns=effective_columns, symbol=symbol, exchange=exchange,
+        )
         if rows:
             df = pd.DataFrame(rows)
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-            return df.sort_values('timestamp').reset_index(drop=True)
+            df["timestamp"] = pd.to_datetime(
+                df["timestamp"].astype(str), format="mixed", utc=True, errors="coerce"
+            ).bfill()
+            return df.sort_values("timestamp").reset_index(drop=True)
         return pd.DataFrame()
 
-    @reconnect_on_error
-    def batch_upsert_liquidation_cascade_features(self, data_list: List[Dict]) -> Dict:
-        return self.client_quant.table("liquidation_cascade_features").upsert(
-            data_list, on_conflict="timestamp,symbol,side,feature_version"
-        ).execute()
-
-    @reconnect_on_error
-    def insert_liquidation_cascade_prediction(self, data: Dict) -> Dict:
-        return self.client_quant.table("liquidation_cascade_predictions").insert(data).execute()
-
-# ------------------------ Macro Data ------------------------
-
-    @reconnect_on_error
-    def upsert_macro_data(self, data: Dict) -> Dict:
-        return self.client_quant.table("macro_data").upsert(
-            data, on_conflict="timestamp,source"
-        ).execute()
-
-    @reconnect_on_error
-    def get_latest_macro_data(self) -> Optional[Dict]:
-        response = self.client_quant.table("macro_data")\
-                        .select("*")\
-            .order("timestamp", desc=True)\
-            .limit(1)\
-            .execute()
-        return response.data[0] if response.data else None
-
-# ------------------- Deribit Options Data -------------------
-
-    @reconnect_on_error
-    def upsert_deribit_data(self, data: Dict) -> Dict:
-        return self.client_quant.table("deribit_data").upsert(
-            data, on_conflict="symbol,timestamp"
-        ).execute()
-
-    def get_latest_deribit_data(self, symbol: str) -> Optional[Dict]:
-        response = self.client_quant.table("deribit_data")\
-                        .select("*")\
-            .eq("symbol", symbol)\
-            .order("timestamp", desc=True)\
-            .limit(1)\
-            .execute()
-        return response.data[0] if response.data else None
-
-# -------------------- Fear & Greed Data --------------------
-
-    @reconnect_on_error
-    def upsert_fear_greed(self, data: Dict) -> Dict:
-        return self.client_quant.table("fear_greed_data").upsert(
-            data, on_conflict="timestamp"
-        ).execute()
-
-    def get_latest_fear_greed(self) -> Optional[Dict]:
-        response = self.client_quant.table("fear_greed_data")\
-                        .select("*")\
-            .order("timestamp", desc=True)\
-            .limit(1)\
-            .execute()
-        return response.data[0] if response.data else None
-
-# ------------------ On-Chain Daily Snapshots ----------------
-
-    @reconnect_on_error
-    def upsert_onchain_daily_snapshot(self, data: Dict) -> Dict:
-        return self.client_quant.table("onchain_daily_snapshots").upsert(
-            data, on_conflict="symbol,as_of_date,source"
-        ).execute()
-
-    def get_latest_onchain_snapshot(self, symbol: str, max_age_hours: Optional[int] = 48) -> Optional[Dict]:
-        response = self.client_quant.table("onchain_daily_snapshots")\
-                        .select("*")\
-            .eq("symbol", symbol)\
-            .order("as_of_date", desc=True)\
-            .limit(1)\
-            .execute()
-
-        row = response.data[0] if response.data else None
-        if not row or max_age_hours is None:
-            return row
-
-        try:
-            as_of_date = datetime.fromisoformat(str(row["as_of_date"]))
-            age_hours = (datetime.now(timezone.utc) - as_of_date.replace(tzinfo=timezone.utc)).total_seconds() / 3600.0
-            row = dict(row)
-            row["is_stale"] = age_hours > max_age_hours
-            row["age_hours"] = round(age_hours, 2)
-        except Exception:
-            row = dict(row)
-            row["is_stale"] = None
-        return row
-
-# ---------------------- Market Data Gap ---------------------
-
-    @reconnect_on_error
     def get_market_data_since(
         self,
         symbol: str,
@@ -485,309 +360,563 @@ class DatabaseClient:
         exchange: str = "binance",
         columns: Optional[str] = None,
     ) -> pd.DataFrame:
-        response = self.client_quant.table("market_data")\
-            .select(columns or "*")\
-            .eq("symbol", symbol)\
-            .eq("exchange", exchange)\
-            .gte("timestamp", since.isoformat())\
-            .order("timestamp")\
-            .limit(limit)\
+        rows = (
+            self._qb("market_data")
+            .select(columns or "*")
+            .eq("symbol", symbol)
+            .eq("exchange", exchange)
+            .gte("timestamp", since.isoformat())
+            .order("timestamp")
+            .limit(limit)
             .execute()
-        rows = response.data if response.data else []
+            .data or []
+        )
         if rows:
             df = pd.DataFrame(rows)
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-            return df.sort_values('timestamp').reset_index(drop=True)
+            df["timestamp"] = pd.to_datetime(
+                df["timestamp"].astype(str), format="mixed", utc=True, errors="coerce"
+            ).bfill()
+            return df.sort_values("timestamp").reset_index(drop=True)
         return pd.DataFrame()
 
     def get_market_data_gap(
         self,
         symbol: str,
         since: datetime,
-        limit: int = 43200,
+        limit: int = 2880,
         exchange: str = "binance",
         columns: Optional[str] = None,
     ) -> pd.DataFrame:
-        """GCS 로컬 캐시 이후 갭 구간만 Supabase에서 보충."""
+        effective_columns = columns if columns is not None else self.MARKET_DATA_OHLCV_COLUMNS
         rows = self._fetch_paginated(
             "market_data", limit, "timestamp",
-            since=since, columns=columns,
+            since=since, columns=effective_columns,
             symbol=symbol, exchange=exchange,
         )
         if rows:
             df = pd.DataFrame(rows)
-            df['timestamp'] = pd.to_datetime(df['timestamp'].astype(str), format='mixed', utc=True, errors='coerce').bfill()
-            return df.sort_values('timestamp').reset_index(drop=True)
+            df["timestamp"] = pd.to_datetime(
+                df["timestamp"].astype(str), format="mixed", utc=True, errors="coerce"
+            ).bfill()
+            return df.sort_values("timestamp").reset_index(drop=True)
         return pd.DataFrame()
 
-# --------------------- Archive Manifests --------------------
-
-    @reconnect_on_error
-    def upsert_archive_manifest(self, data: Dict) -> Optional[Dict]:
-        response = self.client_quant.table("archive_manifests").upsert(
-            data,
-            on_conflict="table_name,partition_key"
+    # ------------------------------------------------------------------
+    # CVD DATA
+    # ------------------------------------------------------------------
+    def batch_upsert_cvd_data(self, data_list: List[Dict]) -> Dict:
+        return self._qb("cvd_data").upsert(
+            data_list, on_conflict="timestamp,symbol"
         ).execute()
-        return response.data[0] if response.data else None
+
+    def get_cvd_data(
+        self,
+        symbol: str,
+        limit: int = 240,
+        since: Optional[datetime] = None,
+        columns: Optional[str] = None,
+    ) -> pd.DataFrame:
+        rows = self._fetch_paginated(
+            "cvd_data", limit, "timestamp", since=since, columns=columns, symbol=symbol
+        )
+        if rows:
+            df = pd.DataFrame(rows)
+            df["timestamp"] = pd.to_datetime(
+                df["timestamp"].astype(str), format="mixed", utc=True, errors="coerce"
+            ).bfill()
+            df = df.sort_values("timestamp").reset_index(drop=True)
+            df["cvd"] = df["volume_delta"].cumsum()
+            if "whale_buy_vol" in df.columns and "whale_sell_vol" in df.columns:
+                df["whale_buy_vol"] = df["whale_buy_vol"].fillna(0)
+                df["whale_sell_vol"] = df["whale_sell_vol"].fillna(0)
+                df["whale_delta"] = df["whale_buy_vol"] - df["whale_sell_vol"]
+                df["whale_cvd"] = df["whale_delta"].cumsum()
+            return df
+        return pd.DataFrame()
+
+    def batch_upsert_whale_data(self, data_list: List[Dict]) -> Dict:
+        return self._qb("cvd_data").upsert(
+            data_list, on_conflict="timestamp,symbol"
+        ).execute()
+
+    # ------------------------------------------------------------------
+    # LIQUIDATION DATA
+    # ------------------------------------------------------------------
+    def batch_upsert_liquidations(self, data_list: List[Dict]) -> Dict:
+        return self._qb("liquidations").upsert(
+            data_list, on_conflict="timestamp,symbol"
+        ).execute()
+
+    def get_liquidation_data(
+        self,
+        symbol: str,
+        limit: int = 240,
+        since: Optional[datetime] = None,
+        columns: Optional[str] = None,
+    ) -> pd.DataFrame:
+        rows = self._fetch_paginated(
+            "liquidations", limit, "timestamp", since=since, columns=columns, symbol=symbol
+        )
+        if rows:
+            df = pd.DataFrame(rows)
+            df["timestamp"] = pd.to_datetime(
+                df["timestamp"].astype(str), format="mixed", utc=True, errors="coerce"
+            ).bfill()
+            return df.sort_values("timestamp").reset_index(drop=True)
+        return pd.DataFrame()
+
+    # ------------------------------------------------------------------
+    # FUNDING DATA
+    # ------------------------------------------------------------------
+    def upsert_funding_data(self, data: Dict) -> Dict:
+        return self._qb("funding_data").upsert(
+            data, on_conflict="timestamp,symbol"
+        ).execute()
+
+    def get_funding_history(
+        self,
+        symbol: str,
+        limit: int = 100,
+        since: Optional[datetime] = None,
+        columns: Optional[str] = None,
+    ) -> pd.DataFrame:
+        rows = self._fetch_paginated(
+            "funding_data", limit, "timestamp", since=since, columns=columns, symbol=symbol
+        )
+        if rows:
+            df = pd.DataFrame(rows)
+            df["timestamp"] = pd.to_datetime(
+                df["timestamp"].astype(str), format="mixed", utc=True, errors="coerce"
+            ).bfill()
+            return df.sort_values("timestamp").reset_index(drop=True)
+        return pd.DataFrame()
+
+    # ------------------------------------------------------------------
+    # MICROSTRUCTURE DATA
+    # ------------------------------------------------------------------
+    def batch_upsert_microstructure_data(self, data_list: List[Dict]) -> Dict:
+        return self._qb("microstructure_data").upsert(
+            data_list, on_conflict="timestamp,symbol,exchange"
+        ).execute()
+
+    def get_latest_microstructure(self, symbol: str) -> Optional[Dict]:
+        rows = (
+            self._qb("microstructure_data")
+            .select("*")
+            .eq("symbol", symbol)
+            .order("timestamp", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        return rows[0] if rows else None
+
+    def get_microstructure_history(
+        self,
+        symbol: str,
+        limit: int = 240,
+        since: Optional[datetime] = None,
+        columns: Optional[str] = None,
+    ) -> pd.DataFrame:
+        rows = self._fetch_paginated(
+            "microstructure_data", limit, "timestamp",
+            since=since, columns=columns, symbol=symbol, exchange="binance",
+        )
+        if rows:
+            df = pd.DataFrame(rows)
+            df["timestamp"] = pd.to_datetime(
+                df["timestamp"].astype(str), format="mixed", utc=True, errors="coerce"
+            ).bfill()
+            return df.sort_values("timestamp").reset_index(drop=True)
+        return pd.DataFrame()
+
+    # ------------------------------------------------------------------
+    # LIQUIDATION CASCADE
+    # ------------------------------------------------------------------
+    def batch_upsert_liquidation_cascade_features(self, data_list: List[Dict]) -> Dict:
+        return self._qb("liquidation_cascade_features").upsert(
+            data_list, on_conflict="timestamp,symbol,side,feature_version"
+        ).execute()
+
+    def insert_liquidation_cascade_prediction(self, data: Dict) -> Dict:
+        return self._qb("liquidation_cascade_predictions").insert(data).execute()
+
+    # ------------------------------------------------------------------
+    # MACRO DATA
+    # ------------------------------------------------------------------
+    def upsert_macro_data(self, data: Dict) -> Dict:
+        return self._qb("macro_data").upsert(
+            data, on_conflict="timestamp,source"
+        ).execute()
+
+    def get_latest_macro_data(self) -> Optional[Dict]:
+        rows = (
+            self._qb("macro_data")
+            .select("*")
+            .order("timestamp", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        return rows[0] if rows else None
+
+    # ------------------------------------------------------------------
+    # DERIBIT DATA
+    # ------------------------------------------------------------------
+    def upsert_deribit_data(self, data: Dict) -> Dict:
+        return self._qb("deribit_data").upsert(
+            data, on_conflict="symbol,timestamp"
+        ).execute()
+
+    def get_latest_deribit_data(self, symbol: str) -> Optional[Dict]:
+        rows = (
+            self._qb("deribit_data")
+            .select("*")
+            .eq("symbol", symbol)
+            .order("timestamp", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        return rows[0] if rows else None
+
+    # ------------------------------------------------------------------
+    # FEAR & GREED DATA
+    # ------------------------------------------------------------------
+    def upsert_fear_greed(self, data: Dict) -> Dict:
+        return self._qb("fear_greed_data").upsert(
+            data, on_conflict="timestamp"
+        ).execute()
+
+    def get_latest_fear_greed(self) -> Optional[Dict]:
+        rows = (
+            self._qb("fear_greed_data")
+            .select("*")
+            .order("timestamp", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        return rows[0] if rows else None
+
+    # ------------------------------------------------------------------
+    # ONCHAIN DAILY SNAPSHOTS
+    # ------------------------------------------------------------------
+    def upsert_onchain_daily_snapshot(self, data: Dict) -> Dict:
+        return self._qb("onchain_daily_snapshots").upsert(
+            data, on_conflict="symbol,as_of_date,source"
+        ).execute()
+
+    def get_latest_onchain_snapshot(
+        self, symbol: str, max_age_hours: Optional[int] = 48
+    ) -> Optional[Dict]:
+        rows = (
+            self._qb("onchain_daily_snapshots")
+            .select("*")
+            .eq("symbol", symbol)
+            .order("as_of_date", desc=True)
+            .limit(1)
+            .execute()
+            .data
+        )
+        row = rows[0] if rows else None
+        if not row or max_age_hours is None:
+            return row
+        try:
+            as_of_date = datetime.fromisoformat(str(row["as_of_date"]))
+            age_hours = (
+                datetime.now(timezone.utc) - as_of_date.replace(tzinfo=timezone.utc)
+            ).total_seconds() / 3600.0
+            row = dict(row)
+            row["is_stale"] = age_hours > max_age_hours
+            row["age_hours"] = round(age_hours, 2)
+        except Exception:
+            row = dict(row)
+            row["is_stale"] = None
+        return row
+
+    # ------------------------------------------------------------------
+    # ARCHIVE MANIFESTS
+    # ------------------------------------------------------------------
+    def upsert_archive_manifest(self, data: Dict) -> Optional[Dict]:
+        rows = self._qb("archive_manifests").upsert(
+            data, on_conflict="table_name,partition_key"
+        ).execute().data
+        return rows[0] if rows else None
 
     def get_archive_manifest(self, table_name: str, partition_key: str) -> Optional[Dict]:
-        response = self.client_quant.table("archive_manifests")\
-                        .select("*")\
-            .eq("table_name", table_name)\
-            .eq("partition_key", partition_key)\
-            .limit(1)\
+        rows = (
+            self._qb("archive_manifests")
+            .select("*")
+            .eq("table_name", table_name)
+            .eq("partition_key", partition_key)
+            .limit(1)
             .execute()
-        return response.data[0] if response.data else None
+            .data
+        )
+        return rows[0] if rows else None
 
-    @reconnect_on_error
     def update_archive_manifest(self, manifest_id: int, data: Dict) -> Optional[Dict]:
-        response = self.client_quant.table("archive_manifests")\
-            .update(data)\
-            .eq("id", manifest_id)\
+        rows = (
+            self._qb("archive_manifests")
+            .update(data)
+            .eq("id", manifest_id)
             .execute()
-        return response.data[0] if response.data else None
+            .data
+        )
+        return rows[0] if rows else None
 
-    @reconnect_on_error
     def get_archive_manifests(
         self,
         statuses: Optional[List[str]] = None,
         cleanup_pending_only: bool = False,
         limit: int = 1000,
     ) -> List[Dict]:
+        all_rows: List[Dict] = []
         fetched = 0
-        rows: List[Dict] = []
         page_size = 500
         while fetched < limit:
             fetch_size = min(page_size, limit - fetched)
-            query = self.client_quant.table("archive_manifests").select("*")
+            qb = self._qb("archive_manifests").select("*")
             if statuses:
-                query = query.in_("status", statuses)
+                qb = qb.in_("status", statuses)
             if cleanup_pending_only:
-                query = query.is_("cleanup_completed_at", "null")
-            response = query.order("archive_started_at").range(fetched, fetched + fetch_size - 1).execute()
-            chunk = response.data if response.data else []
+                qb = qb.is_("cleanup_completed_at", "null")
+            qb = qb.order("archive_started_at").range(fetched, fetched + fetch_size - 1)
+            chunk = qb.execute().data or []
             if not chunk:
                 break
-            rows.extend(chunk)
+            all_rows.extend(chunk)
             fetched += len(chunk)
             if len(chunk) < fetch_size:
                 break
-        return rows
+        return all_rows
 
-# =====================================================================
-# TEXT PROJECT — 텍스트/AI 데이터
-# =====================================================================
-
-# -------------------- Telegram Messages --------------------
-
-    @reconnect_on_error
+    # ------------------------------------------------------------------
+    # TELEGRAM MESSAGES
+    # ------------------------------------------------------------------
     def upsert_telegram_message(self, data: Dict) -> Dict:
         try:
-            # Strip null bytes — PostgreSQL JSON rejects \x00 (causes 500 "JSON could not be generated")
             if data.get("text"):
                 data = {**data, "text": data["text"].replace("\x00", "")}
-            response = self.client_text.table("telegram_messages").upsert(
+            response = self._qb("telegram_messages").upsert(
                 data, on_conflict="channel,message_id"
             ).execute()
             if response.data:
                 msg = data.get("text", "")[:30].replace("\n", " ")
-                logger.info(f"DB: Saved [{data.get('channel')}] ID:{data.get('message_id')} | {msg}...")
+                logger.info(
+                    f"DB: Saved [{data.get('channel')}] ID:{data.get('message_id')} | {msg}..."
+                )
             return response
         except Exception as e:
             logger.error(f"DB: Failed to upsert telegram message: {e}")
             raise
 
     def insert_telegram_message(self, data: Dict) -> Dict:
-        """Backward compatible — now uses upsert."""
         return self.upsert_telegram_message(data)
 
-    def get_recent_telegram_messages(self, hours: int = 24, limit: int = 200, columns: Optional[str] = None) -> List[Dict]:
+    def get_recent_telegram_messages(
+        self, hours: int = 24, limit: int = 200, columns: Optional[str] = None
+    ) -> List[Dict]:
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-        response = self.client_text.table("telegram_messages")\
-                        .select(columns or "channel,message_id,text,created_at,timestamp")\
-            .gte("created_at", cutoff)\
-            .order("created_at", desc=True)\
-            .limit(limit)\
+        return (
+            self._qb("telegram_messages")
+            .select(columns or "channel,message_id,text,created_at,timestamp")
+            .gte("created_at", cutoff)
+            .order("created_at", desc=True)
+            .limit(limit)
             .execute()
-        return response.data if response.data else []
+            .data or []
+        )
 
-    def get_telegram_messages_for_rag(self, days: int = 7, limit: int = 1000, columns: Optional[str] = None) -> List[Dict]:
+    def get_telegram_messages_for_rag(
+        self, days: int = 7, limit: int = 1000, columns: Optional[str] = None
+    ) -> List[Dict]:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        response = self.client_text.table("telegram_messages")\
-                        .select(columns or "channel,message_id,text,created_at,timestamp")\
-            .gte("created_at", cutoff)\
-            .order("created_at", desc=True)\
-            .limit(limit)\
+        return (
+            self._qb("telegram_messages")
+            .select(columns or "channel,message_id,text,created_at,timestamp")
+            .gte("created_at", cutoff)
+            .order("created_at", desc=True)
+            .limit(limit)
             .execute()
-        return response.data if response.data else []
+            .data or []
+        )
 
-# ---------------------- Narrative Data ----------------------
-
-    @reconnect_on_error
+    # ------------------------------------------------------------------
+    # NARRATIVE DATA
+    # ------------------------------------------------------------------
     def upsert_narrative_data(self, data: Dict) -> Dict:
-        return self.client_text.table("narrative_data").upsert(
+        return self._qb("narrative_data").upsert(
             data, on_conflict="timestamp,symbol,source"
         ).execute()
 
-    def get_latest_narrative_data(self, symbol: str, source: str = "perplexity") -> Optional[Dict]:
-        response = self.client_text.table("narrative_data")\
-                        .select("*")\
-            .eq("symbol", symbol)\
-            .eq("source", source)\
-            .order("timestamp", desc=True)\
-            .limit(1)\
+    def get_latest_narrative_data(
+        self, symbol: str, source: str = "perplexity"
+    ) -> Optional[Dict]:
+        rows = (
+            self._qb("narrative_data")
+            .select("*")
+            .eq("symbol", symbol)
+            .eq("source", source)
+            .order("timestamp", desc=True)
+            .limit(1)
             .execute()
-        return response.data[0] if response.data else None
+            .data
+        )
+        return rows[0] if rows else None
 
-# ------------------------ AI Reports ------------------------
-
-    @reconnect_on_error
+    # ------------------------------------------------------------------
+    # AI REPORTS
+    # ------------------------------------------------------------------
     def insert_ai_report(self, data: Dict) -> Optional[str]:
         try:
-            response = self.client_text.table("ai_reports").insert(data).execute()
-            return response.data[0]['id'] if response.data else None
+            rows = self._qb("ai_reports").insert(data).execute().data
+            return rows[0]["id"] if rows else None
         except Exception as e:
             msg = str(e).lower()
             if "onchain_context" in msg or "onchain_snapshot" in msg:
-                logger.warning("ai_reports insert fallback: on-chain columns missing in target schema")
-                legacy_data = {k: v for k, v in data.items() if k not in {"onchain_context", "onchain_snapshot"}}
-                response = self.client_text.table("ai_reports").insert(legacy_data).execute()
-                return response.data[0]['id'] if response.data else None
+                logger.warning("ai_reports insert fallback: on-chain columns missing")
+                legacy = {k: v for k, v in data.items() if k not in {"onchain_context", "onchain_snapshot"}}
+                rows = self._qb("ai_reports").insert(legacy).execute().data
+                return rows[0]["id"] if rows else None
             raise
 
     def get_latest_report(self, symbol: str = None) -> Optional[Dict]:
-        query = self.client_text.table("ai_reports")\
-                        .select("*")\
-            .order("created_at", desc=True)
+        qb = self._qb("ai_reports").select("*").order("created_at", desc=True)
         if symbol:
-            query = query.eq("symbol", symbol)
-        response = query.limit(1).execute()
-        return response.data[0] if response.data else None
+            qb = qb.eq("symbol", symbol)
+        rows = qb.limit(1).execute().data
+        return rows[0] if rows else None
 
-# --------------------- Dune Query Data ---------------------
-
-    @reconnect_on_error
+    # ------------------------------------------------------------------
+    # DUNE QUERY RESULTS
+    # ------------------------------------------------------------------
     def upsert_dune_query_result(self, data: Dict) -> Dict:
         try:
-            return self.client_text.table("dune_query_results").upsert(
+            return self._qb("dune_query_results").upsert(
                 data, on_conflict="query_id,collected_at"
             ).execute()
         except Exception as e:
-            from loguru import logger
             import json
             from pathlib import Path
-            logger.error(f"[Fallback] Supabase failed for dune_query_results. Saving locally. {e}")
+            logger.error(f"[Fallback] DB failed for dune_query_results. Saving locally. {e}")
             try:
                 path = Path("cache/dune_fallback")
                 path.mkdir(parents=True, exist_ok=True)
-                file_path = path / f"dune_{data.get('query_id')}_{data.get('collected_at', '').replace(':', '')}.json"
-                file_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-            except Exception as inner_e:
-                logger.error(f"Failed to write dune fallback: {inner_e}")
-            return {"data": [data]}
+                fp = path / f"dune_{data.get('query_id')}_{data.get('collected_at','').replace(':','')}.json"
+                fp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+            except Exception as ie:
+                logger.error(f"Failed to write dune fallback: {ie}")
+            return SimpleNamespace(data=[data])
 
-    @reconnect_on_error
-    def get_latest_dune_query_result(self, query_id: int, columns: str = "*") -> Optional[Dict]:
+    def get_latest_dune_query_result(
+        self, query_id: int, columns: str = "*"
+    ) -> Optional[Dict]:
         try:
-            response = self.client_text.table("dune_query_results")\
-                            .select(columns)\
-                .eq("query_id", query_id)\
-                .order("collected_at", desc=True)\
-                .limit(1)\
+            rows = (
+                self._qb("dune_query_results")
+                .select(columns)
+                .eq("query_id", query_id)
+                .order("collected_at", desc=True)
+                .limit(1)
                 .execute()
-            if response.data:
-                return response.data[0]
+                .data
+            )
+            if rows:
+                return rows[0]
         except Exception as e:
-            from loguru import logger
-            logger.warning(f"[Fallback] Supabase read failed for dune query {query_id}: {e}. Checking local cache.")
-        
+            logger.warning(f"[Fallback] DB read failed for dune query {query_id}: {e}. Checking local cache.")
         try:
             from pathlib import Path
             import json
             path = Path("cache/dune_fallback")
             if path.exists():
-                files = list(path.glob(f"dune_{query_id}_*.json"))
+                files = sorted(path.glob(f"dune_{query_id}_*.json"), reverse=True)
                 if files:
-                    files.sort(reverse=True)
                     return json.loads(files[0].read_text())
         except Exception:
             pass
-
         return None
 
-# ----------------------- Feedback ---------------------------
-
-    @reconnect_on_error
+    # ------------------------------------------------------------------
+    # FEEDBACK LOGS
+    # ------------------------------------------------------------------
     def insert_feedback(self, data: Dict) -> Dict:
-        return self.client_text.table("feedback_logs").insert(data).execute()
+        return self._qb("feedback_logs").insert(data).execute()
 
-    def get_feedback_history(self, limit: int = 10, feedback_type: Optional[str] = None) -> List[Dict]:
-        query = self.client_text.table("feedback_logs").select("*")
+    def get_feedback_history(
+        self, limit: int = 10, feedback_type: Optional[str] = None
+    ) -> List[Dict]:
+        qb = self._qb("feedback_logs").select("*")
         if feedback_type in ("positive", "negative"):
-            query = query.eq("feedback_type", feedback_type)
-        response = query.order("created_at", desc=True).limit(limit).execute()
-        return response.data if response.data else []
+            qb = qb.eq("feedback_type", feedback_type)
+        return qb.order("created_at", desc=True).limit(limit).execute().data or []
 
-# --------------------- Trade Executions ---------------------
-
-    @reconnect_on_error
+    # ------------------------------------------------------------------
+    # TRADE EXECUTIONS
+    # ------------------------------------------------------------------
     def insert_trade_execution(self, data: Dict) -> Dict:
-        return self.client_text.table("trade_executions").insert(data).execute()
+        return self._qb("trade_executions").insert(data).execute()
 
     def get_trade_execution_by_order_id(self, order_id: str) -> Optional[Dict]:
         if not order_id:
             return None
-        response = self.client_text.table("trade_executions")\
-                        .select("*")\
-            .eq("order_id", order_id)\
-            .limit(1)\
+        rows = (
+            self._qb("trade_executions")
+            .select("*")
+            .eq("order_id", order_id)
+            .limit(1)
             .execute()
-        return response.data[0] if response.data else None
+            .data
+        )
+        return rows[0] if rows else None
 
-    @reconnect_on_error
-    def update_trade_execution_fill_price(self, order_id: str, fill_price: float) -> Optional[Dict]:
-        """[P2 - Fill Reconciliation] Patch confirmed fill price after async exchange fill."""
+    def update_trade_execution_fill_price(
+        self, order_id: str, fill_price: float
+    ) -> Optional[Dict]:
         if not order_id or not fill_price:
             return None
-        response = self.client_text.table("trade_executions")\
-            .update({"filled_price": fill_price})\
-            .eq("order_id", order_id)\
+        rows = (
+            self._qb("trade_executions")
+            .update({"filled_price": fill_price})
+            .eq("order_id", order_id)
             .execute()
-        return response.data[0] if response.data else None
+            .data
+        )
+        return rows[0] if rows else None
 
     def get_position_status(self, symbol: str) -> Optional[Dict]:
-        response = self.client_text.table("trade_executions")\
-                        .select("*")\
-            .eq("symbol", symbol)\
-            .order("created_at", desc=True)\
-            .limit(1)\
+        rows = (
+            self._qb("trade_executions")
+            .select("*")
+            .eq("symbol", symbol)
+            .order("created_at", desc=True)
+            .limit(1)
             .execute()
-        return response.data[0] if response.data else None
+            .data
+        )
+        return rows[0] if rows else None
 
-# -------------------- Market Status Events ------------------
-
-    @reconnect_on_error
+    # ------------------------------------------------------------------
+    # MARKET STATUS EVENTS
+    # ------------------------------------------------------------------
     def insert_market_status_event(self, data: Dict) -> Dict:
-        return self.client_text.table("market_status_events").insert(data).execute()
+        return self._qb("market_status_events").insert(data).execute()
 
-    @reconnect_on_error
     def get_market_status_events(
         self,
         symbol: Optional[str] = None,
         limit: int = 100,
         hours: Optional[int] = None,
     ) -> List[Dict]:
-        query = self.client_text.table("market_status_events")\
-                        .select("*")\
-            .order("created_at", desc=True)\
-            .limit(limit)
+        qb = self._qb("market_status_events").select("*").order("created_at", desc=True).limit(limit)
         if symbol:
-            query = query.eq("symbol", symbol)
+            qb = qb.eq("symbol", symbol)
         if hours is not None:
             cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-            query = query.gte("created_at", cutoff)
-        response = query.execute()
-        return response.data if response.data else []
+            qb = qb.gte("created_at", cutoff)
+        return qb.execute().data or []
 
     def get_market_status_events_with_fallback(
         self,
@@ -795,14 +924,11 @@ class DatabaseClient:
         limit: int = 100,
         hours: Optional[int] = None,
     ) -> List[Dict]:
-        """CB OPEN 또는 Supabase 장애 시 GCS timeseries 폴백 포함 버전."""
         result = self.get_market_status_events(symbol=symbol, limit=limit, hours=hours)
         if result:
             return result
-        # GCS 폴백
         try:
             from processors.gcs_parquet import gcs_parquet_store
-            import pandas as pd
             months_back = max((hours or 168) / 720.0, 0.1)
             df = gcs_parquet_store.load_timeseries("market_status_events", symbol or "BTCUSDT", months_back=months_back)
             if df is None or df.empty:
@@ -811,34 +937,33 @@ class DatabaseClient:
                 df["created_at"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
                 df = df.sort_values("created_at", ascending=False)
                 if hours is not None:
-                    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-                    df = df[df["created_at"] >= cutoff]
+                    cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
+                    df = df[df["created_at"] >= cutoff_dt]
             if symbol and "symbol" in df.columns:
                 df = df[df["symbol"] == symbol]
-            df = df.head(limit)
-            records = df.to_dict("records")
+            records = df.head(limit).to_dict("records")
             logger.info(f"[GCS Fallback] market_status_events loaded {len(records)} rows for {symbol}")
             return records
         except Exception as gcs_e:
             logger.warning(f"[GCS Fallback] market_status_events read failed: {gcs_e}")
         return []
 
-    @reconnect_on_error
-    def update_market_status_event_technical_snapshot(self, event_id: int, technical_snapshot: Dict) -> Dict:
-        return self.client_text.table("market_status_events")\
-            .update({"technical_snapshot": technical_snapshot})\
-            .eq("id", event_id)\
+    def update_market_status_event_technical_snapshot(
+        self, event_id: int, technical_snapshot: Dict
+    ) -> Dict:
+        return (
+            self._qb("market_status_events")
+            .update({"technical_snapshot": technical_snapshot})
+            .eq("id", event_id)
             .execute()
+        )
 
-# --------------------- News Impact Logging -------------------
-
-    @reconnect_on_error
-    def log_news_impact_predictions(self, items: list, predicted_at: "datetime") -> None:
-        """뉴스 임팩트 예측값 저장. calibration을 위해 predicted_at 시점 가격도 함께 저장."""
+    # ------------------------------------------------------------------
+    # NEWS IMPACT LOG
+    # ------------------------------------------------------------------
+    def log_news_impact_predictions(self, items: list, predicted_at: datetime) -> None:
         if not items:
             return
-        from config.settings import settings
-        rows = []
         prices: dict = {}
         for sym in settings.trading_symbols:
             try:
@@ -847,6 +972,7 @@ class DatabaseClient:
                     prices[sym] = float(df["close"].iloc[-1])
             except Exception:
                 pass
+        rows = []
         for item in items:
             rows.append({
                 "predicted_at": predicted_at.isoformat(),
@@ -858,19 +984,11 @@ class DatabaseClient:
                 "btc_price_at_time": prices.get("BTCUSDT"),
                 "eth_price_at_time": prices.get("ETHUSDT"),
             })
-        self.client_text.table("news_impact_log").insert(rows).execute()
+        self._qb("news_impact_log").insert(rows).execute()
 
-# --------------------- Evaluation Storage -------------------
-
-    @staticmethod
-    def _to_iso(value) -> Optional[str]:
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            return value.isoformat()
-        return str(value)
-
-    @reconnect_on_error
+    # ------------------------------------------------------------------
+    # EVALUATION — PREDICTIONS
+    # ------------------------------------------------------------------
     def upsert_evaluation_prediction(self, data: Dict) -> Optional[Dict]:
         if data.get("source_id") is None:
             logger.warning(
@@ -878,34 +996,35 @@ class DatabaseClient:
                 f"(symbol={data.get('symbol')}, mode={data.get('mode')})"
             )
             return None
-        response = self.client_text.table("evaluation_predictions").upsert(
-            data,
-            on_conflict="source_type,source_id,mode"
-        ).execute()
-        return response.data[0] if response.data else None
+        rows = self._qb("evaluation_predictions").upsert(
+            data, on_conflict="source_type,source_id,mode"
+        ).execute().data
+        return rows[0] if rows else None
 
     def get_evaluation_prediction_by_source(
-        self,
-        source_type: str,
-        source_id: int,
-        mode: Optional[str] = None,
+        self, source_type: str, source_id: int, mode: Optional[str] = None
     ) -> Optional[Dict]:
-        query = self.client_text.table("evaluation_predictions")\
-                        .select("*")\
-            .eq("source_type", source_type)\
+        qb = (
+            self._qb("evaluation_predictions")
+            .select("*")
+            .eq("source_type", source_type)
             .eq("source_id", source_id)
+        )
         if mode is not None:
-            query = query.eq("mode", mode)
-        response = query.order("created_at", desc=True).limit(1).execute()
-        return response.data[0] if response.data else None
+            qb = qb.eq("mode", mode)
+        rows = qb.order("created_at", desc=True).limit(1).execute().data
+        return rows[0] if rows else None
 
     def get_evaluation_prediction(self, prediction_id: int) -> Optional[Dict]:
-        response = self.client_text.table("evaluation_predictions")\
-                        .select("*")\
-            .eq("id", prediction_id)\
-            .limit(1)\
+        rows = (
+            self._qb("evaluation_predictions")
+            .select("*")
+            .eq("id", prediction_id)
+            .limit(1)
             .execute()
-        return response.data[0] if response.data else None
+            .data
+        )
+        return rows[0] if rows else None
 
     def get_evaluation_predictions(
         self,
@@ -916,51 +1035,55 @@ class DatabaseClient:
         source_type: Optional[str] = None,
         limit: int = 5000,
     ) -> List[Dict]:
-        rows: List[Dict] = []
+        all_rows: List[Dict] = []
         fetched = 0
         page_size = 1000
-        start_iso = self._to_iso(start_time)
-        end_iso = self._to_iso(end_time)
-
+        start_iso = start_time.isoformat() if start_time else None
+        end_iso = end_time.isoformat() if end_time else None
         while fetched < limit:
             fetch_size = min(page_size, limit - fetched)
-            query = self.client_text.table("evaluation_predictions").select("*")
+            qb = self._qb("evaluation_predictions").select("*")
             if symbol:
-                query = query.eq("symbol", symbol)
+                qb = qb.eq("symbol", symbol)
             if mode:
-                query = query.eq("mode", mode)
+                qb = qb.eq("mode", mode)
             if source_type:
-                query = query.eq("source_type", source_type)
+                qb = qb.eq("source_type", source_type)
             if start_iso:
-                query = query.gte("prediction_time", start_iso)
+                qb = qb.gte("prediction_time", start_iso)
             if end_iso:
-                query = query.lt("prediction_time", end_iso)
-            response = query.order("prediction_time").range(fetched, fetched + fetch_size - 1).execute()
-            chunk = response.data if response.data else []
+                qb = qb.lt("prediction_time", end_iso)
+            chunk = qb.order("prediction_time").range(fetched, fetched + fetch_size - 1).execute().data or []
             if not chunk:
                 break
-            rows.extend(chunk)
+            all_rows.extend(chunk)
             fetched += len(chunk)
             if len(chunk) < fetch_size:
                 break
-        return rows
+        return all_rows
 
-    @reconnect_on_error
+    # ------------------------------------------------------------------
+    # EVALUATION — OUTCOMES
+    # ------------------------------------------------------------------
     def upsert_evaluation_outcome(self, data: Dict) -> Optional[Dict]:
-        response = self.client_text.table("evaluation_outcomes").upsert(
-            data,
-            on_conflict="prediction_id,horizon_minutes"
-        ).execute()
-        return response.data[0] if response.data else None
+        rows = self._qb("evaluation_outcomes").upsert(
+            data, on_conflict="prediction_id,horizon_minutes"
+        ).execute().data
+        return rows[0] if rows else None
 
-    def get_evaluation_outcome(self, prediction_id: int, horizon_minutes: int) -> Optional[Dict]:
-        response = self.client_text.table("evaluation_outcomes")\
-                        .select("*")\
-            .eq("prediction_id", prediction_id)\
-            .eq("horizon_minutes", horizon_minutes)\
-            .limit(1)\
+    def get_evaluation_outcome(
+        self, prediction_id: int, horizon_minutes: int
+    ) -> Optional[Dict]:
+        rows = (
+            self._qb("evaluation_outcomes")
+            .select("*")
+            .eq("prediction_id", prediction_id)
+            .eq("horizon_minutes", horizon_minutes)
+            .limit(1)
             .execute()
-        return response.data[0] if response.data else None
+            .data
+        )
+        return rows[0] if rows else None
 
     def get_evaluation_outcomes(
         self,
@@ -969,198 +1092,136 @@ class DatabaseClient:
         end_time: Optional[datetime] = None,
         limit: int = 10000,
     ) -> List[Dict]:
-        start_iso = self._to_iso(start_time)
-        end_iso = self._to_iso(end_time)
-        rows: List[Dict] = []
+        start_iso = start_time.isoformat() if start_time else None
+        end_iso = end_time.isoformat() if end_time else None
+        all_rows: List[Dict] = []
 
         if prediction_ids:
             for idx in range(0, len(prediction_ids), 200):
                 chunk_ids = prediction_ids[idx:idx + 200]
-                query = self.client_text.table("evaluation_outcomes").select("*").in_("prediction_id", chunk_ids)
+                qb = self._qb("evaluation_outcomes").select("*").in_("prediction_id", chunk_ids)
                 if start_iso:
-                    query = query.gte("evaluated_at", start_iso)
+                    qb = qb.gte("evaluated_at", start_iso)
                 if end_iso:
-                    query = query.lt("evaluated_at", end_iso)
-                response = query.order("evaluated_at").limit(limit).execute()
-                if response.data:
-                    rows.extend(response.data)
-            return rows[:limit]
+                    qb = qb.lt("evaluated_at", end_iso)
+                rows = qb.order("evaluated_at").limit(limit).execute().data or []
+                all_rows.extend(rows)
+            return all_rows[:limit]
 
         fetched = 0
         page_size = 1000
         while fetched < limit:
             fetch_size = min(page_size, limit - fetched)
-            query = self.client_text.table("evaluation_outcomes").select("*")
+            qb = self._qb("evaluation_outcomes").select("*")
             if start_iso:
-                query = query.gte("evaluated_at", start_iso)
+                qb = qb.gte("evaluated_at", start_iso)
             if end_iso:
-                query = query.lt("evaluated_at", end_iso)
-            response = query.order("evaluated_at").range(fetched, fetched + fetch_size - 1).execute()
-            chunk = response.data if response.data else []
+                qb = qb.lt("evaluated_at", end_iso)
+            chunk = qb.order("evaluated_at").range(fetched, fetched + fetch_size - 1).execute().data or []
             if not chunk:
                 break
-            rows.extend(chunk)
+            all_rows.extend(chunk)
             fetched += len(chunk)
             if len(chunk) < fetch_size:
                 break
-        return rows
+        return all_rows
 
-    @reconnect_on_error
+    # ------------------------------------------------------------------
+    # EVALUATION — COMPONENT SCORES
+    # ------------------------------------------------------------------
     def batch_upsert_evaluation_component_scores(self, data_list: List[Dict]) -> Dict:
         if not data_list:
-            return {"data": []}
-        return self.client_text.table("evaluation_component_scores").upsert(
+            return SimpleNamespace(data=[])
+        return self._qb("evaluation_component_scores").upsert(
             data_list,
-            on_conflict="prediction_id,component_type,metric_name,scope_key"
+            on_conflict="prediction_id,component_type,metric_name,scope_key",
         ).execute()
 
     def get_evaluation_component_scores(self, prediction_ids: List[int]) -> List[Dict]:
-        rows: List[Dict] = []
-        if not prediction_ids:
-            return rows
+        all_rows: List[Dict] = []
         for idx in range(0, len(prediction_ids), 200):
             chunk_ids = prediction_ids[idx:idx + 200]
-            response = self.client_text.table("evaluation_component_scores")\
-                            .select("*")\
-                .in_("prediction_id", chunk_ids)\
-                .order("created_at")\
+            rows = (
+                self._qb("evaluation_component_scores")
+                .select("*")
+                .in_("prediction_id", chunk_ids)
+                .order("created_at")
                 .execute()
-            if response.data:
-                rows.extend(response.data)
-        return rows
+                .data or []
+            )
+            all_rows.extend(rows)
+        return all_rows
 
-    @reconnect_on_error
+    # ------------------------------------------------------------------
+    # EVALUATION — ROLLUPS DAILY
+    # ------------------------------------------------------------------
     def delete_evaluation_rollups_for_date(self, rollup_date: str) -> Dict:
-        return self.client_text.table("evaluation_rollups_daily")\
-            .delete()\
-            .eq("rollup_date", rollup_date)\
+        return (
+            self._qb("evaluation_rollups_daily")
+            .delete()
+            .eq("rollup_date", rollup_date)
             .execute()
+        )
 
-    @reconnect_on_error
     def upsert_evaluation_rollups(self, rows: List[Dict]) -> Dict:
         if not rows:
-            return {"data": []}
-        return self.client_text.table("evaluation_rollups_daily").upsert(
+            return SimpleNamespace(data=[])
+        return self._qb("evaluation_rollups_daily").upsert(
             rows,
-            on_conflict="rollup_date,symbol,mode,scope,horizon_minutes,metric_name,bucket_key"
+            on_conflict="rollup_date,symbol,mode,scope,horizon_minutes,metric_name,bucket_key",
         ).execute()
 
-# =====================================================================
-# Data Cleanup (retention 만료 데이터 삭제)
-# =====================================================================
-
-    def cleanup_old_data(self) -> Dict:
-        """[P3 - Cleanup Isolation] Delete data older than configured retention days.
-
-        Each table is wrapped in its own try/except so a single table failure does NOT
-        abort the remaining cleanups.  Partial failures are collected and returned so
-        the scheduler can alert without hiding successful deletions.
-
-        NOTE: trade_executions, feedback_logs are intentionally excluded — audit data.
-        """
-        results: Dict = {}
-        errors: List[Dict] = []
-        now = datetime.now(timezone.utc)
-
-        # Helper: run one DELETE and record result or error
-        def _delete(client, table: str, col: str, cutoff: str, key: str) -> None:
-            try:
-                r = client.table(table).delete().lt(col, cutoff).execute()
-                results[key] = len(r.data) if r.data else 0
-            except Exception as e:
-                errors.append({"table": table, "error": str(e)})
-                logger.error(f"[P3] Cleanup failed for {table}: {e}")
-
-        cutoff_market = (now - timedelta(days=settings.RETENTION_MARKET_DATA_DAYS)).isoformat()
-        cutoff_cvd    = (now - timedelta(days=settings.RETENTION_CVD_DAYS)).isoformat()
-        cutoff_long   = (now - timedelta(days=settings.RETENTION_REPORTS_DAYS)).isoformat()
-        cutoff_tg     = (now - timedelta(days=settings.RETENTION_TELEGRAM_DAYS)).isoformat()
-        cutoff_onchain = (now - timedelta(days=settings.RETENTION_REPORTS_DAYS)).date().isoformat()
-
-        # ── QUANT tables (each isolated) ──────────────────────────────
-        _delete(self.client_quant, "market_data",            "timestamp",    cutoff_market,  "market_data_deleted")
-        _delete(self.client_quant, "funding_data",           "timestamp",    cutoff_market,  "funding_data_deleted")
-        _delete(self.client_quant, "liquidations",           "timestamp",    cutoff_market,  "liquidations_deleted")
-        _delete(self.client_quant, "cvd_data",               "timestamp",    cutoff_cvd,     "cvd_data_deleted")
-        _delete(self.client_quant, "microstructure_data",    "timestamp",    cutoff_market,  "microstructure_deleted")
-        _delete(self.client_quant, "macro_data",             "timestamp",    cutoff_long,    "macro_deleted")
-        _delete(self.client_quant, "deribit_data",           "timestamp",    cutoff_market,  "deribit_deleted")
-        _delete(self.client_quant, "fear_greed_data",        "timestamp",    cutoff_long,    "fear_greed_deleted")
-        _delete(self.client_quant, "onchain_daily_snapshots","as_of_date",   cutoff_onchain, "onchain_deleted")
-
-        # ── TEXT tables (each isolated) ───────────────────────────────
-        _delete(self.client_text, "telegram_messages",  "created_at",  cutoff_tg,    "telegram_deleted")
-        _delete(self.client_text, "narrative_data",     "timestamp",   cutoff_long,  "narrative_deleted")
-        _delete(self.client_text, "ai_reports",         "created_at",  cutoff_long,  "reports_deleted")
-        _delete(self.client_text, "dune_query_results", "collected_at",cutoff_long,  "dune_deleted")
-
-        if errors:
-            results["cleanup_errors"] = errors
-            logger.warning(f"[P3] Cleanup completed with {len(errors)} table failure(s): {[e['table'] for e in errors]}")
-        else:
-            logger.info(f"[P3] Cleanup completed cleanly: {results}")
-
-        return results
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # Quant Layer 1/6: Factor Signals, IC History, Trade Attribution
-    # ══════════════════════════════════════════════════════════════════════════
-
+    # ------------------------------------------------------------------
+    # FACTOR SIGNALS / IC HISTORY / TRADE ATTRIBUTION
+    # ------------------------------------------------------------------
     def insert_factor_signals(self, data: dict) -> dict:
-        """factor_signals 테이블에 신호 스냅샷 저장."""
         try:
-            r = self.client_text.table("factor_signals").insert(data).execute()
-            return r.data[0] if r.data else {}
+            rows = self._qb("factor_signals").insert(data).execute().data
+            return rows[0] if rows else {}
         except Exception as e:
             logger.error(f"[DB] insert_factor_signals failed: {e}")
             return {}
 
     def get_factor_signals_by_decision_id(self, decision_id: str) -> dict:
-        """decision_id로 factor_signals 레코드 조회."""
         try:
             if not decision_id:
                 return {}
-            r = (
-                self.client_text.table("factor_signals")
+            rows = (
+                self._qb("factor_signals")
                 .select("*")
                 .eq("decision_id", str(decision_id))
                 .order("created_at", desc=True)
                 .limit(1)
                 .execute()
+                .data
             )
-            return r.data[0] if r.data else {}
+            return rows[0] if rows else {}
         except Exception as e:
             logger.error(f"[DB] get_factor_signals_by_decision_id failed: {e}")
             return {}
 
     def get_factor_signals(
-        self,
-        symbol: str,
-        limit: int = 100,
-        mode: str = None,
+        self, symbol: str, limit: int = 100, mode: str = None
     ) -> list:
-        """최근 factor_signals 목록 조회."""
         try:
-            q = (
-                self.client_text.table("factor_signals")
+            qb = (
+                self._qb("factor_signals")
                 .select("*")
                 .eq("symbol", symbol)
                 .order("created_at", desc=True)
                 .limit(limit)
             )
             if mode:
-                q = q.eq("mode", mode)
-            r = q.execute()
-            return r.data or []
+                qb = qb.eq("mode", mode)
+            return qb.execute().data or []
         except Exception as e:
             logger.error(f"[DB] get_factor_signals failed: {e}")
             return []
 
     def upsert_factor_ic(self, data: dict) -> dict:
-        """factor_ic_history 테이블에 IC 값 저장 (upsert)."""
         try:
-            r = self.client_text.table("factor_ic_history").insert(data).execute()
-            return r.data[0] if r.data else {}
+            rows = self._qb("factor_ic_history").insert(data).execute().data
+            return rows[0] if rows else {}
         except Exception as e:
             logger.error(f"[DB] upsert_factor_ic failed: {e}")
             return {}
@@ -1172,26 +1233,22 @@ class DatabaseClient:
         regime: str = None,
         limit: int = 1,
     ) -> list:
-        """최신 IC 히스토리 조회. factor_name 없으면 모든 팩터 반환."""
         try:
-            q = (
-                self.client_text.table("factor_ic_history")
+            qb = (
+                self._qb("factor_ic_history")
                 .select("*")
                 .eq("symbol", symbol)
                 .order("computed_at", desc=True)
-                .limit(limit * 8)  # 팩터 수만큼 여유 있게
+                .limit(limit * 8)
             )
             if factor_name:
-                q = q.eq("factor_name", factor_name)
+                qb = qb.eq("factor_name", factor_name)
             if regime:
-                q = q.eq("regime", regime)
-            r = q.execute()
-            if not r.data:
-                return []
-            # 팩터별 가장 최신 1개만
-            seen = set()
+                qb = qb.eq("regime", regime)
+            rows = qb.execute().data or []
+            seen: set = set()
             result = []
-            for row in r.data:
+            for row in rows:
                 key = (row.get("factor_name"), row.get("regime"))
                 if key not in seen:
                     seen.add(key)
@@ -1202,66 +1259,109 @@ class DatabaseClient:
             return []
 
     def insert_trade_attribution(self, data: dict) -> dict:
-        """trade_attribution 테이블에 거래 귀인 저장."""
         try:
-            r = self.client_text.table("trade_attribution").insert(data).execute()
-            return r.data[0] if r.data else {}
+            rows = self._qb("trade_attribution").insert(data).execute().data
+            return rows[0] if rows else {}
         except Exception as e:
             logger.error(f"[DB] insert_trade_attribution failed: {e}")
             return {}
 
-    def get_trade_attributions(
-        self,
-        symbol: str,
-        limit: int = 90,
-    ) -> list:
-        """최근 trade_attribution 목록 조회."""
+    def get_trade_attributions(self, symbol: str, limit: int = 90) -> list:
         try:
-            r = (
-                self.client_text.table("trade_attribution")
+            return (
+                self._qb("trade_attribution")
                 .select("*")
                 .eq("symbol", symbol)
                 .order("created_at", desc=True)
                 .limit(limit)
                 .execute()
+                .data or []
             )
-            return r.data or []
         except Exception as e:
             logger.error(f"[DB] get_trade_attributions failed: {e}")
             return []
 
-    # ── Paper Orders ───────────────────────────────────────────────────────────
-
+    # ------------------------------------------------------------------
+    # PAPER ORDERS
+    # ------------------------------------------------------------------
     def insert_paper_order(self, data: dict) -> Optional[int]:
-        """paper_orders 테이블에 가상 포지션 기록. 생성된 id 반환."""
         try:
-            r = self.client_text.table("paper_orders").insert(data).execute()
-            return r.data[0]["id"] if r.data else None
+            rows = self._qb("paper_orders").insert(data).execute().data
+            return rows[0]["id"] if rows else None
         except Exception as e:
             logger.error(f"[DB] insert_paper_order failed: {e}")
             return None
 
     def get_open_paper_orders(self) -> List[Dict]:
-        """현재 OPEN 상태인 모든 paper_orders 조회 (ws_price_feed 모니터링용)."""
         try:
-            r = (
-                self.client_text.table("paper_orders")
+            return (
+                self._qb("paper_orders")
                 .select("*")
                 .eq("status", "OPEN")
                 .execute()
+                .data or []
             )
-            return r.data or []
         except Exception as e:
             logger.error(f"[DB] get_open_paper_orders failed: {e}")
             return []
 
     def update_paper_order_closed(self, order_id: int, data: dict) -> bool:
-        """paper_order 청산 처리 (exit_price, pnl, status 업데이트)."""
         try:
-            self.client_text.table("paper_orders").update(data).eq("id", order_id).execute()
+            self._qb("paper_orders").update(data).eq("id", order_id).execute()
             return True
         except Exception as e:
             logger.error(f"[DB] update_paper_order_closed failed: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # DATA CLEANUP (retention)
+    # ------------------------------------------------------------------
+    def cleanup_old_data(self) -> Dict:
+        results: Dict = {}
+        errors: List[Dict] = []
+        now = datetime.now(timezone.utc)
+
+        def _delete(table: str, col: str, cutoff: str, key: str) -> None:
+            try:
+                self._qb(table).delete().lt(col, cutoff).execute()
+                results[key] = "deleted"
+            except Exception as e:
+                errors.append({"table": table, "error": str(e)})
+                logger.error(f"[Cleanup] Failed for {table}: {e}")
+
+        cutoff_market = (now - timedelta(days=settings.RETENTION_MARKET_DATA_DAYS)).isoformat()
+        cutoff_cvd    = (now - timedelta(days=settings.RETENTION_CVD_DAYS)).isoformat()
+        cutoff_long   = (now - timedelta(days=settings.RETENTION_REPORTS_DAYS)).isoformat()
+        cutoff_tg     = (now - timedelta(days=settings.RETENTION_TELEGRAM_DAYS)).isoformat()
+        cutoff_onchain = (now - timedelta(days=settings.RETENTION_REPORTS_DAYS)).date().isoformat()
+
+        _delete("market_data",         "timestamp",  cutoff_market,  "market_data_deleted")
+        _delete("funding_data",         "timestamp",  cutoff_market,  "funding_data_deleted")
+        _delete("liquidations",         "timestamp",  cutoff_market,  "liquidations_deleted")
+        _delete("cvd_data",             "timestamp",  cutoff_cvd,     "cvd_data_deleted")
+        _delete("microstructure_data",  "timestamp",  cutoff_market,  "microstructure_deleted")
+        _delete("macro_data",           "timestamp",  cutoff_long,    "macro_deleted")
+        _delete("deribit_data",         "timestamp",  cutoff_market,  "deribit_deleted")
+        _delete("fear_greed_data",      "timestamp",  cutoff_long,    "fear_greed_deleted")
+        _delete("onchain_daily_snapshots", "as_of_date", cutoff_onchain, "onchain_deleted")
+        _delete("telegram_messages",    "created_at", cutoff_tg,      "telegram_deleted")
+        _delete("narrative_data",       "timestamp",  cutoff_long,    "narrative_deleted")
+        _delete("ai_reports",           "created_at", cutoff_long,    "reports_deleted")
+        _delete("dune_query_results",   "collected_at", cutoff_long,  "dune_deleted")
+
+        if errors:
+            results["cleanup_errors"] = errors
+            logger.warning(f"[Cleanup] Done with {len(errors)} error(s): {[e['table'] for e in errors]}")
+        else:
+            logger.info(f"[Cleanup] Done cleanly: {results}")
+        return results
+
+    # ------------------------------------------------------------------
+    # Compatibility shims (used by some external code)
+    # ------------------------------------------------------------------
+    def get_circuit_breaker_status(self) -> dict:
+        """No-op shim — circuit breaker not needed for local PostgreSQL."""
+        return {"quant": {"state": "CLOSED"}, "text": {"state": "CLOSED"}}
+
 
 db = DatabaseClient()

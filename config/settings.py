@@ -40,12 +40,13 @@ class Settings(BaseSettings):
     VERTEX_REGION: str = "us-central1"            # 모델 호출 리전 (Gemini + Claude)
     VERTEX_REGION_GEMINI: str = "us-central1"     # Gemini 전용 (하위호환)
 
-    SUPABASE_URL: str = ""        # 하위 호환용 (단일 프로젝트 시절)
-    SUPABASE_KEY: str = ""
+    # ── Local PostgreSQL (Supabase 대체) ─────────────────────────────
+    # 예: postgresql://botuser:password@localhost:5432/financebot
+    DATABASE_URL: str = ""
 
-    # ── Supabase 2-project split ──────────────────────────────────────
-    # QUANT: 수치 데이터 (market, funding, cvd, liquidations, micro, deribit, fear_greed, macro)
-    # TEXT : 텍스트/AI (telegram, narrative, ai_reports, evaluations, trade_executions 등)
+    # Supabase 항목은 하위 호환을 위해 남겨둠 (더 이상 사용 안 함)
+    SUPABASE_URL: str = ""
+    SUPABASE_KEY: str = ""
     SUPABASE_URL_QUANT: str = ""
     SUPABASE_KEY_QUANT: str = ""
     SUPABASE_URL_TEXT: str = ""
@@ -477,12 +478,7 @@ class SecretManager:
     def load_all_secrets(self) -> dict:
         secrets = {}
         secret_names = [
-            "SUPABASE_URL",
-            "SUPABASE_KEY",
-            "SUPABASE_URL_QUANT",
-            "SUPABASE_KEY_QUANT",
-            "SUPABASE_URL_TEXT",
-            "SUPABASE_KEY_TEXT",
+            "DATABASE_URL",
             "EXECUTION_DB_URL",
             "REDIS_URL",
             "ANTHROPIC_API_KEY",

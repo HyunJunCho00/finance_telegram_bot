@@ -10,6 +10,9 @@ x-bot-service: &bot-service
   environment:
     - PROJECT_ID=${PROJECT_ID}
     - GCE_METADATA_HOST=169.254.169.254
+  depends_on:
+    postgres:
+      condition: service_healthy
   logging:
     driver: "json-file"
     options:
@@ -124,3 +127,39 @@ services:
     profiles:
       - shadow
     restart: unless-stopped
+
+  # =========================================================================
+  # 🐘 4. PostgreSQL (로컬 DB — Supabase 대체)
+  # 데이터는 named volume에 저장 → 컨테이너 재시작해도 보존
+  # 첫 시작 시 sql/ 아래 스키마 파일을 자동으로 실행
+  # =========================================================================
+  postgres:
+    image: postgres:15-alpine
+    container_name: tgbot-postgres
+    environment:
+      POSTGRES_USER: botuser
+      POSTGRES_PASSWORD: ${POSTGRES_DB_PASS:-botpass_changeme}
+      POSTGRES_DB: financebot
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - /opt/app/sql/schema_quant.sql:/docker-entrypoint-initdb.d/01_schema_quant.sql:ro
+      - /opt/app/sql/schema_text.sql:/docker-entrypoint-initdb.d/02_schema_text.sql:ro
+      - /opt/app/sql/20260407_blackrock_layers.sql:/docker-entrypoint-initdb.d/03_blackrock_layers.sql:ro
+      - /opt/app/sql/20260408_paper_orders.sql:/docker-entrypoint-initdb.d/04_paper_orders.sql:ro
+      - /opt/app/sql/20260505_news_impact_log.sql:/docker-entrypoint-initdb.d/05_news_impact_log.sql:ro
+    ports:
+      - "5432:5432"
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U botuser -d financebot"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "2"
+
+volumes:
+  postgres-data:

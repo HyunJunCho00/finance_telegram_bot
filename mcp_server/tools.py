@@ -27,9 +27,10 @@ class MCPTools:
             df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
             last_ts = df["timestamp"].max()
             gap_minutes = int((pd.Timestamp.now(tz="UTC") - last_ts).total_seconds() / 60) + 60
-            gap_limit = max(gap_minutes, 60)  # no hard cap — fetch actual gap size
+            gap_limit = min(max(gap_minutes, 60), get_settings().SWING_CANDLE_LIMIT)
             try:
-                df_gap = db.get_market_data_gap(symbol, since=last_ts, limit=gap_limit)
+                df_gap = db.get_market_data_gap(symbol, since=last_ts, limit=gap_limit,
+                                                columns=db.MARKET_DATA_OHLCV_COLUMNS)
                 if df_gap is not None and not df_gap.empty:
                     df_gap["timestamp"] = pd.to_datetime(df_gap["timestamp"], utc=True, errors="coerce")
                     df = pd.concat([df, df_gap]).drop_duplicates(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)

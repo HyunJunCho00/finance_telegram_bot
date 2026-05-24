@@ -104,6 +104,9 @@ jobs:
               --image="$IMAGE" \
               --project=${{ env.PROJECT_ID }} \
               --region=${{ env.REGION }} \
+              --network=default \
+              --subnet=default \
+              --vpc-egress=all-traffic \
               --quiet || echo "WARNING: $job update failed"
           done
 
