@@ -10,6 +10,15 @@
 
 echo "🚀 Starting Graceful Deployment Process..."
 
+# 0. Secret Manager에서 DATABASE_URL을 읽어와 패스워드를 추출해 환경 변수로 주입합니다.
+if gcloud secrets versions describe latest --secret="DATABASE_URL" --project="${PROJECT_ID:-}" &>/dev/null; then
+    echo "🔑 Fetching database password from GCP Secret Manager..."
+    RAW_DSN=$(gcloud secrets versions access latest --secret="DATABASE_URL" --project="${PROJECT_ID:-}")
+    export POSTGRES_DB_PASS=$(python3 -c "from urllib.parse import urlparse; print(urlparse('${RAW_DSN}').password or '')")
+else
+    echo "⚠️ Warning: DATABASE_URL secret not found in GCP Secret Manager. Using default DB password."
+fi
+
 # 1. 현재 이미지를 previous로 백업 (롤백용)
 if docker image inspect finance-bot:latest &>/dev/null; then
     echo "📦 Saving current image as finance-bot:previous (rollback snapshot)..."
