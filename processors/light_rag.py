@@ -1127,24 +1127,27 @@ class LightRAGEngine:
 
     # Entity extraction prompt (LLM 기반)
     EXTRACTION_PROMPT = """Extract entities and relationships from this crypto news text.
+Focus on extracting actionable trading signals (e.g. whale alerts, large transfers, ETF flows, hack events, regulatory changes).
 
 TEXT: {text}
 
 Return STRICT JSON only (no markdown):
 {{
   "entities": [
-    {{"name": "entity_name", "type": "person|org|coin|event|indicator|exchange", "description": "brief description"}}
+    {{"name": "entity_name", "type": "person|org|coin|event|indicator|exchange|wallet", "description": "brief description, including any specific amounts or metrics if mentioned"}}
   ],
   "relationships": [
-    {{"source": "entity1", "target": "entity2", "type": "relationship_type", "description": "brief explanation"}}
+    {{"source": "entity1", "target": "entity2", "type": "relationship_type", "description": "brief explanation including exact transaction volume, dollar amounts, direction, or time if mentioned"}}
   ]
 }}
 
 CRITICAL RULES:
 - Ensure all JSON objects in lists are SEPARATED BY COMMAS.
 - Do NOT include any text before or after the JSON.
-- Entity names should be lowercase, canonical (e.g. "bitcoin" not "BTC/USDT")
-- Maximum 8 entities and 6 relationships per text
+- Entity names should be lowercase, canonical (e.g. "bitcoin" not "BTC/USDT", "blackrock" not "BlackRock Inc.")
+- Maximum 8 entities and 6 relationships per text.
+- Avoid extracting generic media/news websites (e.g., 'bitcoinist', 'stacker news', 'news') as entities unless they are the primary subject of the event (e.g. hacked or sued).
+- Prioritize quantitative details: if a transfer amount is mentioned (e.g., "5,000 BTC"), it MUST be captured in the relationship's description.
 - If no result, return empty arrays: {{"entities": [], "relationships": []}}"""
 
     def __init__(self):
@@ -1844,13 +1847,13 @@ CRITICAL RULES:
         # Extract entities from query using LLM for precision
         query_entities = []
         if ai and intent in ("local", "hybrid"):
-            entity_prompt = f"Extract the core financial entities (coins, exchanges, organizations) from this query: '{query_text}'. Return a comma-separated list of keywords. If none, return empty."
+            entity_prompt = f"Extract only the core financial entities (coins, exchanges, organizations, wallet addresses) from this query: '{query_text}'. Return a comma-separated list. If none, return empty."
             try:
                 resp = ai.generate_response(
-                    system_prompt="Extract keywords.", user_message=entity_prompt,
+                    system_prompt="You are a strict keyword extractor. Return ONLY a comma-separated list of lowercase entity keywords. Absolutely no introduction, no conversational wrapper, no notes.", user_message=entity_prompt,
                     temperature=0.1, max_tokens=50, role="rag_extraction"
                 )
-                query_entities = [e.strip().lower() for e in resp.split(",") if e.strip()]
+                query_entities = [e.strip().lower() for e in resp.split(",") if e.strip() and not any(phrase in e.lower() for phrase in ["here are", "extracted", "list", "removed", "core financial"])]
             except Exception:
                 pass
                 

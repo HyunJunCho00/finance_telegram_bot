@@ -10,13 +10,23 @@
 
 echo "🚀 Starting Graceful Deployment Process..."
 
-# 0. Secret Manager에서 DATABASE_URL을 읽어와 패스워드를 추출해 환경 변수로 주입합니다.
-if gcloud secrets versions describe latest --secret="DATABASE_URL" --project="${PROJECT_ID:-}" &>/dev/null; then
-    echo "🔑 Fetching database password from GCP Secret Manager..."
-    RAW_DSN=$(gcloud secrets versions access latest --secret="DATABASE_URL" --project="${PROJECT_ID:-}")
-    export POSTGRES_DB_PASS=$(python3 -c "from urllib.parse import urlparse; print(urlparse('${RAW_DSN}').password or '')")
-else
-    echo "⚠️ Warning: DATABASE_URL secret not found in GCP Secret Manager. Using default DB password."
+# 0. Python SDK를 사용해 Secret Manager에서 DATABASE_URL을 읽어와 패스워드를 추출해 환경 변수로 주입합니다.
+echo "🔑 Fetching database password from GCP Secret Manager via Python SDK..."
+export POSTGRES_DB_PASS=$(python3 -c "
+import sys
+try:
+    import google.cloud.secretmanager as sm
+    from urllib.parse import urlparse
+    client = sm.SecretManagerServiceClient()
+    name = f'projects/${PROJECT_ID:-}/secrets/DATABASE_URL/versions/latest'
+    dsn = client.access_secret_version(request={'name': name}).payload.data.decode('UTF-8').strip()
+    print(urlparse(dsn).password or '')
+except Exception as e:
+    pass
+" 2>/dev/null)
+
+if [ -z "${POSTGRES_DB_PASS:-}" ]; then
+    echo "⚠️ Warning: Could not fetch DATABASE_URL from Secret Manager via Python SDK. Using default DB password."
 fi
 
 # 1. 현재 이미지를 previous로 백업 (롤백용)
