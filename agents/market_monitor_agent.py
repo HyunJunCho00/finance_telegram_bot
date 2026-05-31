@@ -27,6 +27,7 @@ from loguru import logger
 from processors.math_engine import math_engine
 from processors.onchain_signal_engine import onchain_signal_engine
 from processors.gcs_parquet import gcs_parquet_store
+from processors.divergence_engine import DivergenceEngine
 
 
 class MarketMonitorAgent:
@@ -587,6 +588,33 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
             else f"{len(unmatched)}개 조건 대기 중"
         )
         
+        # --- Divergence Engine Override ---
+        try:
+            div_engine = DivergenceEngine()
+            # Extract basic sentiment (defaulting to 0 for now until integrated with RAG output)
+            news_sentiment = 0.0
+            try:
+                # Try to get narrative sentiment if stored
+                snap = gcs_parquet_store.get_latest_row("onchain", symbol) or {}
+                news_sentiment = snap.get("risk_bias", 0.0)
+            except Exception:
+                pass
+
+            ns, ps, fs = div_engine.normalize_inputs({
+                "narrative_sentiment": news_sentiment,
+                "change_4h": live.get("price_chg_pct_4h", 0.0),
+                "funding_rate": live.get("funding_rate", 0.0)
+            })
+            div_score, div_signal = div_engine.calculate_divergence(ns, ps, fs)
+
+            if div_signal != "NONE" and div_score >= div_engine.DIVERGENCE_THRESHOLD:
+                result_status = div_signal
+                reasoning = f"⚠️ [DIVERGENCE DETECTED] Score: {div_score:.1f}. 뉴스 심리({ns:.1f})와 가격/펀딩({ps:.1f}/{fs:.1f})의 극단적 불일치. 역방향 스나이핑 발동."
+                logger.info(f"Monitor [{symbol}/{mode}]: DIVERGENCE OVERRIDE -> {result_status}")
+        except Exception as e:
+            logger.error(f"Divergence Engine evaluation failed: {e}")
+        # ----------------------------------
+        
         result = {
             "status": result_status,
             "symbol": symbol,
@@ -640,7 +668,7 @@ CRITICAL: The "reasoning" field MUST be written in Korean.
                 f"{result['reasoning']} 시나리오 방향이 현재 플레이북 방향과 달라 재확인이 필요합니다."
             ).strip()
 
-        if result["status"] in ["TRIGGER", "SOFT_TRIGGER"] and scenario_snapshot.get("trap_confirmed"):
+        if result["status"] in ["TRIGGER", "SOFT_TRIGGER", "CONTRARIAN_LONG", "CONTRARIAN_SHORT"] and scenario_snapshot.get("trap_confirmed"):
             result["reasoning"] = (
                 f"{result['reasoning']} 트랩 이벤트({scenario_snapshot.get('trap_state')})가 감지되어 보수적으로 감시합니다."
             ).strip()

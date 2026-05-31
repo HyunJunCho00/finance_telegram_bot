@@ -102,7 +102,7 @@ class Neo4jGraph:
             session.run("CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.type)")
 
     def upsert_entity(self, name: str, entity_type: str, description: str,
-                      source_id: str = "", timestamp: str = ""):
+                      source_id: str = "", timestamp: str = "", is_trusted: bool = False):
         """Upsert entity node. Merges descriptions on conflict."""
         if not self.driver:
             return
@@ -116,9 +116,9 @@ class Neo4jGraph:
                         e.mention_count = 1,
                         e.first_seen = $timestamp,
                         e.last_seen = $timestamp,
-                        e.evidence_count = 1,
+                        e.evidence_count = CASE WHEN $is_trusted THEN 2 ELSE 1 END,
                         e.evidence_list = [$source_id],
-                        e.status = 'PENDING'
+                        e.status = CASE WHEN $is_trusted THEN 'CORROBORATED' ELSE 'PENDING' END
                     ON MATCH SET
                         e.description = CASE
                             WHEN size(e.description) < 500 AND NOT e.description CONTAINS $description THEN e.description + ' | ' + $description
@@ -127,6 +127,7 @@ class Neo4jGraph:
                         e.mention_count = e.mention_count + 1,
                         e.last_seen = $timestamp,
                         e.evidence_count = CASE 
+                            WHEN NOT $source_id IN e.evidence_list AND $is_trusted THEN coalesce(e.evidence_count, 1) + 2
                             WHEN NOT $source_id IN e.evidence_list THEN coalesce(e.evidence_count, 1) + 1 
                             ELSE coalesce(e.evidence_count, 1) 
                         END,
@@ -135,17 +136,18 @@ class Neo4jGraph:
                             ELSE e.evidence_list 
                         END,
                         e.status = CASE
+                            WHEN $is_trusted THEN 'CORROBORATED'
                             WHEN e.status = 'PENDING' AND NOT $source_id IN e.evidence_list AND coalesce(e.evidence_count, 1) >= 2 THEN 'CORROBORATED'
                             ELSE coalesce(e.status, 'PENDING')
                         END
                 """, name=name.lower(), type=entity_type, description=description[:300],
-                     timestamp=timestamp, source_id=source_id)
+                     timestamp=timestamp, source_id=source_id, is_trusted=is_trusted)
         except Exception as e:
             logger.error(f"Neo4j upsert_entity error: {e}")
 
     def upsert_relationship(self, source: str, target: str, rel_type: str,
                             description: str = "", weight: float = 1.0,
-                            timestamp: str = "", source_id: str = ""):
+                            timestamp: str = "", source_id: str = "", is_trusted: bool = False):
         """Upsert relationship edge. Accumulates weight on conflict."""
         if not self.driver:
             return
@@ -157,22 +159,23 @@ class Neo4jGraph:
                     MERGE (s)-[r:RELATES_TO {type: $rel_type}]->(t)
                     ON CREATE SET
                         r.description = $description,
-                        r.weight = $weight,
+                        r.weight = CASE WHEN $is_trusted THEN $weight * 2.0 ELSE $weight END,
                         r.first_seen = $timestamp,
                         r.last_seen = $timestamp,
                         r.count = 1,
-                        r.evidence_count = 1,
+                        r.evidence_count = CASE WHEN $is_trusted THEN 2 ELSE 1 END,
                         r.evidence_list = [$source_id],
-                        r.status = 'PENDING'
+                        r.status = CASE WHEN $is_trusted THEN 'CORROBORATED' ELSE 'PENDING' END
                     ON MATCH SET
                         r.description = CASE
                             WHEN size(r.description) < 300 AND NOT r.description CONTAINS $description THEN r.description + ' | ' + $description
                             ELSE r.description
                         END,
-                        r.weight = r.weight + $weight,
+                        r.weight = CASE WHEN $is_trusted THEN r.weight + ($weight * 2.0) ELSE r.weight + $weight END,
                         r.last_seen = $timestamp,
                         r.count = r.count + 1,
                         r.evidence_count = CASE 
+                            WHEN NOT $source_id IN r.evidence_list AND $is_trusted THEN coalesce(r.evidence_count, 1) + 2
                             WHEN NOT $source_id IN r.evidence_list THEN coalesce(r.evidence_count, 1) + 1 
                             ELSE coalesce(r.evidence_count, 1) 
                         END,
@@ -181,12 +184,13 @@ class Neo4jGraph:
                             ELSE r.evidence_list 
                         END,
                         r.status = CASE
+                            WHEN $is_trusted THEN 'CORROBORATED'
                             WHEN r.status = 'PENDING' AND NOT $source_id IN r.evidence_list AND coalesce(r.evidence_count, 1) >= 2 THEN 'CORROBORATED'
                             ELSE coalesce(r.status, 'PENDING')
                         END
                 """, source=source.lower(), target=target.lower(),
                      rel_type=rel_type, description=description[:200],
-                     weight=weight, timestamp=timestamp, source_id=source_id)
+                     weight=weight, timestamp=timestamp, source_id=source_id, is_trusted=is_trusted)
         except Exception as e:
             logger.error(f"Neo4j upsert_relationship error: {e}")
 
@@ -232,14 +236,19 @@ class Neo4jGraph:
             return {"entity": entity, "neighbors": [], "paths": []}
         try:
             with self.driver.session() as session:
-                # Direct neighbors (depth 1)
+                # Direct neighbors (depth 1) with Time Decay (Half-life = 7 days -> lambda ~ 0.099)
                 result = session.run("""
                     MATCH (e:Entity {name: $name})-[r:RELATES_TO]-(n:Entity)
+                    WITH n, r,
+                         CASE WHEN r.last_seen IS NOT NULL THEN 
+                              duration.inDays(datetime(r.last_seen), datetime()).days
+                         ELSE 0 END AS age_days
+                    WITH n, r, r.weight * exp(-0.099 * age_days) AS decayed_weight
                     RETURN n.name AS neighbor, n.type AS type,
                            r.type AS rel_type, r.description AS rel_desc,
-                           r.weight AS weight, r.last_seen AS last_seen,
+                           decayed_weight AS weight, r.last_seen AS last_seen,
                            n.description AS desc
-                    ORDER BY r.weight DESC, r.last_seen DESC
+                    ORDER BY decayed_weight DESC, r.last_seen DESC
                     LIMIT $limit
                 """, name=entity.lower(), limit=limit)
 
@@ -255,17 +264,22 @@ class Neo4jGraph:
                         "description": record["desc"],
                     })
 
-                # 2-hop paths if needed
+                # 2-hop paths if needed with Time Decay
                 paths = []
                 if max_depth >= 2:
                     result2 = session.run("""
                         MATCH (e:Entity {name: $name})-[r1:RELATES_TO]-(n1:Entity)
                               -[r2:RELATES_TO]-(n2:Entity)
                         WHERE n2.name <> $name
+                        WITH n1, n2, r1, r2,
+                             CASE WHEN r1.last_seen IS NOT NULL THEN duration.inDays(datetime(r1.last_seen), datetime()).days ELSE 0 END AS age1,
+                             CASE WHEN r2.last_seen IS NOT NULL THEN duration.inDays(datetime(r2.last_seen), datetime()).days ELSE 0 END AS age2
+                        WITH n1, n2, r1, r2,
+                             (r1.weight * exp(-0.099 * age1)) + (r2.weight * exp(-0.099 * age2)) AS decayed_score
                         RETURN n1.name AS via, r1.type AS r1_type,
                                n2.name AS target, r2.type AS r2_type,
                                n2.description AS desc
-                        ORDER BY r1.weight + r2.weight DESC
+                        ORDER BY decayed_score DESC
                         LIMIT 10
                     """, name=entity.lower())
                     for record in result2:
@@ -1144,7 +1158,8 @@ Return STRICT JSON only (no markdown):
 CRITICAL RULES:
 - Ensure all JSON objects in lists are SEPARATED BY COMMAS.
 - Do NOT include any text before or after the JSON.
-- Entity names should be lowercase, canonical (e.g. "bitcoin" not "BTC/USDT", "blackrock" not "BlackRock Inc.")
+- Entity names should be lowercase. ALWAYS use the official canonical ticker symbol for cryptocurrencies (e.g., "btc" instead of "bitcoin", "sol" instead of "solana"). For companies, use simple canonical names (e.g., "blackrock" not "BlackRock Inc.").
+- Translate all Korean entity names to English/Tickers.
 - Maximum 8 entities and 6 relationships per text.
 - Avoid extracting generic media/news websites (e.g., 'bitcoinist', 'stacker news', 'news') as entities unless they are the primary subject of the event (e.g. hacked or sued).
 - Prioritize quantitative details: if a transfer amount is mentioned (e.g., "5,000 BTC"), it MUST be captured in the relationship's description.
@@ -1699,6 +1714,15 @@ CRITICAL RULES:
         entities = extracted.get("entities", [])
         relationships = extracted.get("relationships", [])
 
+        # Step 1.5: Cross validation via Trusted Domains
+        import re
+        TRUSTED_DOMAINS = ['bloomberg.com', 'reuters.com', 'coindesk.com', 'wsj.com', 'sec.gov', 'cointelegraph.com']
+        url_pattern = re.compile(r'https?://(?:www\.)?([^/\s]+)')
+        urls = url_pattern.findall(text)
+        is_trusted = any(any(td in domain for td in TRUSTED_DOMAINS) for domain in urls)
+        if is_trusted:
+            logger.info(f"Truth Engine: Trusted domain detected in message {doc_id}")
+
         # Step 2: Store entities in graph
         entity_names = []
         for ent in entities:
@@ -1711,6 +1735,7 @@ CRITICAL RULES:
                 description=ent.get("description", ""),
                 source_id=doc_id,
                 timestamp=timestamp,
+                is_trusted=is_trusted
             )
             entity_names.append(name)
 
@@ -1725,6 +1750,7 @@ CRITICAL RULES:
                 rel_type=rel.get("type", "related_to"),
                 description=rel.get("description", ""),
                 weight=1.0, timestamp=timestamp, source_id=doc_id,
+                is_trusted=is_trusted
             )
 
         # Step 4: Embed and store in vector store

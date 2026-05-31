@@ -191,6 +191,12 @@ LEVERAGE HARD CAPS (non-negotiable, mode-specific):
   - POSITION mode: leverage 1.0-1.5x maximum (liquidation must be nearly impossible)
   Do NOT output leverage > 1.5 when mode is POSITION, even if the playbook context suggests otherwise.
 
+CRITICAL DIVERGENCE SNIPING RULE:
+If the snapshot contains a 'CONTRARIAN_LONG' or 'CONTRARIAN_SHORT' status, it means the Market Monitor detected a severe divergence between News Sentiment and actual Price/Funding action (e.g. bad news is fully priced in, strong support holding).
+- In this unique case, you MAY override the strict playbook alignment. 
+- If you approve this contrarian execution, you MUST mandate a very tight stop-loss (e.g. just beyond the local defense level) to minimize risk.
+- You can output EXECUTE for the contrarian direction if the divergence logic is sound.
+
 Return strict JSON only:
 {
   "trigger_action": "EXECUTE" | "WAIT" | "REDUCE" | "CANCEL" | "REPLAN",
@@ -202,8 +208,8 @@ Return strict JSON only:
 }
 
 Rules:
-- If the playbook source direction is LONG, you cannot output SHORT logic.
-- If the playbook source direction is SHORT, you cannot output LONG logic.
+- If the playbook source direction is LONG, you cannot output SHORT logic (unless DIVERGENCE SNIPING overrides it).
+- If the playbook source direction is SHORT, you cannot output LONG logic (unless DIVERGENCE SNIPING overrides it).
 - Focus on whether price is entering the planned zone with confirmation on the execution timeframe. Do not overreact to small intraday fluctuations.
 - If context is stale or thesis-breaking, prefer REPLAN over inventing the opposite side.
 - win_probability_pct: your honest estimate of the probability this entry succeeds given current conditions. Do NOT anchor to the playbook's original value — re-evaluate from current snapshot.
