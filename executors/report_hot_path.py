@@ -232,9 +232,17 @@ def run_snapshot_analysis_hot_path(
     if playbook_context:
         decision = judge_agent.validate_trigger_against_playbook(snapshot, playbook_context)
     else:
-        decision = judge_agent.make_decision_from_snapshot(snapshot, lite=not gate_passed)
-    if not gate_passed:
+        # 정기 분석(scheduled_daily)일 경우, 게이트가 닫혀 있어도 Premium LLM을 강제 사용하여 풀 리포트를 뽑습니다.
+        is_lite = not gate_passed
+        if notification_context == "scheduled_daily":
+            is_lite = False
+            
+        decision = judge_agent.make_decision_from_snapshot(snapshot, lite=is_lite)
+        
+    if not gate_passed and notification_context != "scheduled_daily":
         logger.info(f"Judge lite mode (gate=CLOSED): routing to MODEL_JUDGE_FALLBACK")
+    elif not gate_passed and notification_context == "scheduled_daily":
+        logger.info(f"Gate is CLOSED, but using Premium Judge for scheduled_daily report.")
     judge_latency_ms = (time.perf_counter() - judge_started) * 1000.0
     policy_started = time.perf_counter()
     final_decision = risk_policy_engine.apply(decision, bundle, playbook_context=playbook_context)
