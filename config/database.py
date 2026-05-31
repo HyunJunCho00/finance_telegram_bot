@@ -282,6 +282,8 @@ class DatabaseClient:
                 "DATABASE_URL is not set in .env — "
                 "example: postgresql://botuser:pass@localhost:5432/financebot"
             )
+        if "connect_timeout" not in dsn:
+            dsn += ("&" if "?" in dsn else "?") + "connect_timeout=10"
         self._pool = psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=12, dsn=dsn)
         self.client = _TableRouter(self._pool)
         logger.info("[DB] PostgreSQL connection pool initialised")
