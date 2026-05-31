@@ -132,27 +132,14 @@ class PriceCollector:
 
 
     def _latest_db_timestamp_ms(self, db_symbol: str, exchange: str) -> Optional[int]:
-        """마지막 저장 캔들 타임스탬프(UTC ms) 조회.
-
-        우선순위: 로컬 parquet 캐시 → Supabase fallback
-        """
-        # 1순위: 로컬 parquet 캐시 (Binance 심볼 전용 — 분석에 사용되는 경로)
-        if exchange == 'binance':
-            try:
-                from processors.gcs_parquet import gcs_parquet_store
-                df_local = gcs_parquet_store.load_ohlcv("1m", db_symbol, months_back=1)
-                if not df_local.empty:
-                    return int(df_local.iloc[-1]['timestamp'].timestamp() * 1000)
-            except Exception as e:
-                logger.debug(f"Local parquet ts lookup failed for {db_symbol}: {e}")
-
-        # 2순위: Supabase
+        """마지막 저장 캔들 타임스탬프(UTC ms) 조회. 로컬 parquet 캐시 우선."""
         try:
-            df = db.get_latest_market_data(db_symbol, limit=1, exchange=exchange)
-            if not df.empty:
-                return int(df.iloc[-1]['timestamp'].timestamp() * 1000)
+            from processors.gcs_parquet import gcs_parquet_store
+            df_local = gcs_parquet_store.load_ohlcv("1m", db_symbol, months_back=1)
+            if not df_local.empty:
+                return int(df_local.iloc[-1]['timestamp'].timestamp() * 1000)
         except Exception as e:
-            logger.debug(f"Supabase ts lookup failed for {db_symbol}: {e}")
+            logger.debug(f"Local parquet ts lookup failed for {db_symbol}: {e}")
 
         return None
 
@@ -338,7 +325,12 @@ class PriceCollector:
                 f"written to local parquet cache"
             )
 
-        # Supabase market_data / cvd_data 제거 — 로컬 parquet이 단일 소스
+        # ── Upbit: 로컬 parquet 캐시에 저장 (타임스탬프 추적용) ──────────────
+        if upbit_market:
+            upbit_df = pd.DataFrame(upbit_market)
+            upbit_df['timestamp'] = pd.to_datetime(upbit_df['timestamp'], utc=True, errors='coerce')
+            for sym, grp in upbit_df.groupby('symbol'):
+                gcs_parquet_store.write_ohlcv_to_local(sym, grp[['timestamp', 'symbol', 'open', 'high', 'low', 'close', 'volume']])
 
     def run(self) -> None:
         data = self.collect_all_prices()
