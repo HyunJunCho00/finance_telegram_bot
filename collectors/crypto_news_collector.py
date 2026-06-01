@@ -5,12 +5,16 @@ import json
 import time
 import re
 import html
+import socket
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import List, Dict, Optional
 from loguru import logger
 from processors.light_rag import light_rag
+
+# 네트워크 요청 무한 대기(Timeout) 방지용 설정 (feedparser 등 내부 urllib 사용시 적용)
+socket.setdefaulttimeout(15.0)
 
 # 공신력 순 정렬: 전통 금융 권위 > 크립토 기관급 > 데이터/리서치 > 커뮤니티
 RSS_FEEDS = {

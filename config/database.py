@@ -244,11 +244,11 @@ class _QueryBuilder:
 # Table router: db.client.table("x") → _QueryBuilder
 # ---------------------------------------------------------------------------
 class _TableRouter:
-    def __init__(self, pool: psycopg2.pool.ThreadedConnectionPool):
-        self._pool = pool
+    def __init__(self, db_client):
+        self._db_client = db_client
 
     def table(self, table_name: str) -> _QueryBuilder:
-        return _QueryBuilder(self._pool, table_name)
+        return _QueryBuilder(self._db_client._get_pool(), table_name)
 
 
 # ===========================================================================
@@ -276,23 +276,32 @@ class DatabaseClient:
     )
 
     def __init__(self):
-        dsn = settings.DATABASE_URL
-        if not dsn:
-            raise RuntimeError(
-                "DATABASE_URL is not set in .env — "
-                "example: postgresql://botuser:pass@localhost:5432/financebot"
-            )
-        if "connect_timeout" not in dsn:
-            dsn += ("&" if "?" in dsn else "?") + "connect_timeout=10"
-        self._pool = psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=12, dsn=dsn)
-        self.client = _TableRouter(self._pool)
-        logger.info("[DB] PostgreSQL connection pool initialised")
+        self._pool = None
+        self.client = _TableRouter(self)
+        self._dsn = settings.DATABASE_URL
+        if not self._dsn:
+            logger.warning("DATABASE_URL is not set in .env")
+        else:
+            if "connect_timeout" not in self._dsn:
+                self._dsn += ("&" if "?" in self._dsn else "?") + "connect_timeout=10"
+            # Keepalives 추가 (무응답 방지)
+            keepalive = "keepalives=1&keepalives_idle=30&keepalives_interval=10&keepalives_count=5"
+            self._dsn += ("&" if "?" in self._dsn else "?") + keepalive
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    def _get_pool(self):
+        if self._pool is None:
+            if not self._dsn:
+                raise RuntimeError("DATABASE_URL is not set.")
+            try:
+                logger.info("[DB] Initializing PostgreSQL connection pool...")
+                self._pool = psycopg2.pool.ThreadedConnectionPool(minconn=2, maxconn=12, dsn=self._dsn)
+                logger.info("[DB] PostgreSQL connection pool initialised")
+            except Exception as e:
+                logger.error(f"[DB] Failed to initialize connection pool: {e}")
+                raise
+        return self._pool
     def _qb(self, table: str) -> _QueryBuilder:
-        return _QueryBuilder(self._pool, table)
+        return _QueryBuilder(self._get_pool(), table)
 
     def _fetch_paginated(
         self,
