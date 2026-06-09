@@ -1147,7 +1147,7 @@ class AIClient:
         if not client:
             logger.warning("[Grounding] Gemini client unavailable")
             return ""
-        model_id = settings.MODEL_JUDGE_FALLBACK  # gemini-2.5-flash
+        model_id = getattr(settings, "MODEL_GEMINI_SEARCH", "gemini-2.5-flash")
         try:
             config = types.GenerateContentConfig(
                 system_instruction=system_prompt,

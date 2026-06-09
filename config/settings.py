@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_CHAT_ID: str = ""
 
-    # Perplexity API for market narrative search
+    # Gemini Search API for market narrative search
     PERPLEXITY_API_KEY: str = ""
     PERPLEXITY_MODEL_NARRATIVE: str = "sonar-pro"
     PERPLEXITY_MODEL_TARGETED: str = "sonar"
@@ -163,7 +163,10 @@ class Settings(BaseSettings):
     BINANCE_PAPER_BALANCE_USD: float = 2000.0
     UPBIT_PAPER_BALANCE_KRW: float = 2000000.0
     UPBIT_PAPER_BALANCE_USD: float = 1500.0   # 약 2,000,000 KRW; paper engine USD 단위로 통합
-    MAX_LEVERAGE: int = 3
+    MAX_LEVERAGE: int = 1 # [SPOT-ONLY] Forced to 1x
+    
+    # [SPOT-ONLY] Master flag to disable all futures/short logic
+    SPOT_ONLY_MODE: bool = True
     
     COINBASE_API_KEY: str = ""
     COINBASE_API_SECRET: str = ""
@@ -199,6 +202,9 @@ class Settings(BaseSettings):
     # 2. vlm_geometric / vlm_telegram_chart -- Lightweight Flash for Vision efficiency
     MODEL_VLM_GEOMETRIC: str = "gemini-2.5-flash"
     MODEL_VLM_TELEGRAM_CHART: str = "gemini-2.5-flash"
+    
+    # Web Search Grounding (gemini-2.5-flash is extremely cheap and fast)
+    MODEL_GEMINI_SEARCH: str = "gemini-2.5-flash"
 
     # 3. meta_regime Cerebras
     MODEL_META_REGIME: str = "qwen-3-235b-a22b-instruct-2507"

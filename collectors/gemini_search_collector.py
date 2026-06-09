@@ -1,15 +1,15 @@
-"""Perplexity Search API collector for market narrative context.
+"""Gemini Search Search API collector for market narrative context.
 
 Provides the "WHY" behind market moves that pure technical data cannot.
-Uses Perplexity sonar-pro model for deep web search with citations.
+Uses Gemini Search sonar-pro model for deep web search with citations.
 
 Two search modes:
 1. search_market_narrative(symbol): Per-symbol daily unified narrative (SWING + POSITION in one response)
-   - Hard cap: one Perplexity API call per symbol per UTC day
+   - Hard cap: one Gemini Search API call per symbol per UTC day
    - Injects live market state: Fear&Greed, funding rate, 10Y yield, DXY
 2. search_targeted(entity, entity_type, context): Graph-triggered BTC/ETH-centric search
 
-Cost: ~$5/month on Perplexity Pro API plan (200 requests/day included)
+Cost: ~$5/month on Gemini Search Pro API plan (200 requests/day included)
 """
 
 import requests
@@ -21,8 +21,8 @@ from loguru import logger
 import json
 import os
 
-class PerplexityCollector:
-    BASE_URL = "https://api.perplexity.ai/chat/completions"
+class GeminiSearchCollector:
+    BASE_URL = "https://api.gemini_search.ai/chat/completions"
 
     # 심볼당 하루 최대 API 호출 횟수 (하드 제한)
     MAX_CALLS_PER_DAY = 2
@@ -55,44 +55,21 @@ class PerplexityCollector:
         return coin_name, base
 
     def _call_api(self, prompt: str, max_tokens: int = 1000, model: Optional[str] = None) -> Tuple[str, List[str]]:
-        """Common API call with automatic fallback (Pro -> Base)."""
-        target_model = model or self.default_model
-        
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "model": target_model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "You are a professional crypto market analyst. Respond in valid JSON only. No markdown.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            "max_tokens": max_tokens,
-            "temperature": 0.1,
-            "return_citations": True,
-        }
-        
-        try:
-            response = requests.post(self.BASE_URL, headers=headers, json=payload, timeout=30)
-            response.raise_for_status()
-        except requests.exceptions.HTTPError as e:
-            # Fallback Logic: If Pro fails (401/402/etc), try Base model immediately
-            if target_model == "sonar-pro" and e.response.status_code in [401, 402, 403, 429, 500]:
-                logger.warning(f"Perplexity Pro failed ({e.response.status_code}), falling back to {settings.PERPLEXITY_MODEL_TARGETED}")
-                payload["model"] = settings.PERPLEXITY_MODEL_TARGETED
-                response = requests.post(self.BASE_URL, headers=headers, json=payload, timeout=30)
-                response.raise_for_status()
-            else:
-                raise e
-
-        data = response.json()
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
-        citations = data.get("citations", [])
-        return content, citations
+        from agents.ai_router import ai_client
+        _system = (
+            "You are an external evidence engine for a crypto trading policy system. "
+            "Use your Google Search access to verify and collect facts. "
+            "Return ONLY a valid JSON object. No markdown, no prose, no code fences."
+        )
+        content = ai_client.generate_with_grounding(
+            system_prompt=_system,
+            user_message=prompt,
+            max_tokens=max_tokens,
+            temperature=0.1,
+        )
+        if not content:
+            raise Exception("Gemini Grounding returned empty response")
+        return content, []
 
     def _safe_load_json(self, value):
         if isinstance(value, dict):
@@ -613,7 +590,7 @@ class PerplexityCollector:
         _job = os.environ.get("JOB_NAME", "").strip()
         if _job != "daily_precision":
             logger.warning(
-                f"[Perplexity] BLOCKED: search_market_narrative은 daily_precision 잡에서만 허용 "
+                f"[Gemini Search] BLOCKED: search_market_narrative은 daily_precision 잡에서만 허용 "
                 f"(현재 JOB_NAME={_job!r})"
             )
             return self._empty_result(symbol)
@@ -628,9 +605,9 @@ class PerplexityCollector:
         today = datetime.now(timezone.utc).date()
 
         # 1차 캐시: 인메모리 (Supabase 무관 — 프로세스 수명 동안 유효)
-        mem = PerplexityCollector._mem_cache.get(symbol)
+        mem = GeminiSearchCollector._mem_cache.get(symbol)
         if mem and mem.get("date") == today:
-            logger.info(f"Perplexity [{symbol}]: in-memory cache hit — skipping API call")
+            logger.info(f"Gemini Search [{symbol}]: in-memory cache hit — skipping API call")
             return mem["result"]
 
         # 2차 캐시: Supabase (프로세스 재시작 후 복구용)
@@ -639,12 +616,12 @@ class PerplexityCollector:
             if last_n:
                 last_ts = datetime.fromisoformat(last_n['timestamp'].replace('Z', '+00:00'))
                 if last_ts.date() == today:
-                    logger.info(f"Perplexity [{symbol}]: already fetched today (UTC), using cached narrative.")
+                    logger.info(f"Gemini Search [{symbol}]: already fetched today (UTC), using cached narrative.")
                     cached_result = last_n.get('raw_payload', {})
                     if not cached_result:
                         cached_result = self._empty_result(symbol)
                         cached_result.update(last_n)
-                    PerplexityCollector._mem_cache[symbol] = {"date": today, "result": cached_result}
+                    GeminiSearchCollector._mem_cache[symbol] = {"date": today, "result": cached_result}
                     return cached_result
         except Exception as e:
             logger.warning(f"Narrative cache check failed (Supabase): {e}")
@@ -657,7 +634,7 @@ class PerplexityCollector:
         use_model = settings.PERPLEXITY_MODEL_TARGETED if is_emergency else settings.PERPLEXITY_MODEL_NARRATIVE
         state = self._gather_market_state(symbol)
         prompt = self._build_unified_prompt(coin_name, base, state)
-        logger.info(f"Perplexity [{coin_name}]: unified SWING+POSITION daily search")
+        logger.info(f"Gemini Search [{coin_name}]: unified SWING+POSITION daily search")
 
         try:
             content, citations = self._call_api(prompt, model=use_model)
@@ -665,19 +642,19 @@ class PerplexityCollector:
             if citations:
                 result["sources"] = citations[:5]
             self.persist_narrative(result, symbol)
-            PerplexityCollector._mem_cache[symbol] = {"date": today, "result": result}
+            GeminiSearchCollector._mem_cache[symbol] = {"date": today, "result": result}
             logger.info(
-                f"Perplexity narrative [{coin_name}]: "
+                f"Gemini Search narrative [{coin_name}]: "
                 f"sentiment={result.get('sentiment', '?')} (unified)"
             )
             return result
 
         except requests.exceptions.HTTPError as e:
-            logger.error(f"Perplexity API HTTP error: {e}")
+            logger.error(f"Gemini Search API HTTP error: {e}")
         except requests.exceptions.Timeout:
-            logger.error("Perplexity API timeout")
+            logger.error("Gemini Search API timeout")
         except Exception as e:
-            logger.error(f"Perplexity collector error: {e}")
+            logger.error(f"Gemini Search collector error: {e}")
 
         result = self._empty_result(symbol)
         self.persist_narrative(result, symbol)
@@ -907,15 +884,15 @@ class PerplexityCollector:
         import os
         _job = os.environ.get("JOB_NAME", "").strip()
         if _job != "daily_precision":
-            logger.warning(f"[Perplexity Unified] BLOCKED: JOB_NAME={_job!r}")
+            logger.warning(f"[Gemini Search Unified] BLOCKED: JOB_NAME={_job!r}")
             return {"btc": self._empty_result("BTCUSDT"), "eth": self._empty_result("ETHUSDT")}
 
         today = datetime.now(timezone.utc).date()
 
         # 인메모리 캐시
-        mem = PerplexityCollector._unified_mem_cache
+        mem = GeminiSearchCollector._unified_mem_cache
         if mem.get("date") == today:
-            logger.info("[Perplexity Unified] in-memory cache hit")
+            logger.info("[Gemini Search Unified] in-memory cache hit")
             return {"btc": mem["btc"], "eth": mem["eth"]}
 
         # GCS 캐시
@@ -923,8 +900,8 @@ class PerplexityCollector:
             from processors.gcs_parquet import gcs_parquet_store
             cached = gcs_parquet_store.download_json(self._UNIFIED_GCS_PATH)
             if cached and cached.get("date") == today.isoformat():
-                logger.info("[Perplexity Unified] GCS cache hit")
-                PerplexityCollector._unified_mem_cache = {
+                logger.info("[Gemini Search Unified] GCS cache hit")
+                GeminiSearchCollector._unified_mem_cache = {
                     "date": today, "btc": cached["btc"], "eth": cached["eth"]
                 }
                 return {"btc": cached["btc"], "eth": cached["eth"]}
@@ -980,9 +957,9 @@ class PerplexityCollector:
 
             self.persist_narrative(btc_result, "BTCUSDT")
             self.persist_narrative(eth_result, "ETHUSDT")
-            PerplexityCollector._mem_cache["BTCUSDT"] = {"date": today, "result": btc_result}
-            PerplexityCollector._mem_cache["ETHUSDT"] = {"date": today, "result": eth_result}
-            PerplexityCollector._unified_mem_cache = {"date": today, "btc": btc_result, "eth": eth_result}
+            GeminiSearchCollector._mem_cache["BTCUSDT"] = {"date": today, "result": btc_result}
+            GeminiSearchCollector._mem_cache["ETHUSDT"] = {"date": today, "result": eth_result}
+            GeminiSearchCollector._unified_mem_cache = {"date": today, "btc": btc_result, "eth": eth_result}
             try:
                 from processors.gcs_parquet import gcs_parquet_store
                 gcs_parquet_store.upload_json(self._UNIFIED_GCS_PATH, {
@@ -1040,7 +1017,7 @@ class PerplexityCollector:
         entity: str,
         entity_type: str = "institution",
         context: str = "",
-        force_perplexity: bool = False,
+        force_gemini_search: bool = False,
         search_depth: str = "basic"
     ) -> Dict:
         """Graph-triggered targeted search.
@@ -1048,8 +1025,8 @@ class PerplexityCollector:
         Strategy: Use Tavily as default (routine triangulation) with configurable depth.
         Budget Guard: Max 30 Tavily searches per day to stay within free tier.
         """
-        # [V12.2] Prioritize Tavily (budget: 33/day). Reserve Perplexity for Reports only.
-        if settings.TAVILY_API_KEY and not force_perplexity:
+        # [V12.2] Prioritize Tavily (budget: 33/day). Reserve Gemini Search for Reports only.
+        if settings.TAVILY_API_KEY and not force_gemini_search:
             from .tavily_collector import tavily_collector
             if self._check_tavily_budget(daily_limit=33):
                 logger.info(f"Using Tavily ({search_depth}) for targeted search: [{entity}]")
@@ -1062,7 +1039,7 @@ class PerplexityCollector:
                     logger.error(f"Tavily search error for [{entity}]: {e}")
 
         # [V12.3] Secondary Fallback: Serper (Google SERP) - High precision for links
-        if settings.SERPER_API_KEY and not force_perplexity:
+        if settings.SERPER_API_KEY and not force_gemini_search:
             from .serper_collector import serper_collector
             logger.info(f"Using Serper for targeted link verification: [{entity}]")
             try:
@@ -1084,7 +1061,7 @@ class PerplexityCollector:
             except Exception as e:
                 logger.error(f"Serper search error for [{entity}]: {e}")
 
-        # Final Fallback to Perplexity (Reserve for High Importance or if forced)
+        # Final Fallback to Gemini Search (Reserve for High Importance or if forced)
         if not self.api_key:
             logger.warning("PERPLEXITY_API_KEY not set, skipping targeted search")
             return self._empty_targeted_result(entity)
@@ -1170,16 +1147,16 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
             result["trust_score"] = int((ai_conf * 0.4) + source_score)
 
             logger.info(
-                f"Perplexity targeted [{entity}/{entity_type}]: "
+                f"Gemini Search targeted [{entity}/{entity_type}]: "
                 f"Trust {result['trust_score']}% | {len(result.get('key_facts', []))} facts"
             )
             return result
 
         except requests.exceptions.Timeout:
-            logger.error(f"Perplexity targeted search timeout for [{entity}]")
+            logger.error(f"Gemini Search targeted search timeout for [{entity}]")
             return self._empty_targeted_result(entity)
         except Exception as e:
-            logger.error(f"Perplexity targeted search error [{entity}]: {e}")
+            logger.error(f"Gemini Search targeted search error [{entity}]: {e}")
             return self._empty_targeted_result(entity)
 
     def _parse_targeted_response(self, content: str, entity: str) -> Dict:
@@ -1233,7 +1210,7 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
         return "\n".join(lines)
 
     def _parse_response(self, content: str, symbol: str) -> Dict:
-        """Parse JSON from Perplexity response, handling markdown code blocks."""
+        """Parse JSON from Gemini Search response, handling markdown code blocks."""
         try:
             text = content.strip()
             if text.startswith("```"):
@@ -1243,7 +1220,7 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
             result = json.loads(text)
             return self._normalize_narrative_result(result, symbol, status="ok")
         except json.JSONDecodeError:
-            logger.warning("Failed to parse Perplexity JSON, using raw text")
+            logger.warning("Failed to parse Gemini Search JSON, using raw text")
             raw = {
                 "symbol": symbol,
                 "summary": content[:500],
@@ -1287,7 +1264,7 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
         """
         from pathlib import Path
         today = datetime.now(timezone.utc).date().isoformat()
-        path = Path("cache/perplexity_daily.json")
+        path = Path("cache/gemini_search_daily.json")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             data: dict = json.loads(path.read_text()) if path.exists() else {}
@@ -1297,15 +1274,15 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
             count = int(data.get(key, 0))
             if count >= self.MAX_CALLS_PER_DAY:
                 logger.warning(
-                    f"[Perplexity] HARD LIMIT BLOCKED: {symbol} already {count}/{self.MAX_CALLS_PER_DAY} calls today"
+                    f"[Gemini Search] HARD LIMIT BLOCKED: {symbol} already {count}/{self.MAX_CALLS_PER_DAY} calls today"
                 )
                 return False
             data[key] = count + 1
             path.write_text(json.dumps(data))
-            logger.info(f"[Perplexity] daily slot acquired: {symbol} {count + 1}/{self.MAX_CALLS_PER_DAY}")
+            logger.info(f"[Gemini Search] daily slot acquired: {symbol} {count + 1}/{self.MAX_CALLS_PER_DAY}")
             return True
         except Exception as e:
-            logger.warning(f"[Perplexity] daily slot file error ({e}) — fail-open")
+            logger.warning(f"[Gemini Search] daily slot file error ({e}) — fail-open")
             return True  # 파일 오류는 차단 안 함 (Supabase 캐시가 백업)
 
     def persist_narrative(self, narrative: Dict, symbol: str) -> None:
@@ -1315,7 +1292,7 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
             payload = {
                 "timestamp": now,
                 "symbol": symbol,
-                "source": "perplexity",
+                "source": "gemini_search",
                 "status": narrative.get("status", "unknown"),
                 "sentiment": narrative.get("sentiment", "neutral"),
                 "summary": narrative.get("summary", ""),
@@ -1419,4 +1396,4 @@ Be specific and factual. If {entity} has no clear BTC/ETH relevance, state that 
         return "\n".join(lines)
 
 
-perplexity_collector = PerplexityCollector()
+gemini_search_collector = GeminiSearchCollector()

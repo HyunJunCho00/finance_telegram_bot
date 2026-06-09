@@ -74,7 +74,7 @@ def get_cvd(symbol: str, minutes: int = 240) -> dict:
 
 @mcp.tool()
 def search_narrative(symbol: str) -> dict:
-    """Search market narrative via Perplexity API.
+    """Search market narrative via Gemini Search API.
     Returns WHY the price is moving: sentiment, bullish/bearish factors, macro context."""
     logger.warning(f"MCP tool: search_narrative blocked for {symbol}")
     return {

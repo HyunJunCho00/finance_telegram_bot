@@ -162,7 +162,7 @@ def _should_defer_heavy_job(job_name: str) -> bool:
 def _refresh_snapshots_for_modes(
     modes: list[TradingMode],
     *,
-    allow_perplexity: bool,
+    allow_web_search: bool,
     label: str,
 ) -> None:
     from config.local_state import state_manager
@@ -176,12 +176,12 @@ def _refresh_snapshots_for_modes(
             try:
                 logger.info(
                     f"{label}: refreshing snapshot for {symbol}/{mode.value} "
-                    f"(perplexity={'on' if allow_perplexity else 'off'})"
+                    f"(perplexity={'on' if allow_web_search else 'off'})"
                 )
                 orchestrator.refresh_snapshot_with_mode(
                     symbol,
                     mode,
-                    allow_perplexity=allow_perplexity,
+                    allow_web_search=allow_web_search,
                     include_meta=False,
                     include_vlm=False,
                 )
@@ -195,7 +195,7 @@ def job_snapshot_refresh_fast():
         return
     _refresh_snapshots_for_modes(
         [TradingMode.SWING],
-        allow_perplexity=False,
+        allow_web_search=False,
         label="Snapshot fast refresh",
     )
 
@@ -206,7 +206,7 @@ def job_snapshot_refresh_narrative():
         return
     _refresh_snapshots_for_modes(
         [TradingMode.SWING],
-        allow_perplexity=True,
+        allow_web_search=True,
         label="Snapshot narrative refresh",
     )
 
@@ -550,7 +550,7 @@ def main():
     logger.info(f"  Chart for VLM: {settings.should_use_chart}")
     logger.info(f"  Symbols: {', '.join(settings.trading_symbols)}")
     logger.info(f"  AI: Gemini Judge/VLM (Project A/B) + Cerebras (meta/risk) + Groq (news/rag) + OpenRouter (monitor)")
-    logger.info(f"  Data: Global OI + OI Divergence + MFI Proxy + Liquidations + Coin Metrics + Perplexity + LightRAG")
+    logger.info(f"  Data: Global OI + OI Divergence + MFI Proxy + Liquidations + Coin Metrics + Gemini Search + LightRAG")
     logger.info(f"  Dune: {'enabled' if dune_collector else 'disabled'}")
     logger.info(f"  LightRAG: Neo4j {'connected' if settings.NEO4J_URI else 'in-memory'} + "
                 f"Milvus {'connected' if settings.MILVUS_URI else 'in-memory'}")

@@ -42,7 +42,7 @@ class TavilyCollector:
             return {"results": [], "answer": "", "status": "error", "error": str(e)}
 
     def search_targeted_compat(self, entity: str, context: str = "", search_depth: str = "advanced") -> Dict[str, Any]:
-        """Compatibility wrapper for Perplexity's search_targeted logic."""
+        """Compatibility wrapper for Gemini Search's search_targeted logic."""
         query = f"{entity} crypto news verification. {context}"
         
         # If advanced (high priority), restrict to trusted domains

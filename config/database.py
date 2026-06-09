@@ -763,7 +763,7 @@ class DatabaseClient:
         ).execute()
 
     def get_latest_narrative_data(
-        self, symbol: str, source: str = "perplexity"
+        self, symbol: str, source: str = "gemini_search"
     ) -> Optional[Dict]:
         rows = (
             self._qb("narrative_data")

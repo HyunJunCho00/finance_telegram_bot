@@ -156,7 +156,7 @@ class FactorICTracker:
         except Exception:
             signals["onchain_flow_signal"] = 0.0
 
-        # 5. narrative_sentiment_signal (Perplexity + RAG)
+        # 5. narrative_sentiment_signal (Gemini Search + RAG)
         try:
             # unified_narrative에서 bullish/bearish 키워드 카운트
             narrative = (state.get("unified_narrative") or

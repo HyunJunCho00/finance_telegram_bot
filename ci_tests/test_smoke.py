@@ -22,7 +22,7 @@ def _minimal_state(symbol: str = "BTCUSDT", mode: str = "swing") -> dict:
         "mode": mode,
         "is_emergency": False,
         "execute_trades": False,
-        "allow_perplexity": False,
+        "allow_web_search": False,
         "notification_context": "test",
         "market_data_compact": "",
         "narrative_text": "",
@@ -159,4 +159,4 @@ def test_refresh_snapshot_bundle_no_crash():
          patch.object(orch, "node_rule_based_chart", return_value={"blackboard": {"chart_rules": {}}}), \
          patch.object(orch, "node_vlm_geometric_expert", return_value={"blackboard": {"vlm_geometry": {}}}), \
          patch.object(orch, "_clear_symbol_mode_caches", return_value=None):
-        refresher.refresh_snapshot_bundle("BTCUSDT", TradingMode.SWING, allow_perplexity=False)
+        refresher.refresh_snapshot_bundle("BTCUSDT", TradingMode.SWING, allow_web_search=False)

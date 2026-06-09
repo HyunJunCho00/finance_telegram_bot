@@ -2103,7 +2103,7 @@ CRITICAL RULES:
     def run_triangulation_worker(self, limit: int = 5):
         """Cross-Domain Triangulation: Verifies CORROBORATED claims via Tavily/Serper.
 
-        Perplexity는 triangulation에서 완전 배제 — daily_precision 전용.
+        Gemini Search는 triangulation에서 완전 배제 — daily_precision 전용.
         Tavily(무료 33회/일) → Serper(무료 2,500회) 순으로 사용.
         """
         if not hasattr(self.graph, 'get_triangulation_candidates'):

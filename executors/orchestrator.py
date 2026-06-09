@@ -71,7 +71,7 @@ from processors.light_rag import light_rag
 from processors.onchain_signal_engine import onchain_signal_engine
 from processors.gcs_parquet import gcs_parquet_store
 # CVD normalizer removed - CVD pipeline deprecated
-from collectors.perplexity_collector import perplexity_collector
+from collectors.gemini_search_collector import gemini_search_collector
 from collectors.macro_collector import macro_collector
 from agents.vlm_geometric_agent import vlm_geometric_agent
 from agents.meta_agent import meta_agent
@@ -278,7 +278,7 @@ class AnalysisState(TypedDict):
     mode: str  # "swing" or "position"
     is_emergency: bool
     execute_trades: bool
-    allow_perplexity: bool
+    allow_web_search: bool
     notification_context: str
     playbook_context: dict
     emergency_context: dict
@@ -490,7 +490,7 @@ def node_collect_data(state: AnalysisState) -> dict:
         "errors": state.get("errors", [])
     }
 def node_context_gathering(state: AnalysisState) -> dict:
-    """Consolidated node to gather all external context (Perplexity, RAG, DB, etc.)
+    """Consolidated node to gather all external context (Gemini Search, RAG, DB, etc.)
     Uses ThreadPoolExecutor to run expensive I/O operations in parallel.
     """
     import concurrent.futures
@@ -499,22 +499,22 @@ def node_context_gathering(state: AnalysisState) -> dict:
     mode = TradingMode(state["mode"])
     cache_key = _cache_key(symbol, mode)
     is_emergency = state.get("is_emergency", False)
-    allow_perplexity = bool(state.get("allow_perplexity", False))
+    allow_web_search = bool(state.get("allow_web_search", False))
     asset = "BTC" if "BTC" in symbol else "ETH"
     coin_name = "Bitcoin BTC" if "BTC" in symbol else "Ethereum ETH"
 
-    def fetch_perplexity():
+    def fetch_search_narrative():
         perp_updates = {}
-        if not allow_perplexity:
-            logger.info(f"Perplexity disabled for {symbol} in this analysis path.")
+        if not allow_web_search:
+            logger.info(f"Gemini Search disabled for {symbol} in this analysis path.")
             perp_updates["narrative_text"] = "Market Narrative: Disabled for this analysis path"
             return perp_updates
         try:
             # 통합 BTC+ETH 1회 호출 → GCS 캐시로 두 심볼 공유
-            unified = perplexity_collector.search_market_narrative_unified()
+            unified = gemini_search_collector.search_market_narrative_unified()
             sym_key = "btc" if "BTC" in symbol else "eth"
-            narrative = unified.get(sym_key) or perplexity_collector._empty_result(symbol)
-            narrative_text = perplexity_collector.format_for_agents(narrative)
+            narrative = unified.get(sym_key) or gemini_search_collector._empty_result(symbol)
+            narrative_text = gemini_search_collector.format_for_agents(narrative)
             logger.info(f"Narrative for {asset}: {narrative.get('sentiment', '?')} (unified)")
             perp_updates["narrative_text"] = narrative_text
             
@@ -523,11 +523,11 @@ def node_context_gathering(state: AnalysisState) -> dict:
                 import hashlib
                 from datetime import datetime, timezone
                 ts = datetime.now(timezone.utc).isoformat()
-                doc_id = hashlib.md5(f"perplexity:{symbol}:{ts[:13]}".encode()).hexdigest()
-                light_rag.ingest_message(text=narrative_text, channel=f"perplexity_{symbol}", timestamp=ts, message_id=doc_id)
-                logger.info(f"RAG: Perplexity narrative ingested for {symbol}")
+                doc_id = hashlib.md5(f"gemini_search:{symbol}:{ts[:13]}".encode()).hexdigest()
+                light_rag.ingest_message(text=narrative_text, channel=f"gemini_search_{symbol}", timestamp=ts, message_id=doc_id)
+                logger.info(f"RAG: Gemini Search narrative ingested for {symbol}")
         except Exception as e:
-            logger.error(f"Perplexity error: {e}")
+            logger.error(f"Gemini Search error: {e}")
             perp_updates["narrative_text"] = "Market Narrative: Unavailable"
         return perp_updates
 
@@ -909,7 +909,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
 
     # Run network/DB calls in parallel
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        f_perp  = executor.submit(fetch_perplexity)
+        f_perp  = executor.submit(fetch_search_narrative)
         f_rag   = executor.submit(fetch_rag)
         f_db    = executor.submit(fetch_db_contexts)
         f_stats = executor.submit(fetch_stats_context)
@@ -933,7 +933,7 @@ def _merge_narrative_sources(
 ) -> str:
     """Deduplicate and merge 3 narrative sources into one compact context string.
 
-    Priority: Perplexity (primary) > LightRAG (secondary) > Telegram (tertiary).
+    Priority: Gemini Search (primary) > LightRAG (secondary) > Telegram (tertiary).
     Dedup method: 4-char character-level sliding-window fingerprints.
     Works for both Korean and English without tokenization.
 
@@ -953,14 +953,14 @@ def _merge_narrative_sources(
     parts: list = []
     total = 0
 
-    # 1. Perplexity narrative — always primary, hard cap 700 chars
+    # 1. Gemini Search narrative — always primary, hard cap 700 chars
     if narrative_text:
         chunk = narrative_text.strip()[:700]
         parts.append(chunk)
         seen.update(_fingerprints(chunk))
         total += len(chunk)
 
-    # 2. LightRAG context — line-level dedup vs Perplexity, cap 400 chars
+    # 2. LightRAG context — line-level dedup vs Gemini Search, cap 400 chars
     if rag_context and total < max_chars:
         new_lines: list = []
         rag_total = 0
@@ -1451,9 +1451,55 @@ def node_triage(state: AnalysisState) -> dict:
         logger.error(f"Confluence score computation error: {e}")
         confluence_score_payload = {"score": 0, "direction": "NEUTRAL", "factors": [], "gate_passed": False, "long_score": 0, "short_score": 0}
 
+    # ── Capitulation Gate (Spot-Only 4-Layer Sniper) ───────────────────────
+    cap_gate_passed = False
+    cap_gate_reason = "No capitulation conditions met."
+    from config.settings import settings as s_config
+    if getattr(s_config, "SPOT_ONLY_MODE", False):
+        try:
+            market_data = _market_data_cache.get(_cache_key(symbol, mode), {}) or {}
+            tf_data = market_data.get("timeframes", {}).get("4h", {})
+            rsi_4h = float(tf_data.get("indicators", {}).get("rsi", 50))
+            
+            raw_fnd = state.get("raw_funding", {}) or {}
+            fund_rate = float(raw_fnd.get("funding_rate", 0) or 0)
+            
+            # Simple 4h OI check (fallback to 0 if not available)
+            oi_drop_pct = 0.0
+            try:
+                oi_res = db.client.table("funding_data").select("oi_binance").eq("symbol", symbol).order("timestamp", desc=True).limit(12).execute()
+                if oi_res.data and len(oi_res.data) >= 12:
+                    oi_now = float(oi_res.data[0].get("oi_binance", 0))
+                    oi_prev = float(oi_res.data[-1].get("oi_binance", 0))
+                    if oi_prev > 0:
+                        oi_drop_pct = ((oi_now - oi_prev) / oi_prev) * 100
+            except Exception:
+                pass
+                
+            # Layer 1 & 2 Conditions
+            if rsi_4h < 30.0 or "liquidation_cascade" in deduplicated_anomalies:
+                if fund_rate < -0.01 and oi_drop_pct < -5.0:
+                    cap_gate_passed = True
+                    cap_gate_reason = f"RSI_4H={rsi_4h:.1f}, Funding={fund_rate:.4f}, OI_Drop={oi_drop_pct:.1f}%"
+                else:
+                    cap_gate_reason = f"Derivatives not exhausted. Funding={fund_rate:.4f}, OI_Drop={oi_drop_pct:.1f}%"
+            else:
+                cap_gate_reason = f"Price not extreme. RSI_4H={rsi_4h:.1f}"
+                
+            logger.info(f"[CapitulationGate] Passed={cap_gate_passed} | {cap_gate_reason}")
+        except Exception as e:
+            logger.error(f"[CapitulationGate] Error: {e}")
+            cap_gate_reason = f"Error evaluating gate: {e}"
+
     return {
         "anomalies": deduplicated_anomalies,
-        "blackboard": {"confluence_score": confluence_score_payload},
+        "blackboard": {
+            "confluence_score": confluence_score_payload,
+            "capitulation_gate": {
+                "passed": cap_gate_passed,
+                "reason": cap_gate_reason
+            }
+        },
     }
 
 
@@ -1870,6 +1916,27 @@ def node_judge_agent(state: AnalysisState) -> dict:
     symbol = state.get("symbol", "BTCUSDT")
     cache_key = _cache_key(symbol, mode)
     
+    # ── Capitulation Gate Check (Spot-Only 4-Layer Sniper) ──
+    from config.settings import settings as s_config
+    if getattr(s_config, "SPOT_ONLY_MODE", False):
+        cap_gate = state.get("blackboard", {}).get("capitulation_gate", {})
+        if not cap_gate.get("passed", False):
+            reason = cap_gate.get("reason", "Unknown")
+            logger.info(f"[node_judge_agent] {symbol} Capitulation Gate failed: {reason}. Skipping LLM.")
+            return {
+                "final_decision": {
+                    "decision": "HOLD",
+                    "allocation_pct": 0,
+                    "leverage": 1,
+                    "reasoning": {
+                        "final_logic": f"Capitulation Gate 미통과: {reason}",
+                        "counter_scenario": ""
+                    },
+                    "key_factors": ["Capitulation Gate 미통과"],
+                    "gate_assessment": {"reasoning": "Capitulation Gate 미통과로 분석 조기 종료"}
+                }
+            }
+
     # Extract necessary state variables
     compact = state.get("market_data_compact", "")
     blackboard = state.get("blackboard", {})
@@ -3145,7 +3212,7 @@ class Orchestrator:
         symbol: str,
         is_emergency: bool = False,
         execute_trades: bool = True,
-        allow_perplexity: bool = False,
+        allow_web_search: bool = False,
         notification_context: str = "manual",
     ) -> Dict:
         mode = self.mode
@@ -3154,7 +3221,7 @@ class Orchestrator:
             mode,
             is_emergency=is_emergency,
             execute_trades=execute_trades,
-            allow_perplexity=allow_perplexity,
+            allow_web_search=allow_web_search,
             notification_context=notification_context,
         )
 
@@ -3164,7 +3231,7 @@ class Orchestrator:
         mode: TradingMode,
         is_emergency: bool = False,
         execute_trades: bool = True,
-        allow_perplexity: bool = False,
+        allow_web_search: bool = False,
         notification_context: str = "manual",
         playbook_context: Optional[Dict] = None,
         emergency_context: Optional[Dict] = None,
@@ -3189,7 +3256,7 @@ class Orchestrator:
                     mode,
                     is_emergency,
                     execute_trades=execute_trades,
-                    allow_perplexity=allow_perplexity,
+                    allow_web_search=allow_web_search,
                     notification_context=notification_context,
                     playbook_context=playbook_context,
                     emergency_context=emergency_context,
@@ -3200,7 +3267,7 @@ class Orchestrator:
                     mode,
                     is_emergency,
                     execute_trades=execute_trades,
-                    allow_perplexity=allow_perplexity,
+                    allow_web_search=allow_web_search,
                     notification_context=notification_context,
                     playbook_context=playbook_context,
                     emergency_context=emergency_context,
@@ -3210,7 +3277,7 @@ class Orchestrator:
                 mode=mode.value,
                 notification_context=notification_context,
                 execution_path=execution_path,
-                allow_perplexity=allow_perplexity,
+                allow_web_search=allow_web_search,
                 execute_trades=execute_trades,
                 latency_ms=(time.perf_counter() - started) * 1000.0,
                 final_decision=result if isinstance(result, dict) else {},
@@ -3239,14 +3306,14 @@ class Orchestrator:
         symbol: str,
         mode: TradingMode,
         *,
-        allow_perplexity: bool = False,
+        allow_web_search: bool = False,
         include_meta: bool = True,
         include_vlm: bool = True,
     ) -> None:
         refresh_snapshot_bundle(
             symbol,
             mode,
-            allow_perplexity=allow_perplexity,
+            allow_web_search=allow_web_search,
             include_meta=include_meta,
             include_vlm=include_vlm,
         )
@@ -3256,10 +3323,10 @@ class Orchestrator:
         symbol: str,
         mode: TradingMode,
         *,
-        allow_perplexity: bool = False,
+        allow_web_search: bool = False,
         wait_budget_s: float = 5.0,
     ) -> Dict:
-        self.refresh_snapshot_with_mode(symbol, mode, allow_perplexity=allow_perplexity)
+        self.refresh_snapshot_with_mode(symbol, mode, allow_web_search=allow_web_search)
         return run_report_hot_path(
             symbol,
             mode,
@@ -3272,16 +3339,16 @@ class Orchestrator:
         symbol: str,
         mode: TradingMode,
         *,
-        allow_perplexity: bool = False,
+        allow_web_search: bool = False,
         wait_budget_s: float = 5.0,
         notification_context: str = "analysis",
         playbook_context: Optional[Dict] = None,
     ) -> Dict:
         logger.info(
             f"Snapshot analysis start: {symbol}/{mode.value} "
-            f"context={notification_context} perplexity={'on' if allow_perplexity else 'off'}"
+            f"context={notification_context} perplexity={'on' if allow_web_search else 'off'}"
         )
-        self.refresh_snapshot_with_mode(symbol, mode, allow_perplexity=allow_perplexity)
+        self.refresh_snapshot_with_mode(symbol, mode, allow_web_search=allow_web_search)
         logger.info(f"Snapshot analysis refreshed: {symbol}/{mode.value}")
         result = run_snapshot_analysis_hot_path(
             symbol,
@@ -3298,12 +3365,12 @@ class Orchestrator:
         symbol: str,
         mode: TradingMode,
         *,
-        allow_perplexity: bool = False,
+        allow_web_search: bool = False,
         wait_budget_s: float = 5.0,
         notification_context: str = "scheduled_trigger",
         playbook_context: Optional[Dict] = None,
     ) -> Dict:
-        self.refresh_snapshot_with_mode(symbol, mode, allow_perplexity=allow_perplexity)
+        self.refresh_snapshot_with_mode(symbol, mode, allow_web_search=allow_web_search)
         result = run_snapshot_analysis_hot_path(
             symbol,
             mode,
@@ -3319,7 +3386,7 @@ class Orchestrator:
                 mode,
                 playbook_context=playbook_context,
                 reason=str(final_decision.get("replan_reason", "") or final_decision.get("reasoning", {}).get("final_logic", "")),
-                allow_perplexity=allow_perplexity,
+                allow_web_search=allow_web_search,
             )
         return result
 
@@ -3330,7 +3397,7 @@ class Orchestrator:
         *,
         playbook_context: Optional[Dict] = None,
         reason: str = "",
-        allow_perplexity: bool = False,
+        allow_web_search: bool = False,
     ) -> Dict:
         from agents.emergency_replan_agent import emergency_replan_agent
 
@@ -3353,7 +3420,7 @@ class Orchestrator:
             mode,
             is_emergency=True,
             execute_trades=False,
-            allow_perplexity=allow_perplexity,
+            allow_web_search=allow_web_search,
             notification_context="emergency_replan",
             playbook_context=playbook_context,
             emergency_context=emergency_context,
@@ -3365,7 +3432,7 @@ class Orchestrator:
         mode: TradingMode,
         is_emergency: bool,
         execute_trades: bool = True,
-        allow_perplexity: bool = False,
+        allow_web_search: bool = False,
         notification_context: str = "manual",
         playbook_context: Optional[Dict] = None,
         emergency_context: Optional[Dict] = None,
@@ -3376,7 +3443,7 @@ class Orchestrator:
             "mode": mode.value,
             "is_emergency": is_emergency,
             "execute_trades": execute_trades,
-            "allow_perplexity": allow_perplexity,
+            "allow_web_search": allow_web_search,
             "notification_context": notification_context,
             "playbook_context": playbook_context or {},
             "emergency_context": emergency_context or {},
@@ -3438,7 +3505,7 @@ class Orchestrator:
         mode: TradingMode,
         is_emergency: bool,
         execute_trades: bool = True,
-        allow_perplexity: bool = False,
+        allow_web_search: bool = False,
         notification_context: str = "manual",
         playbook_context: Optional[Dict] = None,
         emergency_context: Optional[Dict] = None,
@@ -3448,7 +3515,7 @@ class Orchestrator:
             "symbol": symbol, "mode": mode.value,
             "is_emergency": is_emergency,
             "execute_trades": execute_trades,
-            "allow_perplexity": allow_perplexity,
+            "allow_web_search": allow_web_search,
             "notification_context": notification_context,
             "playbook_context": playbook_context or {},
             "emergency_context": emergency_context or {},
@@ -3551,7 +3618,7 @@ class Orchestrator:
                         mode,
                         is_emergency=False,
                         execute_trades=True,
-                        allow_perplexity=False,
+                        allow_web_search=False,
                         notification_context="scheduled_dual",
                     )
                 except Exception as e:
@@ -3565,7 +3632,7 @@ class Orchestrator:
             TradingMode.SWING,
             is_emergency=True,
             execute_trades=True,
-            allow_perplexity=False,
+            allow_web_search=False,
             notification_context="emergency",
         )
 
@@ -3594,7 +3661,7 @@ class Orchestrator:
                 hot_result = self.run_snapshot_analysis_with_mode(
                     symbol,
                     mode,
-                    allow_perplexity=True,
+                    allow_web_search=True,
                     wait_budget_s=5.0,
                     notification_context="scheduled_daily",
                 )
@@ -3618,7 +3685,7 @@ class Orchestrator:
                     mode,
                     is_emergency=False,
                     execute_trades=True,
-                    allow_perplexity=True,
+                    allow_web_search=True,
                     notification_context="scheduled_daily",
                 )
             else:
@@ -3629,7 +3696,7 @@ class Orchestrator:
                     mode,
                     is_emergency=False,
                     execute_trades=True,
-                    allow_perplexity=True,
+                    allow_web_search=True,
                     notification_context="scheduled_daily",
                 )
 
@@ -3859,7 +3926,7 @@ class Orchestrator:
                                 self.run_snapshot_trigger_with_mode(
                                     symbol,
                                     mode,
-                                    allow_perplexity=False,
+                                    allow_web_search=False,
                                     wait_budget_s=5.0,
                                     notification_context="scheduled_trigger",
                                     playbook_context=result.get("playbook_context", {}),
@@ -3870,7 +3937,7 @@ class Orchestrator:
                                     mode,
                                     is_emergency=False,
                                     execute_trades=True,
-                                    allow_perplexity=False,
+                                    allow_web_search=False,
                                     notification_context="scheduled_trigger",
                                     playbook_context=result.get("playbook_context", {}),
                                 )

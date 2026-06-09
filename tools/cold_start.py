@@ -10,7 +10,7 @@ Loadable data sources (REST API, no WebSocket needed):
   [O] Telegram       Telethon historical messages (unlimited)
   [X] Liquidations   WebSocket only (no historical REST API)
   [X] Whale CVD      WebSocket only (aggTrade not available historically in bulk)
-  [X] Perplexity     Real-time search only
+  [X] Gemini Search     Real-time search only
 
 Usage:
   python -m tools.cold_start --mode all --days 210 --symbol BTCUSDT

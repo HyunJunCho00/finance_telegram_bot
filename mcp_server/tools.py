@@ -231,12 +231,12 @@ class MCPTools:
             return {"error": str(e)}
 
     def search_market_narrative(self, symbol: str) -> Dict:
-        """Search market narrative via Perplexity API. [Report Grade]"""
+        """Search market narrative via Gemini Search API. [Report Grade]"""
         try:
-            from collectors.perplexity_collector import perplexity_collector
+            from collectors.gemini_search_collector import gemini_search_collector
             coin = "BTC" if "BTC" in symbol.upper() else "ETH"
-            narrative = perplexity_collector.search_market_narrative(coin)
-            formatted = perplexity_collector.format_for_agents(narrative)
+            narrative = gemini_search_collector.search_market_narrative(coin)
+            formatted = gemini_search_collector.format_for_agents(narrative)
             return {
                 "symbol": symbol,
                 "narrative": formatted,
@@ -244,7 +244,7 @@ class MCPTools:
                 "raw": {k: v for k, v in narrative.items() if k != "sources"},
             }
         except Exception as e:
-            logger.error(f"Perplexity search error: {e}")
+            logger.error(f"Gemini Search search error: {e}")
             return {"error": str(e)}
 
     def search_web(self, query: str) -> Dict:

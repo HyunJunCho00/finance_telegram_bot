@@ -115,6 +115,7 @@ class ExecutionPlanner:
             atr=atr,
             total_size_usd=total_size_usd,
             params=params,
+            style=style,
         )
 
         # 청산 플랜 계산
@@ -211,6 +212,12 @@ class ExecutionPlanner:
                     sl_price = current_price * (1 + sl_pct / 100)
                     tp1_price = current_price * (1 - tp_pct / 100)
                     tp2_price = current_price * (1 - tp_pct / 100 * 1.65)
+                
+                # ANTI-STOP HUNTING: Force minimum ATR buffer even if playbook suggested SL is tight
+                if direction == "LONG":
+                    sl_price = min(sl_price, current_price - (atr * 0.5))
+                else:
+                    sl_price = max(sl_price, current_price + (atr * 0.5))
 
         # 폴백: ATR 기반 (SWING 기준: SL=1.5×ATR, TP=3.3×ATR)
         if sl_price == 0:
@@ -237,13 +244,23 @@ class ExecutionPlanner:
         atr: float,
         total_size_usd: float,
         params: Dict,
+        style: str = "",
     ) -> List[Dict]:
         """분할 진입 가격/비중/타이밍 계산."""
         entries = []
         n = params["n_entries"]
-        offsets = params["entry_offsets"][:n]
+        offsets = list(params["entry_offsets"][:n])
         weights = params["entry_weights"][:n]
         delay_per_entry = 30  # 분 단위
+
+        # ── Layer 4: Volatility-Adjusted Smart DCA ────────────────────────────
+        # 변동성(ATR)이 비정상적으로 높을 때, 좁은 거미줄은 의미가 없음. 간격을 넓게 벌림.
+        if style == "SMART_DCA" and current_price > 0:
+            atr_pct = (atr / current_price) * 100
+            if atr_pct > 1.5:
+                multiplier = min(atr_pct / 1.0, 3.0)  # 변동성에 비례하여 최대 3배까지 확장
+                offsets = [offset * multiplier for offset in offsets]
+                logger.info(f"[ExecPlan] Volatility High (ATR={atr_pct:.2f}%). Widening DCA grid by {multiplier:.2f}x")
 
         for i, (offset_atr, weight) in enumerate(zip(offsets, weights)):
             # 진입가: 현재가에서 ATR 배수만큼 이격 (LONG = 아래, SHORT = 위)

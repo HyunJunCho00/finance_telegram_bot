@@ -179,7 +179,7 @@ _CHAT_TOOLS = [
     {
         "name": "search_narrative",
         "description": (
-            "Perplexity API로 실시간 색. BTC/ETH 격 직임의 최신 이유·매크로 이벤트/뉴스 흐름 파악. "
+            "Gemini Search API로 실시간 색. BTC/ETH 격 직임의 최신 이유·매크로 이벤트/뉴스 흐름 파악. "
             "RAG로 족할 때 사용. API 쿼터(200회) 주의."
         ),
         "input_schema": {

@@ -17,13 +17,13 @@ def _iso_after(*, minutes: int = 0, hours: int = 0) -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=minutes, hours=hours)).isoformat()
 
 
-def _base_state(symbol: str, mode: TradingMode, allow_perplexity: bool, notification_context: str) -> Dict:
+def _base_state(symbol: str, mode: TradingMode, allow_web_search: bool, notification_context: str) -> Dict:
     return {
         "symbol": symbol,
         "mode": mode.value,
         "is_emergency": False,
         "execute_trades": False,
-        "allow_perplexity": allow_perplexity,
+        "allow_web_search": allow_web_search,
         "notification_context": notification_context,
         "errors": [],
         "blackboard": {},
@@ -61,11 +61,11 @@ def _apply_update(state: Dict, update: Dict) -> None:
         state[key] = value
 
 
-def refresh_market_snapshot(symbol: str, mode: TradingMode, *, wait_budget_s: float = 0.0, allow_perplexity: bool = False) -> None:
+def refresh_market_snapshot(symbol: str, mode: TradingMode, *, wait_budget_s: float = 0.0, allow_web_search: bool = False) -> None:
     import executors.orchestrator as orchestrator_module
 
     started = time.perf_counter()
-    state = _base_state(symbol, mode, allow_perplexity, "snapshot_market")
+    state = _base_state(symbol, mode, allow_web_search, "snapshot_market")
     orchestrator_module._clear_symbol_mode_caches(symbol, mode)
     _apply_update(state, orchestrator_module.node_collect_data(state))
 
@@ -91,7 +91,7 @@ def refresh_market_snapshot(symbol: str, mode: TradingMode, *, wait_budget_s: fl
         symbol=symbol,
         mode=mode.value,
         stage="market_snapshot_agent",
-        allow_perplexity=allow_perplexity,
+        allow_web_search=allow_web_search,
         latency_ms=latency_ms,
         details={"df_size": state.get("df_size", 0)},
     )
@@ -102,13 +102,13 @@ def refresh_context_bundle(
     mode: TradingMode,
     *,
     wait_budget_s: float = 0.0,
-    allow_perplexity: bool = False,
+    allow_web_search: bool = False,
     include_meta: bool = True,
 ) -> None:
     import executors.orchestrator as orchestrator_module
 
     started = time.perf_counter()
-    state = _base_state(symbol, mode, allow_perplexity, "snapshot_context")
+    state = _base_state(symbol, mode, allow_web_search, "snapshot_context")
     orchestrator_module._clear_symbol_mode_caches(symbol, mode)
     _apply_update(state, orchestrator_module.node_collect_data(state))
     _apply_update(state, orchestrator_module.node_context_gathering(state))
@@ -193,7 +193,7 @@ def refresh_context_bundle(
         symbol=symbol,
         mode=mode.value,
         stage="context_bundle",
-        allow_perplexity=allow_perplexity,
+        allow_web_search=allow_web_search,
         latency_ms=latency_ms,
         details={
             "has_narrative": bool(narrative_payload.get("narrative_text")),
@@ -208,14 +208,14 @@ def refresh_chart_bundle(
     mode: TradingMode,
     *,
     wait_budget_s: float = 0.0,
-    allow_perplexity: bool = False,
+    allow_web_search: bool = False,
     include_meta: bool = True,
     include_vlm: bool = True,
 ) -> None:
     import executors.orchestrator as orchestrator_module
 
     started = time.perf_counter()
-    state = _base_state(symbol, mode, allow_perplexity, "snapshot_chart")
+    state = _base_state(symbol, mode, allow_web_search, "snapshot_chart")
     orchestrator_module._clear_symbol_mode_caches(symbol, mode)
     _apply_update(state, orchestrator_module.node_collect_data(state))
     _apply_update(state, orchestrator_module.node_context_gathering(state))
@@ -259,7 +259,7 @@ def refresh_chart_bundle(
         symbol=symbol,
         mode=mode.value,
         stage="chart_prep_agent",
-        allow_perplexity=allow_perplexity,
+        allow_web_search=allow_web_search,
         latency_ms=(time.perf_counter() - started) * 1000.0,
         details={
             "has_chart_bytes": bool(chart_payload.get("chart_bytes")),
@@ -272,7 +272,7 @@ def refresh_snapshot_bundle(
     symbol: str,
     mode: TradingMode,
     *,
-    allow_perplexity: bool = False,
+    allow_web_search: bool = False,
     include_meta: bool = True,
     include_vlm: bool = True,
 ) -> None:
@@ -281,14 +281,14 @@ def refresh_snapshot_bundle(
     started = time.perf_counter()
     logger.info(
         f"Refreshing snapshot bundle for {symbol}/{mode.value} "
-        f"(perplexity={'on' if allow_perplexity else 'off'}, meta={'on' if include_meta else 'off'}, vlm={'on' if include_vlm else 'off'})"
+        f"(perplexity={'on' if allow_web_search else 'off'}, meta={'on' if include_meta else 'off'}, vlm={'on' if include_vlm else 'off'})"
     )
 
     # Single combined pipeline — node_collect_data / node_context_gathering run only once.
     # Previously this called refresh_context_bundle then refresh_chart_bundle separately;
     # each function called _clear_symbol_mode_caches + node_collect_data, loading 265k rows
     # twice simultaneously and causing OOM in the snapshot_narrative Cloud Run job.
-    state = _base_state(symbol, mode, allow_perplexity, "snapshot_bundle")
+    state = _base_state(symbol, mode, allow_web_search, "snapshot_bundle")
     orchestrator_module._clear_symbol_mode_caches(symbol, mode)
     _apply_update(state, orchestrator_module.node_collect_data(state))
     _apply_update(state, orchestrator_module.node_context_gathering(state))
@@ -371,7 +371,7 @@ def refresh_snapshot_bundle(
         symbol=symbol,
         mode=mode.value,
         stage="context_bundle",
-        allow_perplexity=allow_perplexity,
+        allow_web_search=allow_web_search,
         latency_ms=(time.perf_counter() - started) * 1000.0,
         details={
             "has_narrative": bool(narrative_payload.get("narrative_text")),
@@ -416,7 +416,7 @@ def refresh_snapshot_bundle(
             symbol=symbol,
             mode=mode.value,
             stage="chart_prep_agent",
-            allow_perplexity=allow_perplexity,
+            allow_web_search=allow_web_search,
             latency_ms=(time.perf_counter() - started) * 1000.0,
             details={
                 "has_chart_bytes": bool(chart_payload.get("chart_bytes")),
@@ -431,7 +431,7 @@ def refresh_snapshot_bundle(
         symbol=symbol,
         mode=mode.value,
         stage="snapshot_bundle",
-        allow_perplexity=allow_perplexity,
+        allow_web_search=allow_web_search,
         latency_ms=(time.perf_counter() - started) * 1000.0,
         details={
             "includes_chart_bundle": True,

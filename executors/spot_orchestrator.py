@@ -31,13 +31,17 @@ class SpotOrchestrator:
     # ── SpotMode.SWING ─────────────────────────────────────────────────────
 
     def maybe_mirror_swing_long(self, symbol: str, swing_decision: dict) -> None:
-        """쉽알남이 LONG APPROVED를 냈을 때 현물 미러 진입을 시도한다.
-
-        run_analysis_with_mode() 반환 직후에 호출됨.
-        SHORT / HOLD / VETO 결정은 조용히 무시.
+        """[DEPRECATED] 현물 봇이 메인 엔진으로 승격되었으므로 미러링 로직은 비활성화합니다.
+        현물은 이제 독립적인 사이클로만 진입/청산합니다.
         """
         if not SPOT_MODE_ENABLED:
             return
+        
+        from config.settings import settings
+        if getattr(settings, "SPOT_ONLY_MODE", False):
+            logger.debug(f"SpotOrchestrator: SPOT_ONLY_MODE is ON. Mirroring is disabled. Spot acts as main.")
+            return
+
         if SPOT_MODE != SpotMode.SWING:
             return
         if not isinstance(swing_decision, dict):
@@ -108,7 +112,7 @@ class SpotOrchestrator:
                 symbol,
                 TradingMode.SWING,
                 execute_trades=False,
-                allow_perplexity=True,
+                allow_web_search=True,
                 notification_context="spot_position",
             )
 
