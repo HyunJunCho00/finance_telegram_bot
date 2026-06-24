@@ -336,7 +336,15 @@ def job_routine_market_status():
     run_market_status()
 
 
-
+def job_quant_screener():
+    """Alpha Confluence Engine (Event-Driven Quant Screener)"""
+    try:
+        from scripts.run_quant_alert import run_multi_market_screener, send_telegram_alert_and_execute
+        logger.info("Running job_quant_screener (Alpha Confluence Engine)")
+        anomalies = run_multi_market_screener()
+        send_telegram_alert_and_execute(anomalies)
+    except Exception as e:
+        logger.error(f"Quant screener job error: {e}")
 
 
 
@@ -767,6 +775,13 @@ def main():
             job_routine_market_status,
             CronTrigger(minute=20),
             id='job_routine_market_status',
+            max_instances=1,
+        )
+
+        scheduler_config.scheduler.add_job(
+            job_quant_screener,
+            CronTrigger(hour='*/4', minute=5), # Run every 4 hours at xx:05
+            id='job_quant_screener',
             max_instances=1,
         )
 
