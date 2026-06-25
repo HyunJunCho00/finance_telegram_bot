@@ -565,7 +565,7 @@ def node_context_gathering(state: AnalysisState) -> dict:
 
         # 4. OI Divergence + MFI Summary (appended to funding_context)
         try:
-            oi_rows = db.client.table("funding_data").select("oi_binance", "oi_bybit", "oi_okx", "timestamp").eq("symbol", symbol).order("timestamp", desc=True).limit(12).execute()
+            oi_rows = db.client.table("funding_data").select("oi_binance,oi_bybit,oi_okx,timestamp").eq("symbol", symbol).order("timestamp", desc=True).limit(12).execute()
             if oi_rows.data and len(oi_rows.data) >= 3:
                 oi_series = [float(r.get("oi_binance", 0) or 0) + float(r.get("oi_bybit", 0) or 0) + float(r.get("oi_okx", 0) or 0) for r in oi_rows.data]
                 oi_now, oi_prev = oi_series[0], oi_series[-1]
@@ -1308,7 +1308,7 @@ def node_triage(state: AnalysisState) -> dict:
                 
                 # Fetch recent OI to detect if volume is from new positions or just liquidations
                 try:
-                    oi_res = db.client.table("funding_data").select("oi_binance", "timestamp").eq("symbol", symbol).order("timestamp", desc=True).limit(2).execute()
+                    oi_res = db.client.table("funding_data").select("oi_binance,timestamp").eq("symbol", symbol).order("timestamp", desc=True).limit(2).execute()
                     if oi_res.data and len(oi_res.data) >= 2:
                         recent_oi = float(oi_res.data[0].get("oi_binance", 0))
                         prev_oi = float(oi_res.data[1].get("oi_binance", 0))

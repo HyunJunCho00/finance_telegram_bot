@@ -52,8 +52,8 @@ sudo -u postgres psql -d ${DB_NAME} -f "${SQL_DIR}/20260407_blackrock_layers.sql
 sudo -u postgres psql -d ${DB_NAME} -f "${SQL_DIR}/20260408_paper_orders.sql"
 sudo -u postgres psql -d ${DB_NAME} -f "${SQL_DIR}/20260505_news_impact_log.sql"
 
-# OMS 스키마 (EXECUTION_DB_URL이 별도 DB를 쓰면 스킵해도 됨)
-# sudo -u postgres psql -d ${DB_NAME} -f "${SQL_DIR}/schema_oms_postgres.sql"
+# OMS 스키마 (EXECUTION_DB_URL을 같은 DB로 통합 — Aiven 불필요)
+sudo -u postgres psql -d ${DB_NAME} -f "${SQL_DIR}/schema_oms_postgres.sql"
 
 # 소유권 정리
 sudo -u postgres psql -d ${DB_NAME} -c "
@@ -73,6 +73,7 @@ echo "  DB:   ${DB_NAME}"
 echo "  User: ${DB_USER}"
 echo "  Pass: ${DB_PASS}"
 echo ""
-echo "  .env에 추가:"
-echo "  DATABASE_URL=postgresql://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}"
+echo "  .env / Secret Manager에 추가 (VM 외부 IP 사용):"
+echo "  DATABASE_URL=postgresql://${DB_USER}:${DB_PASS}@<VM_EXTERNAL_IP>:5432/${DB_NAME}"
+echo "  EXECUTION_DB_URL=postgresql://${DB_USER}:${DB_PASS}@<VM_EXTERNAL_IP>:5432/${DB_NAME}"
 echo "=========================================="

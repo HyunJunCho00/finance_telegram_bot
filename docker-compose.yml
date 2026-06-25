@@ -147,6 +147,7 @@ services:
       - /opt/app/sql/20260407_blackrock_layers.sql:/docker-entrypoint-initdb.d/03_blackrock_layers.sql:ro
       - /opt/app/sql/20260408_paper_orders.sql:/docker-entrypoint-initdb.d/04_paper_orders.sql:ro
       - /opt/app/sql/20260505_news_impact_log.sql:/docker-entrypoint-initdb.d/05_news_impact_log.sql:ro
+      - /opt/app/sql/schema_oms_postgres.sql:/docker-entrypoint-initdb.d/06_schema_oms.sql:ro
     ports:
       - "5432:5432"
     restart: always

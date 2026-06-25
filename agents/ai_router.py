@@ -191,7 +191,7 @@ class CloudflareGenerator:
                     }
                 )
             timeout_seconds = max(5.0, float(getattr(settings, "CLOUDFLARE_AI_TIMEOUT_SECONDS", 25.0)))
-            resp = self._session.post(self._url(model_id), json=payload, timeout=timeout_seconds)
+            resp = self._session.post(self._url(model_id), json=payload, timeout=(5.0, timeout_seconds))
             resp.raise_for_status()
             body = resp.json()
             text = self._extract_text(body)
@@ -276,7 +276,7 @@ class AIClient:
         self._openrouter_client = None
         self._cf_generator = CloudflareGenerator()
 
-        self.default_model_id = "gemini-3-flash-preview"
+        self.default_model_id = "gemini-3.1-flash"
         self.premium_model_id = settings.MODEL_JUDGE
 
         # Per-backend locks: gemini/cerebras/groq/cf 각각 독립적으로 rate-limit
@@ -333,6 +333,7 @@ class AIClient:
             self._groq_client = OpenAI(
                 base_url="https://api.groq.com/openai/v1",
                 api_key=settings.GROQ_API_KEY,
+                max_retries=0,  # circuit breaker handles retry; SDK default(2) causes 3x timeout waste
             )
         return self._groq_client
 
@@ -896,7 +897,8 @@ class AIClient:
                 return response.text or ""
             except Exception as e:
                 err_str = str(e).lower()
-                if "429" in err_str or "resource" in err_str or "503" in err_str or "exhausted" in err_str:
+                if ("429" in err_str or "503" in err_str or "exhausted" in err_str
+                        or ("resource" in err_str and "404" not in err_str and "not_found" not in err_str)):
                     self._mark_model_exhausted(model_id, 3600)
                     if attempt < max_retries - 1:
                         sleep_t = base_delay * (2 ** attempt)
