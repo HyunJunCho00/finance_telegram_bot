@@ -108,6 +108,19 @@ class DuneCollector:
                 resolved.append(DuneQueryConfig(query_id, f"query_{query_id}", "custom", 60))
         return resolved
 
+    def _parse_db_timestamp(self, val: Any) -> datetime | None:
+        if not val:
+            return None
+        if isinstance(val, datetime):
+            ts = val
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return ts
+        try:
+            return datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
     def _should_run_now(self, query_cfg: DuneQueryConfig) -> bool:
         try:
             latest = db.get_latest_dune_query_result(query_cfg.query_id, columns="collected_at")
@@ -117,13 +130,8 @@ class DuneCollector:
         if not latest:
             return True
 
-        collected_at = latest.get("collected_at")
-        if not collected_at:
-            return True
-
-        try:
-            ts = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
-        except ValueError:
+        ts = self._parse_db_timestamp(latest.get("collected_at"))
+        if not ts:
             return True
 
         due_delta = timedelta(minutes=query_cfg.cadence_minutes)
@@ -163,12 +171,8 @@ class DuneCollector:
                 continue
             if not latest:
                 continue
-            collected_at = latest.get("collected_at")
-            if not collected_at:
-                continue
-            try:
-                ts = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
-            except ValueError:
+            ts = self._parse_db_timestamp(latest.get("collected_at"))
+            if not ts:
                 continue
             if latest_ts is None or ts > latest_ts:
                 latest_ts = ts
@@ -193,12 +197,8 @@ class DuneCollector:
                 continue
             if not latest:
                 continue
-            collected_at = latest.get("collected_at")
-            if not collected_at:
-                continue
-            try:
-                ts = datetime.fromisoformat(collected_at.replace("Z", "+00:00"))
-            except ValueError:
+            ts = self._parse_db_timestamp(latest.get("collected_at"))
+            if not ts:
                 continue
             if ts.date() == today:
                 count += 1
