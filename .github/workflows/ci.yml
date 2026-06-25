@@ -106,7 +106,7 @@ jobs:
               --region=${{ env.REGION }} \
               --network=default \
               --subnet=default \
-              --vpc-egress=all-traffic \
+              --vpc-egress=private-ranges-only \
               --quiet || echo "WARNING: $job update failed"
           done
 
